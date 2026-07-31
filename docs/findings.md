@@ -2,7 +2,7 @@
 
 Finding 是 adapter 的兼容证据格式，描述一个不一致状态，不等同于“可以自动删除”。计划生成器会把同一保存位置和完整对话 ID 的 Finding 聚合成 Observation，再根据当前列表记录、全部内容文件、关联任务范围、活跃引用和扫描状态生成 CandidateAction。
 
-所有问题都会显示候选动作。当前只有 `delete_conversation`（删除整条对话）执行器可用；其他动作会保留在结构化输出中，并明确标为不可用。
+所有问题都会显示候选动作。当前可执行的是 `delete_conversation`（删除整条对话）和作为独立文件资源处理的 `repair_legacy_index`；其他动作会保留在结构化输出中，并明确标为不可用。
 
 ## 前端残留
 
@@ -67,7 +67,9 @@ Codex `0.144.6` 隔离验收已确认官方接口能够删除合成的有效 rol
 
 ### `legacy_index_only`
 
-某些旧版 Codex 可能还使用不同索引格式。能够识别但不能由当前安全路径处理的旧索引，应标记为 unsupported，而不是直接修改。
+某些旧版 Codex 使用聚合的 `session_index.jsonl`。Janitor 会逐行清点完整文件，并联合当前 SQLite 列表记录和活动/归档 rollout 证明哪些行已无存活会话。格式错误、无法读取的 live 证据、路径对象不安全或状态漂移都会阻止修复。
+
+该索引是文件级资源，不是会话 ID 集合：不能使用 `--thread-id` 选择，不会进入 `all`，也不能与会话删除混合执行。修复会重新清点并核对审批快照，在 Codex home 级独占锁下先创建带清单和哈希的持久备份，再原子替换；还原只接受有效备份 ID，并拒绝覆盖备份后发生的其他修改。
 
 ## 常用字段
 
@@ -99,6 +101,6 @@ Codex `0.144.6` 隔离验收已确认官方接口能够删除合成的有效 rol
 | 多份内容文件 | `quarantine_artifacts`、`delete_conversation`、`keep` | 隔离未实现；身份和范围可验证时可逐项选择 `high` 删除 |
 | 列表路径错位 | `repair_index_path`、`delete_conversation`、`keep` | 修复未实现；身份和范围可验证时可逐项选择 `high` 删除 |
 | 无效关联记录 | `remove_broken_relation`、可选 `delete_conversation`、`keep` | 单独关系修复未实现；记录指向的子对话身份、来源与精确范围均可验证时，可逐项选择 `high` 风险整条删除 |
-| 旧聚合索引 | `repair_legacy_index`、`keep` | 修复未实现，不能把聚合项当对话 ID |
+| 旧聚合索引 | `repair_legacy_index`、`keep` | 文件级 `high` 风险动作；严格清点、重新审批、客户端关闭、备份和锁均满足时可执行 |
 
 CandidateAction 的稳定 action ID、风险、可用性、不可用原因、ActionImpact 和快照指纹都进入 JSON。自动化应使用完整 action ID，不应持久化交互编号。

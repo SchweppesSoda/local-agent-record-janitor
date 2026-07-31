@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import RolloutRecord
+from .models import RolloutRecord, ThreadSourceInfo
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -25,6 +25,90 @@ class SpawnEdgeRecord:
     parent_thread_id: str
     child_thread_id: str
     status: str | None
+
+
+def parse_thread_source(
+    value: object,
+    *,
+    source_label: str = "source",
+) -> ThreadSourceInfo:
+    """Normalize historical ``source.subagent.thread_spawn`` shapes."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() == "subagent":
+            return ThreadSourceInfo(
+                is_subagent=True,
+                metadata_sources=(source_label,),
+            )
+        try:
+            value = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            return ThreadSourceInfo()
+
+    if not isinstance(value, dict):
+        return ThreadSourceInfo()
+
+    is_subagent = False
+    containers: list[dict[str, Any]] = []
+    if "subagent" in value:
+        is_subagent = True
+        subagent = value.get("subagent")
+        if isinstance(subagent, dict):
+            containers.append(subagent)
+    if "thread_spawn" in value:
+        is_subagent = True
+        containers.append(value)
+    if not is_subagent:
+        return ThreadSourceInfo()
+
+    parents: set[str] = set()
+    nicknames: list[str] = []
+    roles: list[str] = []
+    paths: list[str] = []
+    for container in containers:
+        spawn = container.get("thread_spawn")
+        field_containers = [container]
+        if isinstance(spawn, dict):
+            field_containers.append(spawn)
+            parent = _source_text(spawn.get("parent_thread_id"))
+            if parent is not None:
+                parents.add(parent)
+        for field_container in field_containers:
+            _append_source_text(
+                nicknames, field_container.get("agent_nickname")
+            )
+            _append_source_text(roles, field_container.get("agent_role"))
+            _append_source_text(paths, field_container.get("agent_path"))
+
+    nickname, nickname_conflict = _one_source_value(nicknames)
+    role, role_conflict = _one_source_value(roles)
+    path, path_conflict = _one_source_value(paths)
+    conflicts = []
+    if nickname_conflict:
+        conflicts.append(
+            f"{source_label}.agent_nickname has conflicting values: "
+            f"{_source_values_json(nicknames)}"
+        )
+    if role_conflict:
+        conflicts.append(
+            f"{source_label}.agent_role has conflicting values: "
+            f"{_source_values_json(roles)}"
+        )
+    if path_conflict:
+        conflicts.append(
+            f"{source_label}.agent_path has conflicting values: "
+            f"{_source_values_json(paths)}"
+        )
+    return ThreadSourceInfo(
+        is_subagent=True,
+        parent_thread_ids=tuple(sorted(parents)),
+        agent_nickname=nickname,
+        agent_role=role,
+        agent_path=path,
+        metadata_sources=(source_label,),
+        metadata_conflicts=tuple(conflicts),
+    )
 
 
 def scan_rollouts(codex_home: Path) -> dict[str, RolloutRecord]:
@@ -410,32 +494,135 @@ def read_thread_index(
     return {row["id"]: dict(row) for row in rows}
 
 
+_THREAD_METADATA_COLUMNS = (
+    "rollout_path",
+    "archived",
+    "source",
+    "thread_source",
+    "name",
+    "title",
+    "cwd",
+    "git_origin_url",
+    "agent_nickname",
+    "agent_role",
+    "agent_path",
+    "originator",
+)
+
+
+def read_thread_metadata(
+    codex_home: Path,
+    thread_ids: Iterable[str],
+    *,
+    strict: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Read optional identity columns for only the requested thread IDs.
+
+    Unlike :func:`read_thread_index`, absent optional columns are not
+    projected as ``NULL``.  Callers can therefore distinguish an older schema
+    that lacks a column from a current schema in which the stored value is
+    actually null.  Unknown columns are never interpolated into SQL.
+    """
+
+    ids = sorted(
+        {
+            thread_id
+            for thread_id in thread_ids
+            if isinstance(thread_id, str) and thread_id
+        }
+    )
+    state_db = codex_home / "state_5.sqlite"
+    if not ids or not state_db.is_file():
+        return {}
+    try:
+        with closing(connect_readonly(state_db)) as connection:
+            if not table_exists(connection, "threads"):
+                if strict:
+                    raise CodexStateReadError(
+                        f"{state_db} is incompatible: required table "
+                        "'threads' is missing"
+                    )
+                return {}
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(threads)")
+                if isinstance(row["name"], str)
+            }
+            if "id" not in columns:
+                if strict:
+                    raise CodexStateReadError(
+                        f"{state_db} is incompatible: table 'threads' is "
+                        "missing column(s) id"
+                    )
+                return {}
+
+            projections = ["id"]
+            projections.extend(
+                column
+                for column in _THREAD_METADATA_COLUMNS
+                if column in columns
+            )
+            rows: list[sqlite3.Row] = []
+            # Stay below conservative SQLite host-parameter limits while
+            # preserving one read-only connection and one schema snapshot.
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT {", ".join(projections)}
+                        FROM threads
+                        WHERE id IN ({placeholders})
+                        """,
+                        batch,
+                    ).fetchall()
+                )
+    except sqlite3.Error as exc:
+        if strict:
+            raise CodexStateReadError(
+                f"Could not inspect {state_db}: {exc}"
+            ) from exc
+        return {}
+    return {
+        row["id"]: dict(row)
+        for row in rows
+        if isinstance(row["id"], str) and row["id"]
+    }
+
+
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
 def _source_parent_ids(value: object) -> set[str]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return set()
-    if not isinstance(value, dict):
-        return set()
+    return set(parse_thread_source(value).parent_thread_ids)
 
-    candidates: list[object] = [value]
-    subagent = value.get("subagent")
-    if isinstance(subagent, dict):
-        candidates.append(subagent)
 
-    parents: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        spawn = candidate.get("thread_spawn")
-        if not isinstance(spawn, dict):
-            continue
-        parent = spawn.get("parent_thread_id")
-        if isinstance(parent, str) and parent:
-            parents.add(parent)
-    return parents
+def _source_text(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def _append_source_text(values: list[str], value: object) -> None:
+    text = _source_text(value)
+    if text is not None:
+        values.append(text)
+
+
+def _one_source_value(values: Iterable[str]) -> tuple[str | None, bool]:
+    distinct = set(values)
+    if not distinct:
+        return None, False
+    if len(distinct) != 1:
+        return None, True
+    return next(iter(distinct)), False
+
+
+def _source_values_json(values: Iterable[str]) -> str:
+    return json.dumps(
+        sorted(set(values)),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )

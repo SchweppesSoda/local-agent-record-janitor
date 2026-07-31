@@ -15,6 +15,7 @@ from codex_session_janitor.cleaner import (
     CleanupResult,
     ExpectedDeletionScope,
     finding_key,
+    scan_adapters,
 )
 from codex_session_janitor.cli import (
     ActionSelectionError,
@@ -36,7 +37,7 @@ from codex_session_janitor.cli import (
     _write_action_catalog,
     _write_selected_action_plan,
 )
-from codex_session_janitor.models import Finding
+from codex_session_janitor.models import ConversationSummary, Finding
 from codex_session_janitor.planning import build_cleanup_plan
 from tests.support import create_thread_index, write_rollout
 
@@ -576,8 +577,45 @@ def _display_plan() -> SimpleNamespace:
         },
         "risk": action.risk,
     }
+    root_summary = ConversationSummary(
+        thread_id="conversation-full-id",
+        display_name="Root conversation",
+        display_name_source="threads.title",
+        cwd="C:/Projects/root-project",
+        project_label="root-project",
+        indexed=True,
+        archived=False,
+        originator="Codex Desktop",
+        metadata_sources=("threads.title", "session_meta"),
+    )
+    child_summary = ConversationSummary(
+        thread_id="child-full-id",
+        display_name="Review child task",
+        display_name_source="threads.name",
+        cwd="C:/Projects/child-project",
+        project_label="child-project",
+        is_subagent=True,
+        agent_nickname="Socrates",
+        agent_role="reviewer",
+        agent_path="/root/review_child",
+        parent_thread_ids=("conversation-full-id",),
+        indexed=False,
+        archived=False,
+        originator="codex_cli_rs",
+        metadata_sources=("session_meta.source",),
+    )
     plan = SimpleNamespace(
         storages=(storage,),
+        conversations=(
+            SimpleNamespace(target=action.target, summary=root_summary),
+            SimpleNamespace(
+                target=SimpleNamespace(
+                    storage_id=storage.storage_id,
+                    thread_id="child-full-id",
+                ),
+                summary=child_summary,
+            ),
+        ),
         observations=(observation,),
         actions=(action,),
     )
@@ -642,7 +680,48 @@ class ActionOutputTests(unittest.TestCase):
         self.assertIn("候选动作：永久删除整条对话", rendered)
         self.assertIn("问题：对话列表记录存在", rendered)
         self.assertIn("由该对话创建的关联任务对话 1 条", rendered)
+        self.assertIn("会话名称：Root conversation", rendered)
+        self.assertIn("项目：root-project", rendered)
+        self.assertIn("会话名称：Review child task", rendered)
+        self.assertIn("子代理名称：Socrates", rendered)
+        self.assertIn("完整会话 ID：child-full-id", rendered)
         self.assertNotIn("thread index remains", rendered)
+
+    def test_catalog_limit_counts_targets_not_actions(self) -> None:
+        plan = _display_plan()
+        root_action = plan.actions[0]
+        keep = _action(
+            "keep:storage-one:conversation",
+            kind="keep",
+            storage_id="storage-one",
+            thread_id="conversation-full-id",
+        )
+        keep.risk = "low"
+        keep.available = True
+        keep.unavailable_reason = None
+        keep.impact = root_action.impact
+        keep.observation_ids = root_action.observation_ids
+        keep.requires_explicit_selection = False
+        second = _action(
+            "delete:storage-one:second",
+            storage_id="storage-one",
+            thread_id="second-conversation",
+        )
+        second.risk = "low"
+        second.available = True
+        second.unavailable_reason = None
+        second.impact = root_action.impact
+        second.observation_ids = root_action.observation_ids
+        second.requires_explicit_selection = False
+        plan.actions = (root_action, keep, second)
+
+        output = StringIO()
+        _write_action_catalog(plan, stdout=output, limit=1)
+        rendered = output.getvalue()
+        self.assertIn("候选动作：永久删除整条对话", rendered)
+        self.assertIn("候选动作：保留，不做更改", rendered)
+        self.assertNotIn("second-conversation", rendered)
+        self.assertIn("另有 1 个目标未显示", rendered)
 
     def test_known_unavailable_reasons_are_fully_chinese(self) -> None:
         unimplemented = {
@@ -785,10 +864,13 @@ class ActionOutputTests(unittest.TestCase):
         _write_selected_action_plan(
             plan.actions,
             plan.storages,
+            conversations=plan.conversations,
             stdout=output,
         )
         rendered = output.getvalue()
         self.assertIn("将一同删除的关联任务对话：1 条", rendered)
+        self.assertIn("警告：级联范围跨项目", rendered)
+        self.assertIn("子代理名称：Socrates", rendered)
         self.assertNotIn("descendant", rendered.lower())
         self.assertNotIn("无后代", rendered)
 
@@ -872,6 +954,44 @@ class ActionOutputTests(unittest.TestCase):
             "警告：请求曾报错，但磁盘验证确认已删除：request timed out",
             output.getvalue(),
         )
+
+    def test_json_result_reuses_catalog_and_includes_action_id(self) -> None:
+        plan = _display_plan()
+        plan.plan_fingerprint = "result-plan"
+        finding = Finding(
+            platform="native",
+            platform_session_id="session",
+            thread_id="conversation-full-id",
+            reason="test",
+            platform_db=Path("C:/Codex/state_5.sqlite"),
+            codex_home=Path("C:/Codex"),
+        )
+        report = CleanupReport(
+            planned=[finding],
+            results=[CleanupResult(finding=finding, status="deleted")],
+        )
+        output = StringIO()
+        _emit_planned_cleanup_result(
+            report,
+            selected_actions=plan.actions,
+            plan=plan,
+            json_output=True,
+            limit=1,
+            stdout=output,
+            stderr=StringIO(),
+        )
+
+        payload = json.loads(output.getvalue())
+        result = payload["results"][0]
+        self.assertEqual(result["action_id"], plan.actions[0].action_id)
+        self.assertEqual(
+            [
+                item["summary"]["display_name"]
+                for item in result["affected_conversations"]
+            ],
+            ["Root conversation", "Review child task"],
+        )
+        self.assertEqual(len(payload["planning_conversations"]), 2)
 
 
 class _EmptyAdapter:
@@ -1015,6 +1135,123 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(result, EXIT_ERROR)
         self.assertIn("--yes 只跳过最终确认", errors.getvalue())
 
+    def test_noninteractive_high_risk_execution_requires_plan_fingerprint(self) -> None:
+        plan = _display_plan()
+        plan.actions[0].risk = "high"
+        plan.plan_fingerprint = "approved-plan"
+        output = StringIO()
+        with patch(
+            "codex_session_janitor.planning.build_cleanup_plan",
+            return_value=plan,
+        ):
+            result = main(
+                (
+                    "clean",
+                    "--json",
+                    "--yes",
+                    "--action-id",
+                    plan.actions[0].action_id,
+                ),
+                adapters=(_EmptyAdapter(),),
+                stdin=StringIO(),
+                stdout=output,
+                stderr=StringIO(),
+            )
+        self.assertEqual(result, EXIT_ERROR)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["error"]["kind"],
+            "approval_binding_required",
+        )
+
+    def test_legacy_repair_and_restore_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            codex_home = Path(root) / "codex-home"
+            create_thread_index(codex_home, [])
+            legacy_path = codex_home / "session_index.jsonl"
+            original = (
+                json.dumps(
+                    {"id": "residual-id", "thread_name": "Old title"}
+                )
+                + "\n"
+            )
+            legacy_path.write_text(original, encoding="utf-8")
+            adapter = NativeIntegrityAdapter(codex_home=codex_home)
+            approved_plan = build_cleanup_plan(scan_adapters((adapter,)))
+            repair_action = next(
+                action
+                for action in approved_plan.actions
+                if str(getattr(action.kind, "value", action.kind))
+                == "repair_legacy_index"
+            )
+
+            blocked_output = StringIO()
+            blocked_exit = main(
+                (
+                    "clean",
+                    "--json",
+                    "--yes",
+                    "--action-id",
+                    repair_action.action_id,
+                    "--plan-fingerprint",
+                    approved_plan.plan_fingerprint,
+                ),
+                adapters=(adapter,),
+                stdin=StringIO(),
+                stdout=blocked_output,
+                stderr=StringIO(),
+            )
+            self.assertEqual(blocked_exit, EXIT_ERROR)
+            self.assertTrue(json.loads(blocked_output.getvalue())["blocked"])
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), original)
+
+            repair_output = StringIO()
+            repair_exit = main(
+                (
+                    "clean",
+                    "--json",
+                    "--yes",
+                    "--clients-closed",
+                    "--action-id",
+                    repair_action.action_id,
+                    "--plan-fingerprint",
+                    approved_plan.plan_fingerprint,
+                ),
+                adapters=(adapter,),
+                stdin=StringIO(),
+                stdout=repair_output,
+                stderr=StringIO(),
+            )
+            self.assertEqual(repair_exit, EXIT_OK)
+            repair_payload = json.loads(repair_output.getvalue())
+            self.assertEqual(repair_payload["status"], "repaired")
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), "")
+            backup_id = repair_payload["repair"]["backup_id"]
+
+            restore_output = StringIO()
+            restore_exit = main(
+                (
+                    "restore-legacy-index",
+                    "--json",
+                    "--yes",
+                    "--clients-closed",
+                    "--codex-home",
+                    str(codex_home),
+                    "--backup-id",
+                    backup_id,
+                ),
+                stdin=StringIO(),
+                stdout=restore_output,
+                stderr=StringIO(),
+            )
+            self.assertEqual(restore_exit, EXIT_OK)
+            restore_payload = json.loads(restore_output.getvalue())
+            self.assertEqual(restore_payload["status"], "restored")
+            self.assertEqual(
+                legacy_path.read_text(encoding="utf-8"),
+                original,
+            )
+
     def test_json_yes_without_selector_is_one_complete_document(self) -> None:
         output = StringIO()
         with patch(
@@ -1083,6 +1320,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertIn("planning_errors", payload)
         clean.assert_called_once()
         kwargs = clean.call_args.kwargs
+        self.assertTrue(callable(kwargs["pre_delete_validator"]))
         self.assertNotIn("approved_descendants", kwargs)
         self.assertEqual(
             kwargs["expected_scopes"][finding_key(finding)],
@@ -1142,24 +1380,35 @@ class MainFlowTests(unittest.TestCase):
 
                 server = _EnterMutatingServer(enter)
                 output = StringIO()
+                error_output = StringIO()
+                adapter = NativeIntegrityAdapter(codex_home=codex_home)
+                approved_fingerprint = build_cleanup_plan(
+                    scan_adapters((adapter,))
+                ).plan_fingerprint
                 result = main(
                     (
                         "clean",
                         "--yes",
                         "--thread-id",
                         thread_id,
+                        "--plan-fingerprint",
+                        approved_fingerprint,
                     ),
-                    adapters=(NativeIntegrityAdapter(codex_home=codex_home),),
+                    adapters=(adapter,),
                     stdin=StringIO(),
                     stdout=output,
-                    stderr=StringIO(),
+                    stderr=error_output,
                     app_server_factory=lambda **_kwargs: server,
                     binary_resolver=lambda _hint: Path("codex"),
                 )
 
                 self.assertEqual(result, EXIT_ERROR)
                 self.assertEqual(server.deleted_thread_ids, [])
-                self.assertIn("未成功 1 条", output.getvalue())
+                self.assertIn(
+                    "未成功 1 条",
+                    output.getvalue(),
+                    error_output.getvalue(),
+                )
 
     def test_failed_unrelated_storage_is_visible_but_healthy_action_executes(
         self,

@@ -19,6 +19,10 @@ from .codex_state import (
     read_thread_index,
     rollout_state_fingerprint,
 )
+from .conversation_metadata import (
+    read_conversation_summaries,
+    read_legacy_thread_names,
+)
 from .discovery import choose_codex_binary
 from .models import Finding
 
@@ -183,6 +187,7 @@ class _AppServerContext(Protocol):
 AppServerFactory = Callable[..., _AppServerContext]
 BinaryResolver = Callable[[Path | None], Path | None]
 FindingVerifier = Callable[[Finding], VerificationResult]
+PreDeleteValidator = Callable[[Finding], None]
 CleanupTargetKey = tuple[str, str] | str
 ApprovedDescendants = Mapping[CleanupTargetKey, Iterable[str]]
 ApprovedIntegrityDeletes = Mapping[CleanupTargetKey, Iterable[str]]
@@ -204,6 +209,7 @@ class ExpectedDeletionScope:
     indexed_thread_ids: tuple[str, ...] = ()
     rollout_paths: tuple[str, ...] = ()
     rollout_state_fingerprints: tuple[str, ...] | None = None
+    conversation_metadata_fingerprints: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, list[str] | None]:
         return {
@@ -214,6 +220,11 @@ class ExpectedDeletionScope:
                 None
                 if self.rollout_state_fingerprints is None
                 else list(self.rollout_state_fingerprints)
+            ),
+            "conversation_metadata_fingerprints": (
+                None
+                if self.conversation_metadata_fingerprints is None
+                else list(self.conversation_metadata_fingerprints)
             ),
         }
 
@@ -536,6 +547,7 @@ def clean_findings(
     approved_descendants: ApprovedDescendants | None = None,
     expected_scopes: ExpectedDeletionScopes | None = None,
     approved_integrity_deletes: ApprovedIntegrityDeletes | None = None,
+    pre_delete_validator: PreDeleteValidator | None = None,
 ) -> CleanupReport:
     """Delete findings through Codex app-server and verify every target.
 
@@ -598,6 +610,7 @@ def clean_findings(
             approved_descendants=approved_descendants,
             expected_scopes=expected_scopes,
             approved_integrity_deletes=approved_integrity_deletes,
+            pre_delete_validator=pre_delete_validator,
             selected_binary_hints=binary_hints_by_home.get(
                 home_key,
                 (),
@@ -781,6 +794,7 @@ def _clean_group(
     approved_descendants: ApprovedDescendants | None,
     expected_scopes: ExpectedDeletionScopes | None,
     approved_integrity_deletes: ApprovedIntegrityDeletes | None,
+    pre_delete_validator: PreDeleteValidator | None,
     selected_binary_hints: Sequence[Path],
 ) -> None:
     codex_home = findings[0].codex_home
@@ -1125,6 +1139,11 @@ def _clean_group(
                             and expected_scope.rollout_state_fingerprints
                             is not None
                         ),
+                        capture_conversation_metadata_fingerprints=(
+                            expected_scope is not None
+                            and expected_scope.conversation_metadata_fingerprints
+                            is not None
+                        ),
                     )
                 except Exception as exc:
                     capture_issues.append(
@@ -1137,6 +1156,10 @@ def _clean_group(
                         verification_finding,
                         include_rollout_state_fingerprints=(
                             expected_scope.rollout_state_fingerprints
+                            is not None
+                        ),
+                        include_conversation_metadata_fingerprints=(
+                            expected_scope.conversation_metadata_fingerprints
                             is not None
                         ),
                     )
@@ -1170,7 +1193,80 @@ def _clean_group(
                 )
                 return
 
-            for finding, descendants, verification_finding in captured_scopes:
+            for capture_index, (
+                finding,
+                descendants,
+                verification_finding,
+            ) in enumerate(captured_scopes):
+                if expected_scopes is not None:
+                    expected_scope, expected_present = (
+                        resolved_expected_scopes[finding_key(finding)]
+                    )
+                    assert expected_present and expected_scope is not None
+                    try:
+                        immediate_finding = _with_verification_scope(
+                            finding,
+                            descendants,
+                            require_indexed_rollout_identity=True,
+                            approved_integrity_types=(
+                                resolved_integrity_approvals[
+                                    finding_key(finding)
+                                ][0]
+                            ),
+                            capture_rollout_state_fingerprints=(
+                                expected_scope.rollout_state_fingerprints
+                                is not None
+                            ),
+                            capture_conversation_metadata_fingerprints=(
+                                expected_scope.conversation_metadata_fingerprints
+                                is not None
+                            ),
+                        )
+                        immediate_scope = _captured_deletion_scope(
+                            immediate_finding,
+                            include_rollout_state_fingerprints=(
+                                expected_scope.rollout_state_fingerprints
+                                is not None
+                            ),
+                            include_conversation_metadata_fingerprints=(
+                                expected_scope.conversation_metadata_fingerprints
+                                is not None
+                            ),
+                        )
+                        if immediate_scope != expected_scope:
+                            raise RuntimeError(
+                                "exact native scope changed "
+                                f"({_deletion_scope_difference(expected_scope, immediate_scope)})"
+                            )
+                        if pre_delete_validator is not None:
+                            pre_delete_validator(finding)
+                    except Exception as exc:
+                        error = (
+                            "Cleanup was blocked by the immediate pre-delete "
+                            f"scope check for {finding.thread_id}; no further "
+                            f"deletion request was sent: {str(exc) or repr(exc)}."
+                        )
+                        report.results.extend(
+                            CleanupResult(
+                                finding=pending_finding,
+                                status="unknown",
+                                error=error,
+                                impacted_thread_ids=tuple(
+                                    sorted(
+                                        {
+                                            pending_finding.thread_id,
+                                            *pending_descendants,
+                                        }
+                                    )
+                                ),
+                            )
+                            for (
+                                pending_finding,
+                                pending_descendants,
+                                _pending_verification,
+                            ) in captured_scopes[capture_index:]
+                        )
+                        break
                 request_error: str | None = None
                 try:
                     server.delete_thread(finding.thread_id)
@@ -1490,6 +1586,9 @@ def _resolve_expected_scope(
         rollout_state_fingerprints = (
             raw_scope.rollout_state_fingerprints
         )
+        conversation_metadata_fingerprints = (
+            raw_scope.conversation_metadata_fingerprints
+        )
     elif isinstance(raw_scope, Mapping):
         descendants = _scope_field_values(
             raw_scope,
@@ -1512,6 +1611,17 @@ def _resolve_expected_scope(
             else _scope_field_values(
                 raw_scope,
                 "rollout_state_fingerprints",
+            )
+        )
+        raw_metadata_fingerprints = raw_scope.get(
+            "conversation_metadata_fingerprints"
+        )
+        conversation_metadata_fingerprints = (
+            None
+            if raw_metadata_fingerprints is None
+            else _scope_field_values(
+                raw_scope,
+                "conversation_metadata_fingerprints",
             )
         )
     else:
@@ -1564,6 +1674,19 @@ def _resolve_expected_scope(
                 )
             )
         ),
+        conversation_metadata_fingerprints=(
+            None
+            if conversation_metadata_fingerprints is None
+            else tuple(
+                sorted(
+                    {
+                        item
+                        for item in conversation_metadata_fingerprints
+                        if isinstance(item, str) and item
+                    }
+                )
+            )
+        ),
     ), True
 
 
@@ -1590,6 +1713,7 @@ def _captured_deletion_scope(
     finding: Finding,
     *,
     include_rollout_state_fingerprints: bool = False,
+    include_conversation_metadata_fingerprints: bool = False,
 ) -> ExpectedDeletionScope:
     return ExpectedDeletionScope(
         descendant_thread_ids=tuple(
@@ -1615,6 +1739,16 @@ def _captured_deletion_scope(
             if include_rollout_state_fingerprints
             else None
         ),
+        conversation_metadata_fingerprints=(
+            tuple(
+                finding.details.get(
+                    "captured_conversation_metadata_fingerprints",
+                    (),
+                )
+            )
+            if include_conversation_metadata_fingerprints
+            else None
+        ),
     )
 
 
@@ -1630,6 +1764,11 @@ def _deletion_scope_difference(
         *(
             ("rollout_state_fingerprints",)
             if expected.rollout_state_fingerprints is not None
+            else ()
+        ),
+        *(
+            ("conversation_metadata_fingerprints",)
+            if expected.conversation_metadata_fingerprints is not None
             else ()
         ),
     ):
@@ -1681,6 +1820,7 @@ def _with_verification_scope(
     require_indexed_rollout_identity: bool = False,
     approved_integrity_types: frozenset[str] | set[str] = frozenset(),
     capture_rollout_state_fingerprints: bool = False,
+    capture_conversation_metadata_fingerprints: bool = False,
 ) -> Finding:
     details = dict(finding.details)
     thread_ids = {
@@ -1711,6 +1851,23 @@ def _with_verification_scope(
         thread_id: find_thread_rollouts(finding.codex_home, thread_id)
         for thread_id in thread_ids
     }
+    if capture_conversation_metadata_fingerprints:
+        summaries = read_conversation_summaries(
+            finding.codex_home,
+            thread_ids,
+            rollout_records_by_thread=records_by_thread,
+            legacy_names=read_legacy_thread_names(
+                finding.codex_home,
+                thread_ids,
+            ),
+            strict=True,
+        )
+        details[
+            "captured_conversation_metadata_fingerprints"
+        ] = sorted(
+            f"{thread_id}={summary.metadata_fingerprint}"
+            for thread_id, summary in summaries.items()
+        )
     parsed_rollout_paths = {
         record.path
         for records in records_by_thread.values()
@@ -2424,6 +2581,7 @@ __all__ = [
     "CleanupReport",
     "CleanupResult",
     "FindingVerifier",
+    "PreDeleteValidator",
     "ScanFailure",
     "ScanReport",
     "ThreadSelectionError",

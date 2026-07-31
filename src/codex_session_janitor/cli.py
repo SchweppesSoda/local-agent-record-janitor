@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -23,12 +24,25 @@ from .cleaner import (
     select_findings,
 )
 from .codex_app_server import CodexAppServer
+from .conversation_metadata import (
+    read_conversation_summaries,
+    read_legacy_thread_names,
+)
 from .discovery import (
     choose_codex_binary,
     default_appdata,
     default_codex_home,
 )
 from .models import Finding
+from .rendering import safe_single_line
+from .legacy_index import (
+    LegacyIndexError,
+    LegacyIndexOperationError,
+    LegacyIndexRepairResult,
+    LegacyIndexRestoreResult,
+    repair_legacy_index,
+    restore_legacy_index,
+)
 
 
 EXIT_OK = 0
@@ -482,11 +496,63 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     clean.add_argument(
+        "--plan-fingerprint",
+        metavar="FINGERPRINT",
+        help=(
+            "绑定此前 clean --json 展示的完整计划指纹；非交互执行 "
+            "review/high 风险动作时必须提供"
+        ),
+    )
+    clean.add_argument(
+        "--clients-closed",
+        action="store_true",
+        help=(
+            "确认使用同一 Codex 数据目录的 Codex/AionUI/Cindy 客户端均已关闭；"
+            "非交互修复旧版索引时必须提供"
+        ),
+    )
+    clean.add_argument(
         "--timeout",
         type=_positive_float,
         default=30.0,
         metavar="SECONDS",
         help="app-server 请求超时秒数（默认：30）",
+    )
+
+    restore = subparsers.add_parser(
+        "restore-legacy-index",
+        help="从 Janitor 的可验证备份还原旧版聚合索引",
+        description=(
+            "仅当当前文件仍是对应修复产生的版本时，才从指定备份还原；"
+            "还原前也会创建新的可验证备份。"
+        ),
+    )
+    restore.add_argument(
+        "--backup-id",
+        required=True,
+        metavar="BACKUP_ID",
+        help="repair_legacy_index 结果中的完整备份 ID",
+    )
+    restore.add_argument(
+        "--codex-home",
+        type=Path,
+        metavar="PATH",
+        help="备份所属 Codex 数据目录（默认使用 CODEX_HOME 或 ~/.codex）",
+    )
+    restore.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过 TTY 最终确认提示并执行",
+    )
+    restore.add_argument(
+        "--clients-closed",
+        action="store_true",
+        help="确认使用同一数据目录的相关客户端均已关闭",
+    )
+    restore.add_argument(
+        "--json",
+        action="store_true",
+        help="输出机器可读 JSON",
     )
     return parser
 
@@ -516,7 +582,8 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_HUMAN_LIMIT,
         metavar="COUNT",
         help=(
-            "人类可读输出最多显示的问题数；0 表示全部"
+            "人类可读输出中 scan 最多显示的问题数、clean 最多显示的候选目标数；"
+            "最终计划和执行结果始终完整；0 表示全部"
             f"（默认：{DEFAULT_HUMAN_LIMIT}；JSON 不受限制）"
         ),
     )
@@ -610,6 +677,14 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "restore-legacy-index":
+        return _run_legacy_index_restore(
+            args,
+            stdin=input_stream,
+            stdout=output,
+            stderr=error_output,
+        )
+
     try:
         if args.command == "clean":
             if adapters is not None:
@@ -671,6 +746,91 @@ def main(
     return EXIT_OK if selected_report.ok else EXIT_ERROR
 
 
+def _run_legacy_index_restore(
+    args: argparse.Namespace,
+    *,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    codex_home = (args.codex_home or default_codex_home()).expanduser()
+    tty = (
+        not args.json
+        and bool(getattr(stdin, "isatty", lambda: False)())
+        and bool(getattr(stdout, "isatty", lambda: False)())
+    )
+    if not args.yes:
+        if args.json:
+            _write_json(
+                {
+                    "command": "restore-legacy-index",
+                    "confirmation_required": True,
+                    "codex_home": str(codex_home),
+                    "backup_id": str(args.backup_id),
+                },
+                stdout,
+            )
+            return EXIT_CONFIRMATION_REQUIRED
+        stdout.write(
+            "还原预览：\n"
+            "  Codex 数据目录："
+            f"{_display_value(codex_home, max_width=220)}\n"
+            "  备份 ID："
+            f"{_display_value(args.backup_id, max_width=None)}\n"
+            "  条件：当前索引哈希必须仍等于该备份记录的修复后哈希；"
+            "还原前会再创建一份备份。\n"
+        )
+        if not tty:
+            stdout.write(
+                "未做任何更改。关闭相关客户端后，使用同一命令加上 "
+                "--clients-closed --yes 执行。\n"
+            )
+            return EXIT_CONFIRMATION_REQUIRED
+        stdout.write(
+            "请输入“客户端已关闭并确认还原”继续，输入其他内容取消："
+        )
+        stdout.flush()
+        confirmation = stdin.readline()
+        if confirmation.strip() != "客户端已关闭并确认还原":
+            stdout.write("已取消；未做任何更改。\n")
+            return EXIT_OK
+    elif not args.clients_closed:
+        error = LegacyIndexError(
+            "--yes restore requires --clients-closed after all related clients are closed"
+        )
+        return _emit_legacy_index_error(
+            command="restore-legacy-index",
+            error=error,
+            action=None,
+            plan=None,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    try:
+        result = restore_legacy_index(
+            codex_home,
+            backup_id=args.backup_id,
+        )
+    except LegacyIndexError as exc:
+        return _emit_legacy_index_error(
+            command="restore-legacy-index",
+            error=exc,
+            action=None,
+            plan=None,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    _emit_legacy_restore_result(
+        result,
+        json_output=args.json,
+        stdout=stdout,
+    )
+    return EXIT_OK
+
+
 def _run_planned_cleanup(
     args: argparse.Namespace,
     *,
@@ -682,7 +842,7 @@ def _run_planned_cleanup(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
 ) -> int:
-    from .planning import build_cleanup_plan
+    from .planning import build_cleanup_plan, normalize_storage_path
 
     try:
         plan = build_cleanup_plan(scan_report)
@@ -800,7 +960,11 @@ def _run_planned_cleanup(
         for action in selected_actions
         if not action.available
         or _enum_value(action.kind)
-        not in {"delete_conversation", "keep"}
+        not in {
+            "delete_conversation",
+            "repair_legacy_index",
+            "keep",
+        }
     ]
     if unavailable:
         reason = "；".join(
@@ -829,11 +993,97 @@ def _run_planned_cleanup(
             stderr=stderr,
         )
 
+    approval_bound_actions = [
+        action
+        for action in selected_actions
+        if _enum_value(action.kind) != "keep"
+        and _enum_value(action.risk) in {"review", "high"}
+    ]
+    approval_plan_fingerprint = ""
+    if args.yes and not tty and approval_bound_actions:
+        approval_plan_fingerprint = str(
+            getattr(args, "plan_fingerprint", "") or ""
+        ).strip()
+        current_fingerprint = str(
+            getattr(plan, "plan_fingerprint", "") or ""
+        )
+        if not approval_plan_fingerprint:
+            return _emit_action_selection_error(
+                ActionSelectionError(
+                    "非交互执行需复核的动作时，必须提供此前 clean --json "
+                    "展示的 --plan-fingerprint。",
+                    kind="approval_binding_required",
+                    matches=[
+                        str(action.action_id)
+                        for action in approval_bound_actions
+                    ],
+                ),
+                plan=plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if approval_plan_fingerprint != current_fingerprint:
+            return _emit_action_selection_error(
+                ActionSelectionError(
+                    "提供的计划指纹与当前计划不一致；请重新运行 clean --json "
+                    "并复核完整影响范围。",
+                    kind="plan_fingerprint_mismatch",
+                    selector=approval_plan_fingerprint,
+                    matches=[current_fingerprint],
+                ),
+                plan=plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
     mutation_actions = [
         action
         for action in selected_actions
-        if _enum_value(action.kind) == "delete_conversation"
+        if _enum_value(action.kind)
+        in {"delete_conversation", "repair_legacy_index"}
     ]
+    mutation_kinds = {
+        _enum_value(action.kind)
+        for action in mutation_actions
+    }
+    if len(mutation_kinds) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "旧版聚合索引修复不能与不可恢复的会话删除混在同一执行中；"
+                "请分别复核和执行。",
+                kind="mixed_mutation_kinds",
+                matches=[
+                    str(action.action_id)
+                    for action in mutation_actions
+                ],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    legacy_actions = [
+        action
+        for action in mutation_actions
+        if _enum_value(action.kind) == "repair_legacy_index"
+    ]
+    if len(legacy_actions) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "一次只能修复一个旧版聚合索引文件；请逐个执行。",
+                kind="multiple_legacy_repairs",
+                matches=[
+                    str(action.action_id)
+                    for action in legacy_actions
+                ],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if not interactive:
         if not (args.json and args.yes and mutation_actions):
             _emit_plan_catalog(
@@ -848,6 +1098,7 @@ def _run_planned_cleanup(
         _write_selected_action_plan(
             selected_actions,
             plan.storages,
+            conversations=getattr(plan, "conversations", ()),
             stdout=stdout,
         )
 
@@ -858,15 +1109,37 @@ def _run_planned_cleanup(
             else:
                 stdout.write("没有动作进入执行计划；未做任何更改。\n")
         return EXIT_OK
+    if legacy_actions and args.yes and not args.clients_closed:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "使用 --yes 修复旧版聚合索引前，必须先关闭使用同一数据目录的 "
+                "Codex、AionUI 和 Cindy 客户端，并显式提供 --clients-closed。",
+                kind="clients_closed_ack_required",
+                matches=[str(legacy_actions[0].action_id)],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if not args.yes:
         if tty:
-            stdout.write(
-                "\n删除不可恢复。请输入“确认删除”继续，"
-                "输入其他内容取消："
-            )
+            if legacy_actions:
+                stdout.write(
+                    "\n请先关闭使用同一数据目录的 Codex、AionUI 和 Cindy。"
+                    "修复会创建可验证备份。请输入“客户端已关闭并确认修复”继续，"
+                    "输入其他内容取消："
+                )
+                required_confirmation = "客户端已关闭并确认修复"
+            else:
+                stdout.write(
+                    "\n删除不可恢复。请输入“确认删除”继续，"
+                    "输入其他内容取消："
+                )
+                required_confirmation = "确认删除"
             stdout.flush()
             confirmation = stdin.readline()
-            if confirmation.strip() != "确认删除":
+            if confirmation.strip() != required_confirmation:
                 if confirmation == "":
                     stdout.write("\n输入已结束，已取消；未做任何更改。\n")
                 else:
@@ -874,10 +1147,17 @@ def _run_planned_cleanup(
                 return EXIT_OK
         else:
             if not args.json:
-                stdout.write(
-                    "未做任何更改。确认目标与影响范围后，"
-                    "使用同一选择并加上 --yes 执行。\n"
-                )
+                if legacy_actions:
+                    stdout.write(
+                        "未做任何更改。确认文件、严格清单和输出哈希后，"
+                        "关闭相关客户端，再使用同一 action ID、计划指纹、"
+                        "--clients-closed 与 --yes 执行。\n"
+                    )
+                else:
+                    stdout.write(
+                        "未做任何更改。确认目标与影响范围后，"
+                        "使用同一选择并加上 --yes 执行。\n"
+                    )
             return EXIT_CONFIRMATION_REQUIRED
 
     # Rebuild the structured plan immediately before mutation. Action IDs
@@ -893,6 +1173,24 @@ def _run_planned_cleanup(
         return _emit_fatal_error(
             "clean",
             exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    if (
+        approval_plan_fingerprint
+        and str(revalidated_plan.plan_fingerprint)
+        != approval_plan_fingerprint
+    ):
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "执行前重新扫描得到的完整计划与已批准计划指纹不一致，"
+                "已停止执行；请重新运行 clean --json 并复核。",
+                kind="plan_changed",
+                selector=approval_plan_fingerprint,
+                matches=[str(revalidated_plan.plan_fingerprint)],
+            ),
+            plan=revalidated_plan,
             json_output=args.json,
             stdout=stdout,
             stderr=stderr,
@@ -930,6 +1228,60 @@ def _run_planned_cleanup(
             stderr=stderr,
         )
 
+    fresh_legacy_actions = [
+        action
+        for action in fresh_actions
+        if _enum_value(action.kind) == "repair_legacy_index"
+    ]
+    if fresh_legacy_actions:
+        action = fresh_legacy_actions[0]
+        storage = next(
+            (
+                current
+                for current in revalidated_plan.storages
+                if str(current.storage_id)
+                == str(action.target.storage_id)
+            ),
+            None,
+        )
+        if storage is None:
+            return _emit_action_selection_error(
+                ActionSelectionError(
+                    "无法把旧版索引修复动作映射回其数据目录，已停止执行。",
+                    kind="evidence_changed",
+                    matches=[str(action.action_id)],
+                ),
+                plan=revalidated_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        try:
+            repair_result = repair_legacy_index(
+                Path(storage.path),
+                approved_snapshot_fingerprint=(
+                    action.snapshot_fingerprint
+                ),
+            )
+        except LegacyIndexError as exc:
+            return _emit_legacy_index_error(
+                command="clean",
+                error=exc,
+                action=action,
+                plan=revalidated_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        _emit_legacy_repair_result(
+            repair_result,
+            action=action,
+            plan=revalidated_plan,
+            json_output=args.json,
+            stdout=stdout,
+        )
+        return EXIT_OK
+
     selected_findings = _findings_for_actions(
         fresh_actions,
         revalidated_plan,
@@ -958,6 +1310,18 @@ def _run_planned_cleanup(
             rollout_state_fingerprints=tuple(
                 action.impact.rollout_state_fingerprints
             ),
+            conversation_metadata_fingerprints=(
+                tuple(raw_metadata_fingerprints)
+                if (
+                    raw_metadata_fingerprints := getattr(
+                        action.impact,
+                        "conversation_metadata_fingerprints",
+                        None,
+                    )
+                )
+                is not None
+                else None
+            ),
         )
         for finding, action in zip(selected_findings, fresh_actions, strict=True)
     }
@@ -966,6 +1330,54 @@ def _run_planned_cleanup(
         fresh_actions,
         revalidated_plan,
     )
+    expected_actions_by_id = {
+        str(action.action_id): action
+        for action in fresh_actions
+    }
+
+    def validate_live_references_before_delete(finding: Finding) -> None:
+        latest_report = scan_adapters(active_adapters)
+        latest_report = _filter_candidate_platforms(
+            latest_report,
+            args.platform,
+        )
+        latest_plan = build_cleanup_plan(latest_report)
+        expected_action = next(
+            (
+                action
+                for action in expected_actions_by_id.values()
+                if str(action.target.thread_id) == finding.thread_id
+                and next(
+                    (
+                        normalize_storage_path(storage.path)
+                        for storage in revalidated_plan.storages
+                        if str(storage.storage_id)
+                        == str(action.target.storage_id)
+                    ),
+                    "",
+                )
+                == normalize_storage_path(finding.codex_home)
+            ),
+            None,
+        )
+        if expected_action is None:
+            raise RuntimeError(
+                "the selected target could not be rebound to live guard evidence"
+            )
+        latest = {
+            str(action.action_id): action
+            for action in latest_plan.actions
+        }.get(str(expected_action.action_id))
+        if (
+            latest is None
+            or not latest.available
+            or latest.snapshot_fingerprint
+            != expected_action.snapshot_fingerprint
+        ):
+            raise RuntimeError(
+                "frontend/native evidence changed after app-server startup"
+            )
+
     cleanup_report = clean_findings(
         selected_findings,
         timeout=args.timeout,
@@ -974,6 +1386,7 @@ def _run_planned_cleanup(
         explicit_selection=True,
         expected_scopes=expected_scopes,
         approved_integrity_deletes=approved_integrity_deletes,
+        pre_delete_validator=validate_live_references_before_delete,
     )
     _emit_planned_cleanup_result(
         cleanup_report,
@@ -1239,29 +1652,101 @@ def _emit_scan(
     stdout: TextIO,
     stderr: TextIO,
 ) -> None:
+    summaries = _scan_conversation_summaries(report.findings)
     if json_output:
-        payload = {"command": "scan", **report.to_dict()}
+        from .planning import storage_id_for_path
+
+        payload = {
+            "command": "scan",
+            **report.to_dict(),
+            "conversations": [
+                {
+                    "target": {
+                        "storage_id": storage_id_for_path(home),
+                        "thread_id": thread_id,
+                    },
+                    "codex_home": home,
+                    "summary": summary.to_dict(),
+                }
+                for (home, thread_id), summary in sorted(
+                    summaries.items()
+                )
+            ],
+        }
         _write_json(payload, stdout)
         return
     if report.findings:
         stdout.write(
             f"发现 {len(report.findings)} 个 Codex 对话一致性问题。\n"
         )
-        _write_finding_table(report.findings, stdout=stdout, limit=limit)
+        _write_finding_table(
+            report.findings,
+            summaries=summaries,
+            stdout=stdout,
+            limit=limit,
+        )
     else:
         stdout.write("未发现 Codex 对话一致性问题。\n")
     _write_scan_errors(report, stderr)
 
 
+def _scan_conversation_summaries(
+    findings: Sequence[Finding],
+) -> dict[tuple[str, str], Any]:
+    from .planning import normalize_storage_path
+
+    ids_by_home: dict[str, set[str]] = {}
+    records_by_home: dict[str, dict[str, list[Any]]] = {}
+    path_by_home: dict[str, Path] = {}
+    for finding in findings:
+        if finding.details.get("finding_type") == "legacy_index_only":
+            continue
+        home = normalize_storage_path(finding.codex_home)
+        path_by_home[home] = Path(home)
+        ids_by_home.setdefault(home, set()).add(finding.thread_id)
+        if finding.rollout is not None:
+            records_by_home.setdefault(home, {}).setdefault(
+                finding.thread_id,
+                [],
+            ).append(finding.rollout)
+    summaries: dict[tuple[str, str], Any] = {}
+    for home, thread_ids in ids_by_home.items():
+        try:
+            current = read_conversation_summaries(
+                path_by_home[home],
+                thread_ids,
+                rollout_records_by_thread=records_by_home.get(home, {}),
+                legacy_names=read_legacy_thread_names(
+                    path_by_home[home],
+                    thread_ids,
+                ),
+                strict=False,
+            )
+        except Exception:
+            current = {}
+        summaries.update(
+            ((home, thread_id), summary)
+            for thread_id, summary in current.items()
+        )
+    return summaries
+
+
 def _write_finding_table(
     findings: Sequence[Finding],
     *,
+    summaries: Mapping[tuple[str, str], Any] | None = None,
     stdout: TextIO,
     limit: int,
 ) -> None:
     if not findings:
         return
-    stdout.write(f"{'来源':<9} {'对话':<16} {'现存数据':<16} 问题\n")
+    from .planning import normalize_storage_path
+
+    summaries = summaries or {}
+    stdout.write(
+        f"{'来源':<9} {'对话':<16} {'会话名称':<24} "
+        f"{'项目':<18} {'现存数据':<16} 问题\n"
+    )
     visible, hidden = _visible_items(findings, limit)
     for finding in visible:
         artifact_state = _artifact_state(finding)
@@ -1272,16 +1757,176 @@ def _write_finding_table(
                 if finding.platform.lower() in {"aionui", "cindy"}
                 else ""
             )
+        summary = summaries.get(
+            (
+                normalize_storage_path(finding.codex_home),
+                finding.thread_id,
+            )
+        )
         stdout.write(
-            f"{finding.platform:<9} {finding.short_thread_id():<16} "
+            f"{_display_value(finding.platform):<9} "
+            f"{_short_thread_id(str(finding.thread_id)):<16} "
+            f"{_display_value(getattr(summary, 'display_name', None), max_width=22):<24} "
+            f"{_display_value(getattr(summary, 'project_label', None), max_width=16):<18} "
             f"{artifact_state:<16} "
             f"{_problem_label(finding_type, finding.reason)}\n"
         )
+        if summary is not None:
+            stdout.write(
+                "          目录："
+                f"{_display_value(getattr(summary, 'cwd', None), max_width=220)}\n"
+            )
     if hidden:
         stdout.write(
             f"... 另有 {hidden} 个问题未显示；"
             "请使用 --json 或增大 --limit。\n"
         )
+
+
+def _conversation_lookup(plan: Any) -> dict[tuple[str, str], Any]:
+    lookup: dict[tuple[str, str], Any] = {}
+    entries = getattr(plan, "conversations", None)
+    if entries is None:
+        entries = plan if isinstance(plan, (list, tuple)) else ()
+    for entry in entries:
+        target = getattr(entry, "target", None)
+        summary = getattr(entry, "summary", None)
+        if target is None or summary is None:
+            continue
+        lookup[
+            (
+                str(getattr(target, "storage_id", "")),
+                str(getattr(target, "thread_id", "")),
+            )
+        ] = summary
+    return lookup
+
+
+def _conversation_entry_dict(entry: Any) -> dict[str, Any]:
+    serializer = getattr(entry, "to_dict", None)
+    if callable(serializer):
+        return serializer()
+    target = getattr(entry, "target", None)
+    summary = getattr(entry, "summary", None)
+    return {
+        "target": {
+            "storage_id": str(getattr(target, "storage_id", "")),
+            "thread_id": str(getattr(target, "thread_id", "")),
+        },
+        "summary": (
+            summary.to_dict()
+            if callable(getattr(summary, "to_dict", None))
+            else None
+        ),
+    }
+
+
+def _display_value(
+    value: object | None,
+    *,
+    unknown: str = "未知",
+    max_width: int | None = 160,
+) -> str:
+    rendered = safe_single_line(value, max_width=max_width)
+    return rendered if rendered.strip() else unknown
+
+
+def _state_label(value: object | None) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "未知"
+
+
+def _cwd_identity(value: object | None) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _write_conversation_summary(
+    *,
+    stdout: TextIO,
+    summary: Any | None,
+    thread_id: str,
+    relationship: str,
+    indent: str,
+) -> None:
+    """Render all approval-relevant identity fields on logical single lines."""
+
+    display_name = getattr(summary, "display_name", None)
+    display_source = getattr(summary, "display_name_source", None)
+    project_label = getattr(summary, "project_label", None)
+    cwd = getattr(summary, "cwd", None)
+    git_origin = getattr(summary, "git_origin_url", None)
+    parent_ids = tuple(getattr(summary, "parent_thread_ids", ()) or ())
+    conflicts = tuple(getattr(summary, "metadata_conflicts", ()) or ())
+    sources = tuple(getattr(summary, "metadata_sources", ()) or ())
+    is_subagent = getattr(summary, "is_subagent", None)
+
+    stdout.write(
+        f"{indent}会话名称：{_display_value(display_name)}"
+        f"（来源：{_display_value(display_source)}）\n"
+    )
+    stdout.write(
+        f"{indent}项目：{_display_value(project_label)}；"
+        f"工作目录：{_display_value(cwd, max_width=220)}\n"
+    )
+    stdout.write(
+        f"{indent}Git 来源：{_display_value(git_origin, max_width=220)}\n"
+    )
+    stdout.write(
+        f"{indent}完整会话 ID："
+        f"{_display_value(thread_id, max_width=None)}\n"
+    )
+    stdout.write(
+        f"{indent}关系：{_display_value(relationship)}；"
+        f"子代理：{_state_label(is_subagent)}\n"
+    )
+    stdout.write(
+        f"{indent}子代理名称："
+        f"{_display_value(getattr(summary, 'agent_nickname', None))}；"
+        f"角色：{_display_value(getattr(summary, 'agent_role', None))}；"
+        f"路径：{_display_value(getattr(summary, 'agent_path', None), max_width=220)}\n"
+    )
+    stdout.write(
+        f"{indent}父会话 ID："
+        f"{_display_value(', '.join(str(value) for value in parent_ids), max_width=220)}\n"
+    )
+    stdout.write(
+        f"{indent}状态：已索引 {_state_label(getattr(summary, 'indexed', None))}；"
+        f"已归档 {_state_label(getattr(summary, 'archived', None))}；"
+        f"originator "
+        f"{_display_value(getattr(summary, 'originator', None))}\n"
+    )
+    stdout.write(
+        f"{indent}元数据来源："
+        f"{_display_value(', '.join(str(value) for value in sources), max_width=220)}\n"
+    )
+    if conflicts:
+        rendered_conflicts = "；".join(
+            _display_value(value, max_width=180)
+            for value in conflicts
+        )
+        stdout.write(f"{indent}元数据冲突：{rendered_conflicts}\n")
+    else:
+        stdout.write(f"{indent}元数据冲突：无\n")
+
+
+def _legacy_observation_for_action(
+    action: Any,
+    observations: Mapping[str, Any],
+) -> Any | None:
+    for observation_id in getattr(action, "observation_ids", ()):
+        observation = observations.get(str(observation_id))
+        if (
+            observation is not None
+            and str(getattr(observation, "finding_type", ""))
+            == "legacy_index_only"
+        ):
+            return observation
+    return None
 
 
 def _write_action_catalog(
@@ -1290,7 +1935,7 @@ def _write_action_catalog(
     stdout: TextIO,
     limit: int,
 ) -> None:
-    """Display every observation's candidate actions by storage and risk."""
+    """Display target cards; ``limit`` counts targets, never action rows."""
 
     actions = list(plan.actions)
     numbered = {
@@ -1301,18 +1946,24 @@ def _write_action_catalog(
         str(observation.observation_id): observation
         for observation in plan.observations
     }
-    visible_ids = {
-        str(action.action_id)
-        for action in _visible_items(actions, limit)[0]
-    }
-    hidden = len(actions) - len(visible_ids)
+    summaries = _conversation_lookup(plan)
+    target_keys = list(
+        dict.fromkeys(
+            (
+                str(action.target.storage_id),
+                str(action.target.thread_id),
+            )
+            for action in actions
+        )
+    )
+    visible_targets, hidden = _visible_items(target_keys, limit)
 
     for storage in plan.storages:
-        storage_actions = [
-            action
-            for action in actions
-            if str(action.target.storage_id) == str(storage.storage_id)
-            and str(action.action_id) in visible_ids
+        storage_id = str(storage.storage_id)
+        storage_target_keys = [
+            key
+            for key in visible_targets
+            if key[0] == storage_id
         ]
         storage_status = _enum_value(getattr(storage, "scan_status", "ok"))
         storage_errors = tuple(getattr(storage, "errors", ()))
@@ -1320,70 +1971,121 @@ def _write_action_catalog(
             storage_status in {"failed", "partial"}
             or bool(storage_errors)
         )
-        if not storage_actions and not show_storage_status:
+        if not storage_target_keys and not show_storage_status:
             continue
-        stdout.write(f"\n保存位置：{storage.label}\n")
-        stdout.write(f"  目录：{storage.path}\n")
+        stdout.write(
+            f"\n保存位置：{_display_value(storage.label)}\n"
+        )
+        stdout.write(
+            f"  目录：{_display_value(storage.path, max_width=220)}\n"
+        )
         if show_storage_status:
             status_label = {
                 "failed": "扫描失败",
                 "partial": "扫描不完整",
             }.get(storage_status, storage_status)
-            stdout.write(f"  状态：{status_label}\n")
+            stdout.write(
+                f"  状态：{_display_value(status_label)}\n"
+            )
             for error in storage_errors:
                 stdout.write(
                     f"  此保存位置的错误：{_human_message(error)}\n"
                 )
-        for risk in _RISK_ORDER:
-            risk_actions = [
+
+        for target_key in storage_target_keys:
+            target_actions = [
                 action
-                for action in storage_actions
-                if _enum_value(action.risk) == risk
+                for action in actions
+                if (
+                    str(action.target.storage_id),
+                    str(action.target.thread_id),
+                )
+                == target_key
             ]
-            if not risk_actions:
+            if not target_actions:
                 continue
-            stdout.write(f"  {_RISK_LABELS.get(risk, risk)}：\n")
-            for action in risk_actions:
+            thread_id = target_key[1]
+            legacy_observation = next(
+                (
+                    current
+                    for action in target_actions
+                    if (
+                        current := _legacy_observation_for_action(
+                            action,
+                            observations,
+                        )
+                    )
+                    is not None
+                ),
+                None,
+            )
+            stdout.write("\n  目标：\n")
+            if legacy_observation is not None:
+                details = getattr(legacy_observation, "details", {})
+                stdout.write("    资源类型：旧版聚合索引文件（不是会话）\n")
+                stdout.write(
+                    "    文件："
+                    f"{_display_value(details.get('legacy_index_path'), max_width=220)}\n"
+                )
+                stdout.write(
+                    "    条目："
+                    f"{_display_value(details.get('entry_count'))} 条；"
+                    "待移除残留 ID："
+                    f"{_display_value(details.get('residual_thread_count'))} 个；"
+                    "重复："
+                    f"{_display_value(details.get('duplicate_entry_count'))} 条；"
+                    "格式错误："
+                    f"{_display_value(details.get('malformed_line_count'))} 行\n"
+                )
+            else:
+                _write_conversation_summary(
+                    stdout=stdout,
+                    summary=summaries.get(target_key),
+                    thread_id=thread_id,
+                    relationship="删除候选根会话",
+                    indent="    ",
+                )
+
+            reasons = [
+                _problem_label(
+                    str(getattr(observation, "finding_type", "")),
+                    getattr(observation, "reason", ""),
+                )
+                for action in target_actions
+                for observation_id in getattr(action, "observation_ids", ())
+                if (
+                    observation := observations.get(str(observation_id))
+                )
+                is not None
+            ]
+            if reasons:
+                stdout.write(
+                    "    问题："
+                    f"{'；'.join(dict.fromkeys(reasons))}\n"
+                )
+
+            stdout.write("    候选动作：\n")
+            for action in target_actions:
                 number = numbered[str(action.action_id)]
+                risk = _enum_value(action.risk)
                 action_label = _ACTION_LABELS.get(
                     _enum_value(action.kind),
                     _enum_value(action.kind),
                 )
-                target = _short_thread_id(str(action.target.thread_id))
                 stdout.write(
-                    f"    [{number}] 对话 {target}｜候选动作：{action_label}\n"
+                    f"      [{number}] "
+                    f"{_display_value(_RISK_LABELS.get(risk, risk))}｜"
+                    f"候选动作：{_display_value(action_label)}\n"
                 )
-                reasons = [
-                    _problem_label(
-                        str(
-                            getattr(
-                                observations[str(item)],
-                                "finding_type",
-                                "",
-                            )
-                        ),
-                        observations[str(item)].reason,
-                    )
-                    for item in action.observation_ids
-                    if str(item) in observations
-                ]
-                if reasons:
-                    stdout.write(f"        问题：{'；'.join(dict.fromkeys(reasons))}\n")
                 impact = action.impact
-                stdout.write(
-                    "        仍存在的数据："
-                    f"对话列表记录 {impact.index_record_count} 条，"
-                    f"对话内容文件 {impact.rollout_file_count} 个，"
-                    "由该对话创建的关联任务对话 "
-                    f"{len(impact.descendant_thread_ids)} 条\n"
-                )
                 if action.available:
                     stdout.write(
-                        f"        动作 ID：{action.action_id}\n"
+                        "          动作 ID："
+                        f"{_display_value(action.action_id, max_width=None)}\n"
                     )
                 else:
                     reason = _human_unavailable_reason(action)
-                    stdout.write(f"        仅供查看：{reason}\n")
+                    stdout.write(f"          仅供查看：{reason}\n")
                 if bool(
                     getattr(
                         action,
@@ -1392,12 +2094,39 @@ def _write_action_catalog(
                     )
                 ):
                     stdout.write(
-                        "        选择要求：必须逐项选择，"
+                        "          选择要求：必须逐项选择，"
                         "不会由 all 或默认低风险计划纳入\n"
                     )
+                if _enum_value(action.kind) == "delete_conversation":
+                    descendants = tuple(
+                        str(value)
+                        for value in impact.descendant_thread_ids
+                    )
+                    stdout.write(
+                        "          仍存在的数据："
+                        f"对话列表记录 {impact.index_record_count} 条，"
+                        f"对话内容文件 {impact.rollout_file_count} 个，"
+                        "由该对话创建的关联任务对话 "
+                        f"{len(descendants)} 条\n"
+                    )
+                    if descendants:
+                        stdout.write("          级联影响明细：\n")
+                    for descendant_id in descendants:
+                        descendant_key = (storage_id, descendant_id)
+                        _write_conversation_summary(
+                            stdout=stdout,
+                            summary=summaries.get(descendant_key),
+                            thread_id=descendant_id,
+                            relationship=(
+                                "由根会话 "
+                                f"{_display_value(thread_id, max_width=None)} "
+                                "创建、将一同删除的关联任务会话"
+                            ),
+                            indent="            ",
+                        )
     if hidden:
         stdout.write(
-            f"\n... 另有 {hidden} 个候选动作未显示；"
+            f"\n... 另有 {hidden} 个目标未显示；"
             "请使用 --json 或增大 --limit。\n"
         )
     global_errors = tuple(getattr(plan, "errors", ()))
@@ -1414,32 +2143,151 @@ def _write_selected_action_plan(
     actions: Sequence[Any],
     storages: Sequence[Any],
     *,
+    conversations: Sequence[Any] = (),
     stdout: TextIO,
 ) -> None:
     storage_by_id = {
         str(storage.storage_id): storage
         for storage in storages
     }
+    summary_by_target = _conversation_lookup(conversations)
     stdout.write(f"\n最终计划：{len(actions)} 个动作。\n")
     for action in actions:
         storage = storage_by_id[str(action.target.storage_id)]
         impact = action.impact
+        if (
+            getattr(action, "resource_kind", "conversation")
+            == "legacy_index"
+            or _enum_value(action.kind) == "repair_legacy_index"
+        ):
+            inventory = getattr(action, "legacy_inventory", None)
+            stdout.write(
+                "- 修复旧版聚合索引（文件资源，不是会话）\n"
+                "  动作 ID："
+                f"{_display_value(action.action_id, max_width=None)}\n"
+                "  保存位置："
+                f"{_display_value(storage.label)}"
+                "（"
+                f"{_display_value(storage.path, max_width=220)}）\n"
+                "  文件："
+                f"{_display_value(getattr(impact, 'resource_path', None), max_width=220)}\n"
+                "  审批快照："
+                f"{_display_value(action.snapshot_fingerprint, max_width=None)}\n"
+                "  原始 SHA-256："
+                f"{_display_value(getattr(impact, 'legacy_original_sha256', None), max_width=None)}\n"
+                "  预期 SHA-256："
+                f"{_display_value(getattr(impact, 'legacy_expected_sha256', None), max_width=None)}\n"
+                "  将移除的残留行："
+                f"{getattr(impact, 'legacy_residual_line_count', 0)} 行\n"
+            )
+            residual_ids = tuple(
+                str(value)
+                for value in getattr(
+                    impact,
+                    "legacy_residual_thread_ids",
+                    (),
+                )
+            )
+            stdout.write("  将移除的残留 ID：\n")
+            for thread_id in residual_ids:
+                stdout.write(
+                    "    - "
+                    f"{_display_value(thread_id, max_width=None)}\n"
+                )
+            if inventory is not None:
+                stdout.write(
+                    "  严格清单："
+                    f"总行数 {inventory.line_count}；"
+                    f"保留 {inventory.expected_line_count}；"
+                    f"格式错误 {inventory.malformed_line_count}；"
+                    f"live 重复 {inventory.duplicate_live_line_count}\n"
+                )
+            stdout.write(
+                "  安全要求：关闭使用同一数据目录的所有客户端；"
+                "执行前会在独占锁内重算清单，先持久化备份和清单，再原子替换。\n"
+            )
+            continue
         stdout.write(
-            f"- {_ACTION_LABELS.get(_enum_value(action.kind), _enum_value(action.kind))}"
-            f"：对话 {action.target.thread_id}\n"
-            f"  动作 ID：{action.action_id}\n"
-            f"  保存位置：{storage.label}（{storage.path}）\n"
+            f"- {_display_value(_ACTION_LABELS.get(_enum_value(action.kind), _enum_value(action.kind)))}"
+            "：对话 "
+            f"{_display_value(action.target.thread_id, max_width=None)}\n"
+            "  动作 ID："
+            f"{_display_value(action.action_id, max_width=None)}\n"
+            "  保存位置："
+            f"{_display_value(storage.label)}"
+            "（"
+            f"{_display_value(storage.path, max_width=220)}）\n"
             f"  对话列表记录：{impact.index_record_count} 条；"
             f"对话内容文件：{impact.rollout_file_count} 个\n"
         )
+        root_key = (
+            str(action.target.storage_id),
+            str(action.target.thread_id),
+        )
+        _write_conversation_summary(
+            stdout=stdout,
+            summary=summary_by_target.get(root_key),
+            thread_id=str(action.target.thread_id),
+            relationship="最终计划根会话",
+            indent="  ",
+        )
         related = tuple(str(value) for value in impact.descendant_thread_ids)
+        root_summary = summary_by_target.get(root_key)
+        root_cwd_identity = _cwd_identity(
+            getattr(root_summary, "cwd", None)
+        )
+        cross_project = [
+            descendant_id
+            for descendant_id in related
+            if (
+                descendant_summary := summary_by_target.get(
+                    (str(action.target.storage_id), descendant_id)
+                )
+            )
+            is not None
+            and root_cwd_identity is not None
+            and _cwd_identity(getattr(descendant_summary, "cwd", None))
+            is not None
+            and _cwd_identity(getattr(descendant_summary, "cwd", None))
+            != root_cwd_identity
+        ]
+        if cross_project:
+            stdout.write(
+                "  警告：级联范围跨项目；请逐项核对以下关联任务会话："
+                + ", ".join(
+                    _display_value(value, max_width=None)
+                    for value in cross_project
+                )
+                + "\n"
+            )
         stdout.write(
             "  将一同删除的关联任务对话："
             f"{len(related)} 条"
         )
         if related:
-            stdout.write(f"（{', '.join(related)}）")
+            stdout.write(
+                "（"
+                + ", ".join(
+                    _display_value(value, max_width=None)
+                    for value in related
+                )
+                + "）"
+            )
         stdout.write("\n")
+        for descendant_id in related:
+            _write_conversation_summary(
+                stdout=stdout,
+                summary=summary_by_target.get(
+                    (str(action.target.storage_id), descendant_id)
+                ),
+                thread_id=descendant_id,
+                relationship=(
+                    "由根会话 "
+                    f"{_display_value(action.target.thread_id, max_width=None)} "
+                    "创建、将一同删除的关联任务会话"
+                ),
+                indent="    ",
+            )
         stdout.write(
             "  前端残留引用："
             f"{'保留' if impact.frontend_references_preserved else '不保留'}\n"
@@ -1471,6 +2319,7 @@ def _emit_plan_catalog(
         _write_selected_action_plan(
             selected_actions,
             plan.storages,
+            conversations=getattr(plan, "conversations", ()),
             stdout=stdout,
         )
 
@@ -1503,6 +2352,161 @@ def _emit_action_selection_error(
     return EXIT_ERROR
 
 
+def _actions_by_cleanup_result(
+    *,
+    selected_actions: Sequence[Any],
+    plan: Any | None,
+) -> dict[tuple[str, str], Any]:
+    if plan is None:
+        counts: dict[str, int] = {}
+        for action in selected_actions:
+            thread_id = str(action.target.thread_id)
+            counts[thread_id] = counts.get(thread_id, 0) + 1
+        return {
+            ("", str(action.target.thread_id)): action
+            for action in selected_actions
+            if counts[str(action.target.thread_id)] == 1
+        }
+
+    from .planning import normalize_storage_path
+
+    storage_paths = {
+        str(storage.storage_id): normalize_storage_path(storage.path)
+        for storage in plan.storages
+    }
+    return {
+        (
+            storage_paths.get(str(action.target.storage_id), ""),
+            str(action.target.thread_id),
+        ): action
+        for action in selected_actions
+    }
+
+
+def _emit_legacy_index_error(
+    *,
+    command: str,
+    error: LegacyIndexError,
+    action: Any | None,
+    plan: Any | None,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if json_output:
+        error_payload: dict[str, Any] = {
+            "type": type(error).__name__,
+            "message": str(error),
+        }
+        if isinstance(error, LegacyIndexOperationError):
+            error_payload.update(
+                {
+                    "state": error.state,
+                    "backup_id": error.backup_id,
+                    "current_sha256": error.current_sha256,
+                }
+            )
+        payload: dict[str, Any] = {
+            "command": command,
+            "blocked": True,
+            "error": error_payload,
+        }
+        if action is not None:
+            payload["selected_action"] = action.to_dict()
+        if plan is not None:
+            payload["plan_fingerprint"] = str(
+                getattr(plan, "plan_fingerprint", "")
+            )
+        _write_json(payload, stdout)
+    else:
+        stderr.write(
+            "错误：旧版聚合索引操作已停止："
+            f"{_human_message(error)}\n"
+        )
+        if isinstance(error, LegacyIndexOperationError) and error.backup_id:
+            stderr.write(
+                "可用备份 ID："
+                f"{_display_value(error.backup_id, max_width=None)}；"
+                f"当前状态：{_display_value(error.state)}\n"
+            )
+    return EXIT_ERROR
+
+
+def _emit_legacy_repair_result(
+    result: LegacyIndexRepairResult,
+    *,
+    action: Any,
+    plan: Any,
+    json_output: bool,
+    stdout: TextIO,
+) -> None:
+    if json_output:
+        _write_json(
+            {
+                "command": "clean",
+                "status": "repaired",
+                "action_id": str(action.action_id),
+                "selected_action": action.to_dict(),
+                "plan_fingerprint": str(plan.plan_fingerprint),
+                "repair": result.to_dict(),
+            },
+            stdout,
+        )
+        return
+    stdout.write(
+        "旧版聚合索引修复完成："
+        f"移除 {result.removed_line_count} 行，"
+        f"涉及 {len(result.removed_thread_ids)} 个残留 ID。\n"
+    )
+    stdout.write(
+        "  动作 ID："
+        f"{_display_value(action.action_id, max_width=None)}\n"
+        "  文件："
+        f"{_display_value(result.index_path, max_width=220)}\n"
+        "  备份 ID："
+        f"{_display_value(result.backup_id, max_width=None)}\n"
+        "  备份文件："
+        f"{_display_value(result.backup_path, max_width=220)}\n"
+        "  清单："
+        f"{_display_value(result.manifest_path, max_width=220)}\n"
+    )
+    stdout.write("  已移除的残留 ID：\n")
+    for thread_id in result.removed_thread_ids:
+        stdout.write(
+            "    - "
+            f"{_display_value(thread_id, max_width=None)}\n"
+        )
+
+
+def _emit_legacy_restore_result(
+    result: LegacyIndexRestoreResult,
+    *,
+    json_output: bool,
+    stdout: TextIO,
+) -> None:
+    if json_output:
+        _write_json(
+            {
+                "command": "restore-legacy-index",
+                "status": "restored",
+                "restore": result.to_dict(),
+            },
+            stdout,
+        )
+        return
+    stdout.write(
+        "旧版聚合索引已还原。\n"
+        "  文件："
+        f"{_display_value(result.index_path, max_width=220)}\n"
+        "  来源备份 ID："
+        f"{_display_value(result.source_backup_id, max_width=None)}\n"
+        "  还原前新备份 ID："
+        f"{_display_value(result.restore_backup_id, max_width=None)}\n"
+        "  还原前备份文件："
+        f"{_display_value(result.restore_backup_path, max_width=220)}\n"
+    )
+
+
 def _emit_planned_cleanup_result(
     report: CleanupReport,
     *,
@@ -1513,14 +2517,89 @@ def _emit_planned_cleanup_result(
     stdout: TextIO,
     stderr: TextIO,
 ) -> None:
+    action_lookup = _actions_by_cleanup_result(
+        selected_actions=selected_actions,
+        plan=plan,
+    )
+    summary_lookup = _conversation_lookup(plan) if plan is not None else {}
+    storage_id_by_path: dict[str, str] = {}
+    if plan is not None:
+        from .planning import normalize_storage_path
+
+        storage_id_by_path = {
+            normalize_storage_path(storage.path): str(storage.storage_id)
+            for storage in plan.storages
+        }
+
+    def action_for_result(result: Any) -> Any | None:
+        if plan is not None:
+            normalized_home = normalize_storage_path(
+                result.finding.codex_home
+            )
+            return action_lookup.get(
+                (normalized_home, str(result.finding.thread_id))
+            )
+        return action_lookup.get(("", str(result.finding.thread_id)))
+
+    def affected_conversations(result: Any, action: Any | None) -> list[dict[str, Any]]:
+        if action is None or plan is None:
+            return []
+        storage_id = storage_id_by_path.get(
+            normalize_storage_path(result.finding.codex_home),
+            str(action.target.storage_id),
+        )
+        root_id = str(action.target.thread_id)
+        affected_ids = tuple(
+            str(value)
+            for value in getattr(
+                action.impact,
+                "affected_thread_ids",
+                (root_id, *getattr(action.impact, "descendant_thread_ids", ())),
+            )
+        )
+        rendered: list[dict[str, Any]] = []
+        for thread_id in affected_ids:
+            summary = summary_lookup.get((storage_id, thread_id))
+            rendered.append(
+                {
+                    "relationship": (
+                        "root" if thread_id == root_id else "descendant"
+                    ),
+                    "target": {
+                        "storage_id": storage_id,
+                        "thread_id": thread_id,
+                    },
+                    "summary": (
+                        summary.to_dict() if summary is not None else None
+                    ),
+                }
+            )
+        return rendered
+
     if json_output:
+        report_payload = report.to_dict()
+        report_payload["results"] = [
+            {
+                **result.to_dict(),
+                "action_id": (
+                    str(action.action_id)
+                    if (action := action_for_result(result)) is not None
+                    else None
+                ),
+                "affected_conversations": affected_conversations(
+                    result,
+                    action,
+                ),
+            }
+            for result in report.results
+        ]
         payload = {
             "command": "clean",
             "confirmation_required": False,
             "selected_actions": [
                 action.to_dict() for action in selected_actions
             ],
-            **report.to_dict(),
+            **report_payload,
         }
         if plan is not None:
             payload["planning_storages"] = [
@@ -1542,6 +2621,10 @@ def _emit_planned_cleanup_result(
             payload["planning_errors"] = list(
                 getattr(plan, "errors", ())
             )
+            payload["planning_conversations"] = [
+                _conversation_entry_dict(conversation)
+                for conversation in getattr(plan, "conversations", ())
+            ]
             payload["plan_fingerprint"] = str(
                 getattr(plan, "plan_fingerprint", "")
             )
@@ -1552,7 +2635,8 @@ def _emit_planned_cleanup_result(
         f"清理完成：已验证删除 {report.succeeded} 条，"
         f"未成功 {report.failed} 条，共计划 {len(report.planned)} 条。\n"
     )
-    visible, hidden = _visible_items(report.results, limit)
+    visible = report.results
+    hidden = 0
     status_labels = {
         "deleted": "已删除",
         "not_deleted": "未删除",
@@ -1560,26 +2644,66 @@ def _emit_planned_cleanup_result(
         "unknown": "无法确认",
     }
     for result in visible:
+        action = action_for_result(result)
         status = getattr(
             result,
             "status",
             "deleted" if result.succeeded else "not_deleted",
         )
         stdout.write(
-            f"{status_labels.get(status, status):<8} "
-            f"{result.finding.platform:<8} "
-            f"{result.finding.short_thread_id()}"
+            f"{_display_value(status_labels.get(status, status)):<8} "
+            f"{_display_value(result.finding.platform):<8} "
+            f"{_short_thread_id(str(result.finding.thread_id))}"
         )
         if result.error:
             stdout.write(f"  {_human_message(result.error)}")
         stdout.write("\n")
+        if action is not None:
+            stdout.write(
+                "          动作 ID："
+                f"{_display_value(action.action_id, max_width=None)}\n"
+            )
+            storage_id = storage_id_by_path.get(
+                normalize_storage_path(result.finding.codex_home),
+                str(action.target.storage_id),
+            )
+            root_id = str(action.target.thread_id)
+            _write_conversation_summary(
+                stdout=stdout,
+                summary=summary_lookup.get((storage_id, root_id)),
+                thread_id=root_id,
+                relationship="清理结果根会话",
+                indent="          ",
+            )
+            for descendant_id in getattr(
+                action.impact,
+                "descendant_thread_ids",
+                (),
+            ):
+                descendant_id = str(descendant_id)
+                _write_conversation_summary(
+                    stdout=stdout,
+                    summary=summary_lookup.get(
+                        (storage_id, descendant_id)
+                    ),
+                    thread_id=descendant_id,
+                    relationship=(
+                        "由根会话 "
+                        f"{_display_value(root_id, max_width=None)} "
+                        "创建、受本次清理影响的关联任务会话"
+                    ),
+                    indent="            ",
+                )
         if status == "deleted" and result.request_error:
             stdout.write(
                 "          警告：请求曾报错，但磁盘验证确认已删除："
                 f"{_human_message(result.request_error)}\n"
             )
         for artifact in result.remaining_artifacts:
-            stdout.write(f"          仍存在：{artifact}\n")
+            stdout.write(
+                "          仍存在："
+                f"{_display_value(artifact, max_width=240)}\n"
+            )
     if hidden:
         stdout.write(
             f"... 另有 {hidden} 条结果未显示；"
@@ -1594,7 +2718,8 @@ def _emit_planned_cleanup_result(
 def _write_scan_errors(report: ScanReport, stderr: TextIO) -> None:
     for error in report.errors:
         stderr.write(
-            f"错误：{error.platform}：{error.error_type}："
+            f"错误：{_display_value(error.platform)}："
+            f"{_display_value(error.error_type)}："
             f"{_human_message(error.message)}\n"
         )
 
@@ -1713,8 +2838,12 @@ def _human_unavailable_reason(action: Any) -> str:
             reason,
             flags=re.IGNORECASE,
         )
-        target = f" {match.group(1)}" if match else ""
-        return (
+        target = (
+            " " + _display_value(match.group(1), max_width=None)
+            if match
+            else ""
+        )
+        return _human_message(
             f"关联任务对话{target} 的身份、来源、完整性或级联范围存在异常，"
             "必须单独复核，已阻止父对话删除"
         )
@@ -1731,6 +2860,7 @@ def _visible_items(items: Sequence[Any], limit: int) -> tuple[Sequence[Any], int
 
 
 def _short_thread_id(thread_id: str) -> str:
+    thread_id = safe_single_line(thread_id, max_width=None)
     if len(thread_id) <= 12:
         return thread_id
     return f"{thread_id[:8]}...{thread_id[-4:]}"
@@ -1764,7 +2894,7 @@ def _human_message(value: object) -> str:
             message,
             flags=re.IGNORECASE,
         )
-    return message
+    return safe_single_line(message, max_width=240)
 
 
 def _write_json(payload: dict[str, Any], output: TextIO) -> None:
@@ -1808,11 +2938,14 @@ def _existing_codex_binary(value: str) -> Path:
         is_file = path.is_file()
     except OSError as exc:
         raise argparse.ArgumentTypeError(
-            f"无法检查 Codex 可执行文件“{path}”：{exc}"
+            "无法检查 Codex 可执行文件“"
+            f"{safe_single_line(path, max_width=220)}”："
+            f"{safe_single_line(exc, max_width=220)}"
         ) from exc
     if not is_file:
         raise argparse.ArgumentTypeError(
-            f"Codex 可执行文件必须是现存普通文件：“{path}”"
+            "Codex 可执行文件必须是现存普通文件：“"
+            f"{safe_single_line(path, max_width=220)}”"
         )
     return path
 

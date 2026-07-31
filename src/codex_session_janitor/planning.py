@@ -17,7 +17,15 @@ from .codex_state import (
     read_thread_index,
     rollout_state_fingerprint,
 )
-from .models import Finding, RolloutRecord
+from .conversation_metadata import (
+    read_conversation_summaries,
+    read_legacy_thread_names,
+)
+from .legacy_index import (
+    LegacyIndexInventory,
+    inventory_legacy_index,
+)
+from .models import ConversationSummary, Finding, RolloutRecord
 
 
 class ActionKind(str, Enum):
@@ -135,6 +143,12 @@ class ActionImpact:
     frontend_references_preserved: bool = True
     indexed_thread_ids: tuple[str, ...] = ()
     rollout_state_fingerprints: tuple[str, ...] = ()
+    conversation_metadata_fingerprints: tuple[str, ...] = ()
+    resource_path: str | None = None
+    legacy_residual_thread_ids: tuple[str, ...] = ()
+    legacy_residual_line_count: int = 0
+    legacy_original_sha256: str | None = None
+    legacy_expected_sha256: str | None = None
     fingerprint_error: str | None = None
 
     @property
@@ -150,6 +164,16 @@ class ActionImpact:
             "rollout_state_fingerprints": list(
                 self.rollout_state_fingerprints
             ),
+            "conversation_metadata_fingerprints": list(
+                self.conversation_metadata_fingerprints
+            ),
+            "resource_path": self.resource_path,
+            "legacy_residual_thread_ids": list(
+                self.legacy_residual_thread_ids
+            ),
+            "legacy_residual_line_count": self.legacy_residual_line_count,
+            "legacy_original_sha256": self.legacy_original_sha256,
+            "legacy_expected_sha256": self.legacy_expected_sha256,
             "fingerprint_error": self.fingerprint_error,
             "descendant_thread_count": self.descendant_count,
             "descendant_thread_ids": list(self.descendant_thread_ids),
@@ -172,6 +196,8 @@ class CandidateAction:
     snapshot_fingerprint: str
     observation_ids: tuple[str, ...] = ()
     requires_explicit_selection: bool = False
+    resource_kind: str = "conversation"
+    legacy_inventory: LegacyIndexInventory | None = None
 
     @property
     def action_kind(self) -> ActionKind:
@@ -193,6 +219,22 @@ class CandidateAction:
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "observation_ids": list(self.observation_ids),
             "requires_explicit_selection": self.requires_explicit_selection,
+            "resource": (
+                {
+                    "kind": "legacy_index",
+                    "path": self.impact.resource_path,
+                    "inventory": (
+                        self.legacy_inventory.to_dict()
+                        if self.legacy_inventory is not None
+                        else None
+                    ),
+                }
+                if self.resource_kind == "legacy_index"
+                else {
+                    "kind": "conversation",
+                    "target": self.target.to_dict(),
+                }
+            ),
         }
 
 
@@ -242,8 +284,23 @@ class ActionResult:
 
 
 @dataclass(frozen=True)
+class ConversationCatalogEntry:
+    """One storage-qualified entry in the plan's identity catalog."""
+
+    target: TargetRef
+    summary: ConversationSummary
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target": self.target.to_dict(),
+            "summary": self.summary.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class CleanupPlan:
     storages: tuple[StorageLocation, ...] = ()
+    conversations: tuple[ConversationCatalogEntry, ...] = ()
     observations: tuple[Observation, ...] = ()
     actions: tuple[CandidateAction, ...] = ()
     planned_actions: tuple[PlannedAction, ...] = ()
@@ -282,15 +339,61 @@ class CleanupPlan:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        conversation_lookup = {
+            (
+                entry.target.storage_id,
+                entry.target.thread_id,
+            ): entry.summary
+            for entry in self.conversations
+        }
         return {
             "storage_count": len(self.storages),
+            "conversation_count": len(self.conversations),
             "observation_count": len(self.observations),
             "action_count": len(self.actions),
             "storages": [storage.to_dict() for storage in self.storages],
+            "conversations": [
+                conversation.to_dict()
+                for conversation in self.conversations
+            ],
             "observations": [
                 observation.to_dict() for observation in self.observations
             ],
             "actions": [action.to_dict() for action in self.actions],
+            "action_conversation_views": [
+                {
+                    "action_id": action.action_id,
+                    "affected_conversations": [
+                        {
+                            "relationship": (
+                                "root"
+                                if thread_id == action.target.thread_id
+                                else "descendant"
+                            ),
+                            "target": TargetRef(
+                                action.target.storage_id,
+                                thread_id,
+                            ).to_dict(),
+                            "summary": (
+                                summary.to_dict()
+                                if (
+                                    summary := conversation_lookup.get(
+                                        (
+                                            action.target.storage_id,
+                                            thread_id,
+                                        )
+                                    )
+                                )
+                                is not None
+                                else None
+                            ),
+                        }
+                        for thread_id in action.impact.affected_thread_ids
+                    ],
+                }
+                for action in self.actions
+                if action.kind is ActionKind.DELETE_CONVERSATION
+            ],
             "planned_actions": [
                 action.to_dict() for action in self.planned_actions
             ],
@@ -318,6 +421,11 @@ class _StorageEvidence:
     current_index_rows: dict[str, Mapping[str, Any]] = field(
         default_factory=dict
     )
+    conversation_summaries: dict[str, ConversationSummary] = field(
+        default_factory=dict
+    )
+    legacy_inventory: LegacyIndexInventory | None = None
+    legacy_inventory_error: str | None = None
     indexed_rollout_paths: dict[str, set[str]] = field(
         default_factory=lambda: defaultdict(set)
     )
@@ -413,6 +521,18 @@ def build_cleanup_plan(
     for storage_id, targets in targets_by_storage.items():
         evidence = storage_evidence[storage_id]
         thread_ids = sorted({target.thread_id for target in targets})
+        has_legacy_resource = any(
+            finding.details.get("finding_type") == "legacy_index_only"
+            for target in targets
+            for finding in findings_by_target.get(target, ())
+        )
+        if has_legacy_resource:
+            try:
+                evidence.legacy_inventory = inventory_legacy_index(
+                    evidence.path
+                )
+            except Exception as exc:
+                evidence.legacy_inventory_error = _error_text(exc)
         try:
             descendants = descendant_reader(evidence.path, thread_ids, strict=True)
             evidence.descendants = {
@@ -512,6 +632,27 @@ def build_cleanup_plan(
                         )
                     )
 
+        try:
+            evidence.conversation_summaries.update(
+                read_conversation_summaries(
+                    evidence.path,
+                    affected_ids,
+                    rollout_records_by_thread=(
+                        evidence.current_rollout_records
+                    ),
+                    legacy_names=read_legacy_thread_names(
+                        evidence.path,
+                        affected_ids,
+                    ),
+                    strict=True,
+                )
+            )
+        except Exception as exc:
+            evidence.errors.append(
+                "Could not inspect conversation display metadata: "
+                f"{_error_text(exc)}"
+            )
+
     # Adapter paths remain in Observation identity even after disappearing,
     # but ActionImpact is an exact approval snapshot of files confirmed to
     # exist while this plan is generated.
@@ -580,9 +721,32 @@ def build_cleanup_plan(
             ),
         )
     )
+    legacy_targets = {
+        observation.target
+        for observation in observations
+        if observation.finding_type == "legacy_index_only"
+    }
+    conversation_tuple = tuple(
+        ConversationCatalogEntry(
+            target=TargetRef(
+                storage_id=storage_id,
+                thread_id=thread_id,
+            ),
+            summary=summary,
+        )
+        for storage_id, evidence in sorted(storage_evidence.items())
+        for thread_id, summary in sorted(
+            evidence.conversation_summaries.items()
+        )
+        if TargetRef(storage_id, thread_id) not in legacy_targets
+    )
     fingerprint = _fingerprint(
         {
             "storages": [storage.to_dict() for storage in storages],
+            "conversations": [
+                conversation.to_dict()
+                for conversation in conversation_tuple
+            ],
             "actions": [
                 {
                     "action_id": action.action_id,
@@ -595,6 +759,7 @@ def build_cleanup_plan(
     )
     return CleanupPlan(
         storages=storages,
+        conversations=conversation_tuple,
         observations=observation_tuple,
         actions=action_tuple,
         errors=tuple(global_errors),
@@ -936,6 +1101,21 @@ def _candidate_actions(
     fingerprint_error = (
         "; ".join(fingerprint_errors) if fingerprint_errors else None
     )
+    is_legacy_resource = any(
+        obs.finding_type == "legacy_index_only"
+        for obs in observations
+    )
+    conversation_metadata_fingerprints = tuple(
+        sorted(
+            f"{thread_id}={summary.metadata_fingerprint}"
+            for thread_id in affected_ids
+            if not is_legacy_resource
+            if (
+                summary := evidence.conversation_summaries.get(thread_id)
+            )
+            is not None
+        )
+    )
     impact = ActionImpact(
         index_record_count=len(indexed_thread_ids),
         rollout_file_count=len(rollout_paths),
@@ -946,8 +1126,48 @@ def _candidate_actions(
         frontend_residual_count=frontend_residual_count,
         indexed_thread_ids=indexed_thread_ids,
         rollout_state_fingerprints=rollout_state_fingerprints,
+        conversation_metadata_fingerprints=(
+            conversation_metadata_fingerprints
+        ),
         fingerprint_error=fingerprint_error,
     )
+    if is_legacy_resource:
+        inventory = evidence.legacy_inventory
+        adapter_path = next(
+            (
+                obs.details.get("legacy_index_path")
+                for obs in observations
+                if obs.finding_type == "legacy_index_only"
+            ),
+            None,
+        )
+        impact = ActionImpact(
+            resource_path=(
+                str(inventory.index_path)
+                if inventory is not None
+                else str(adapter_path) if adapter_path else None
+            ),
+            legacy_residual_thread_ids=(
+                inventory.residual_thread_ids
+                if inventory is not None
+                else ()
+            ),
+            legacy_residual_line_count=(
+                inventory.residual_line_count
+                if inventory is not None
+                else 0
+            ),
+            legacy_original_sha256=(
+                inventory.original_sha256
+                if inventory is not None
+                else None
+            ),
+            legacy_expected_sha256=(
+                inventory.expected_sha256
+                if inventory is not None
+                else None
+            ),
+        )
     finding_types = sorted(
         {obs.finding_type for obs in affected_observations}
     )
@@ -989,9 +1209,25 @@ def _candidate_actions(
             "rollout_state_fingerprints": list(
                 rollout_state_fingerprints
             ),
+            "conversation_metadata": {
+                thread_id: summary.approval_payload()
+                for thread_id in affected_ids
+                if not is_legacy_resource
+                if (
+                    summary := evidence.conversation_summaries.get(
+                        thread_id
+                    )
+                )
+                is not None
+            },
+            "conversation_metadata_fingerprints": list(
+                conversation_metadata_fingerprints
+            ),
             "fingerprint_error": fingerprint_error,
         }
     )
+    if is_legacy_resource and evidence.legacy_inventory is not None:
+        snapshot = evidence.legacy_inventory.snapshot_fingerprint
     observation_ids = tuple(
         obs.observation_id for obs in affected_observations
     )
@@ -1049,6 +1285,17 @@ def _candidate_actions(
                         obs.details.get("requires_explicit_selection") is True
                         for obs in affected_observations
                     )
+                    or kind is ActionKind.REPAIR_LEGACY_INDEX
+                ),
+                legacy_inventory=(
+                    evidence.legacy_inventory
+                    if is_legacy_resource
+                    else None
+                ),
+                resource_kind=(
+                    "legacy_index"
+                    if is_legacy_resource
+                    else "conversation"
                 ),
             )
         )
@@ -1126,10 +1373,6 @@ _UNIMPLEMENTED_REASONS = {
         "Removing a frontend residual reference is not implemented for this "
         "frontend; Codex conversation deletion would not remove that record."
     ),
-    ActionKind.REPAIR_LEGACY_INDEX: (
-        "Repairing the legacy aggregate index is not implemented; aggregate "
-        "entries are not conversation deletion targets."
-    ),
 }
 
 
@@ -1152,6 +1395,19 @@ def _unavailable_reason(
             "Cleanup is blocked for this Codex data directory because current "
             f"state could not be read completely: {'; '.join(evidence.errors)}"
         )
+    if kind is ActionKind.REPAIR_LEGACY_INDEX:
+        if evidence.legacy_inventory_error is not None:
+            return (
+                "Legacy aggregate index repair is blocked because strict "
+                "inventory failed: "
+                + evidence.legacy_inventory_error
+            )
+        inventory = evidence.legacy_inventory
+        if inventory is None:
+            return "No strict legacy aggregate index inventory is available."
+        if not inventory.needs_repair:
+            return "The legacy aggregate index no longer has residual entries."
+        return None
     if kind in _UNIMPLEMENTED_REASONS:
         return _UNIMPLEMENTED_REASONS[kind]
     if kind is not ActionKind.DELETE_CONVERSATION:

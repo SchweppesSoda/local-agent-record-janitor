@@ -48,7 +48,7 @@ details = {
 
 这些字段描述的是“当前这条 Finding”而不是平台的永久能力。它们是计划生成器的证据输入，不会直接成为 CLI 删除目标。存在活跃引用、冲突证据或不完整关系时，应将 `cleanable` 设为 `False` 并给出阻断理由。
 
-Adapter 不负责决定最终风险或动作。核心层会按 `(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整关联任务范围，并生成 `delete_conversation`、修复、隔离、清除引用或 `keep` 等 CandidateAction。当前只有整条对话删除执行器可用。
+Adapter 不负责决定最终风险或动作。核心层会按 `(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整关联任务范围，并生成 `delete_conversation`、修复、隔离、清除引用或 `keep` 等 CandidateAction。当前可执行整条对话删除；旧聚合索引还可通过独立的文件级修复器处理，其他修复和隔离动作仍只展示。
 
 ## 判定模板
 

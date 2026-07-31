@@ -11,6 +11,7 @@ from codex_session_janitor.codex_state import (
     find_thread_rollouts,
     read_spawn_descendants,
     read_thread_index,
+    read_thread_metadata,
     rollout_state_fingerprint,
     scan_rollouts,
 )
@@ -177,6 +178,51 @@ class ThreadIndexTests(unittest.TestCase):
         )
         self.assertEqual(read_thread_index(self.codex_home, ["thread"]), {})
         self.assertEqual(read_thread_index(self.codex_home, []), {})
+
+    def test_metadata_reader_preserves_optional_column_presence(self) -> None:
+        state_db = self.codex_home / "state_5.sqlite"
+        with closing(sqlite3.connect(state_db)) as connection:
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO threads (id, name) VALUES (?, ?)",
+                (("null-name", None), ("named", "Readable name")),
+            )
+            connection.commit()
+
+        rows = read_thread_metadata(
+            self.codex_home,
+            ["named", "null-name", "missing", "named"],
+        )
+
+        self.assertEqual(set(rows), {"named", "null-name"})
+        self.assertEqual(rows["named"]["name"], "Readable name")
+        self.assertIn("name", rows["null-name"])
+        self.assertIsNone(rows["null-name"]["name"])
+        self.assertNotIn("title", rows["null-name"])
+        self.assertNotIn("cwd", rows["null-name"])
+
+    def test_metadata_reader_fails_closed_only_for_existing_bad_state(self) -> None:
+        self.assertEqual(
+            read_thread_metadata(self.codex_home, ["rollout-only"]),
+            {},
+        )
+        state_db = self.codex_home / "state_5.sqlite"
+        with closing(sqlite3.connect(state_db)) as connection:
+            connection.execute("CREATE TABLE unrelated (value TEXT)")
+            connection.commit()
+
+        with self.assertRaisesRegex(
+            CodexStateReadError,
+            r"required table 'threads' is missing",
+        ):
+            read_thread_metadata(self.codex_home, ["thread"], strict=True)
+
+        self.assertEqual(
+            read_thread_metadata(self.codex_home, ["thread"], strict=False),
+            {},
+        )
 
 
 class SpawnDescendantTests(unittest.TestCase):

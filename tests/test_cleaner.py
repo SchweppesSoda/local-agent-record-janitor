@@ -172,6 +172,7 @@ class CleanupExecutionTests(unittest.TestCase):
         approved_descendants=None,
         expected_scopes=None,
         approved_integrity_deletes=None,
+        pre_delete_validator=None,
     ):
         server = server or FakeAppServer()
         kwargs = {}
@@ -186,7 +187,41 @@ class CleanupExecutionTests(unittest.TestCase):
             approved_descendants=approved_descendants,
             expected_scopes=expected_scopes,
             approved_integrity_deletes=approved_integrity_deletes,
+            pre_delete_validator=pre_delete_validator,
             **kwargs,
+        )
+
+    def test_pre_delete_validator_blocks_request_and_remaining_batch(self) -> None:
+        first = self.finding("guarded-first")
+        second = self.finding("guarded-second")
+        assert first.rollout is not None
+        assert second.rollout is not None
+        server = FakeAppServer()
+        calls: list[str] = []
+
+        def validator(finding: Finding) -> None:
+            calls.append(finding.thread_id)
+            raise RuntimeError("live frontend reference appeared")
+
+        report = self.clean(
+            [first, second],
+            server=server,
+            expected_scopes={
+                finding_key(first): ExpectedDeletionScope(
+                    rollout_paths=(str(first.rollout.path),),
+                ),
+                finding_key(second): ExpectedDeletionScope(
+                    rollout_paths=(str(second.rollout.path),),
+                ),
+            },
+            pre_delete_validator=validator,
+        )
+
+        self.assertEqual(calls, ["guarded-first"])
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertEqual([item.status for item in report.results], ["unknown", "unknown"])
+        self.assertTrue(
+            all("no further deletion request" in (item.error or "") for item in report.results)
         )
 
     def rewrite_first_payload(
@@ -900,6 +935,61 @@ class CleanupExecutionTests(unittest.TestCase):
 
         self.assertEqual(server.deleted_thread_ids, [finding.thread_id])
         self.assertEqual(report.results[0].status, "deleted")
+
+    def test_conversation_metadata_drift_after_startup_blocks_delete(self) -> None:
+        finding = self.finding("metadata-drift")
+        assert finding.rollout is not None
+        finding.codex_indexed = True
+        create_thread_index(
+            self.codex_home,
+            [
+                {
+                    "id": finding.thread_id,
+                    "rollout_path": str(finding.rollout.path),
+                    "agent_nickname": "Before",
+                }
+            ],
+        )
+        action = next(
+            current
+            for current in build_cleanup_plan([finding]).actions
+            if current.kind is ActionKind.DELETE_CONVERSATION
+        )
+
+        def mutate_metadata() -> None:
+            with closing(
+                sqlite3.connect(self.codex_home / "state_5.sqlite")
+            ) as connection:
+                connection.execute(
+                    "UPDATE threads SET agent_nickname = ? WHERE id = ?",
+                    ("After", finding.thread_id),
+                )
+                connection.commit()
+
+        server = FakeAppServer(enter_callback=mutate_metadata)
+        report = self.clean(
+            [finding],
+            server=server,
+            expected_scopes={
+                finding_key(finding): ExpectedDeletionScope(
+                    descendant_thread_ids=(
+                        action.impact.descendant_thread_ids
+                    ),
+                    indexed_thread_ids=action.impact.indexed_thread_ids,
+                    rollout_paths=action.impact.rollout_paths,
+                    rollout_state_fingerprints=(
+                        action.impact.rollout_state_fingerprints
+                    ),
+                    conversation_metadata_fingerprints=(
+                        action.impact.conversation_metadata_fingerprints
+                    ),
+                )
+            },
+        )
+
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertEqual(report.results[0].status, "unknown")
+        self.assertIn("conversation_metadata_fingerprints", report.results[0].error or "")
 
     def test_native_orphan_plan_scope_executes_through_cleaner(
         self,
