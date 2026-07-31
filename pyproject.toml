@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-session-janitor"
+version = "0.1.0"
+description = "Audit Codex session consistency and safely execute action-based cleanup plans."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Fang Jun" }
+]
+keywords = ["codex", "aionui", "cindy", "session", "consistency", "cleanup"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: System :: Systems Administration",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+codex-session-janitor = "codex_session_janitor.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/SchweppesSoda/codex-session-janitor"
+Issues = "https://github.com/SchweppesSoda/codex-session-janitor/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
