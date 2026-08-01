@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..models import Finding
 from ..sqlite_utils import connect_readonly, table_exists
+
+if TYPE_CHECKING:
+    from ..inventory import FrontendSessionRecord
 
 
 class AdapterScanError(RuntimeError):
@@ -46,6 +50,19 @@ class FrontendAdapter(ABC):
     def _replace_live_thread_ids(self, thread_ids: set[str]) -> None:
         self._live_thread_ids = set(thread_ids)
 
+    def list_sessions(self) -> list[FrontendSessionRecord]:
+        """Return every Codex session row known to this frontend.
+
+        This intentionally is not abstract.  Native and third-party adapters
+        written against earlier Janitor releases therefore remain usable;
+        their Codex artifacts are still inventoried directly from the home.
+        Implementations must be read-only and should raise
+        :class:`AdapterScanError` when a present database cannot be read
+        completely.
+        """
+
+        return []
+
     @abstractmethod
     def scan(self) -> list[Finding]:
         raise NotImplementedError
@@ -64,8 +81,33 @@ def require_table_columns(
         raise AdapterScanError(
             f"{database} is incompatible: required table {table_name!r} is missing"
         )
+    columns = table_columns(
+        connection,
+        table_name=table_name,
+        database=database,
+    )
+    missing = sorted(required_columns - columns)
+    if missing:
+        raise AdapterScanError(
+            f"{database} is incompatible: table {table_name!r} is missing "
+            f"column(s) {', '.join(missing)}"
+        )
+
+
+def table_columns(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    database: Path,
+) -> set[str]:
+    """Return a validated table-column snapshot."""
+
+    if not table_exists(connection, table_name):
+        raise AdapterScanError(
+            f"{database} is incompatible: required table {table_name!r} is missing"
+        )
     try:
-        columns = {
+        return {
             row["name"]
             for row in connection.execute(f"PRAGMA table_info({table_name})")
             if isinstance(row["name"], str)
@@ -74,12 +116,28 @@ def require_table_columns(
         raise AdapterScanError(
             f"Could not inspect schema for {table_name!r} in {database}: {exc}"
         ) from exc
-    missing = sorted(required_columns - columns)
-    if missing:
+
+
+def optional_database_file_exists(database: Path) -> bool:
+    """Return false only when an optional frontend database is absent.
+
+    ``Path.is_file()`` suppresses some stat errors. Treating an unreadable or
+    structurally invalid path as "not installed" would weaken delete guards.
+    """
+
+    try:
+        status = database.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
         raise AdapterScanError(
-            f"{database} is incompatible: table {table_name!r} is missing "
-            f"column(s) {', '.join(missing)}"
+            f"Could not inspect frontend database path {database}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(status.st_mode):
+        raise AdapterScanError(
+            f"Frontend database path is not a regular file: {database}"
         )
+    return True
 
 
 def read_codex_evidence(

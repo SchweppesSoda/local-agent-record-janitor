@@ -1,11 +1,15 @@
 # Codex Session Janitor
 
-`codex-session-janitor` 是一个本地、保守的 Codex 会话一致性检查与清理工具。它处理两类问题：
+`codex-session-janitor` 是一个本地、保守的 Codex 与 Pi Agent 会话检查和清理工具。它处理两类问题：
 
 1. AionUI、Cindy 等外部 Agent 前端已经删除了对话，但其调用 Codex 产生的对话、列表记录或内容文件仍留在磁盘。
 2. Codex 自身的列表记录、内容文件和对话关联关系不一致，例如“只有列表记录没有内容”“只有内容没有列表记录”或孤立的关联任务对话日志。
 
-项目目前处于 **Alpha**。`scan` 始终只读。`clean` 会先生成基于动作的结构化计划；只有用户明确选择目标、计划通过执行前重验证，并在 TTY 中输入专用确认词或使用受约束的 `--yes`，才会执行会话硬删除或带备份的旧索引修复。
+此外，`records --platform pi` 可只读列出 Pi Agent 的本地 JSONL 会话，`delete --platform pi` 可在严格审批后永久删除精确选中的单个 JSONL 文件。它不保留、不输出或上传消息正文，不会登录 Pi，也不会访问任何云端历史。
+
+项目目前处于 **Alpha**。`scan` 和 `records` 始终只读。`records` 会列出正常、异常以及仍被 Cindy/AionUI 引用的 Codex 对话；`delete` 允许用户逐项选择其中任意仍有本地 Codex 数据的对话永久删除。`clean` 继续只处理扫描发现的异常，不会把正常记录混入保守批量清理路径。所有修改命令都要求明确目标并在执行前重验证。
+
+`delete` 的目标是 `(CODEX_HOME, thread_id)`，实际删除只调用官方 Codex `thread/delete`。Cindy/AionUI 数据库在该路径中始终只读：输出会明确列出仍保留的第三方引用，它们在 Codex 对话删除后可能成为前端孤立映射。
 
 ## 为什么需要它
 
@@ -55,6 +59,7 @@ Codex 的本地会话不是一个文件，而是至少包含：
 - native 扫描可在 Windows、macOS 和 Linux 使用，前提是 Codex 使用标准 `~/.codex` 数据布局，且可信的 `codex` 可执行文件位于 `PATH`；
 - AionUI 和 Cindy 的默认数据库、数据目录及捆绑 Codex 自动发现目前主要针对 Windows；
 - 其他平台上的第三方前端路径尚无公开 CLI 支持承诺，不应依赖隐藏参数或内部程序接口建立自动化。
+- Pi Agent 在 Windows、macOS 和 Linux 均使用其公开的本地会话布局；默认目录为 `~/.pi/agent`，会话目录为 `~/.pi/agent/sessions`。会话目录的优先级为 `--pi-session-dir`、`PI_CODING_AGENT_SESSION_DIR`、合并后的项目/全局 `settings.json` 的 `sessionDir`、再到 `<agentDir>/sessions`；agent 目录本身按 `--pi-agent-dir`、`PI_CODING_AGENT_DIR`、`~/.pi/agent` 解析。`--pi-agent-dir` 不会覆盖明确的 session directory。
 
 安装后通常使用 `codex-session-janitor` 命令。如果 pip 安装的 console script 尚未进入 `PATH`，所有示例都可以改用 `python -m codex_session_janitor`（macOS/Linux 常用 `python3 -m codex_session_janitor`）。
 
@@ -110,6 +115,62 @@ python3 -m codex_session_janitor scan --platform native
 ```powershell
 codex-session-janitor scan
 ```
+
+列出全部正常/异常 Codex 记录及 Cindy/AionUI 引用：
+
+```powershell
+codex-session-janitor records
+codex-session-janitor records --platform cindy --limit 50
+codex-session-janitor records --thread-id 0198abcd
+codex-session-janitor records --json
+```
+
+`records` 只读聚合 `state_5.sqlite`、活动/归档 rollout、旧索引和前端映射。人类输出受 `--limit` 限制；JSON 始终完整，不受 `--limit` 截断。未分配 Codex thread ID 的前端会话也会显示，但不能删除；已知 Cindy profile 即使只剩独立 `codex-home`、前端数据库已经移除，也仍会作为原生 storage 纳入默认清单。
+
+Pi 会话使用独立清单，不会伪装成 Codex storage。只查看 Pi：
+
+```powershell
+codex-session-janitor records --platform pi
+codex-session-janitor records --platform pi --pi-agent-dir "$HOME/.pi/agent"
+codex-session-janitor records --platform pi --pi-session-dir 'D:\PiSessions' --json
+```
+
+默认或 `--platform all` 的 `records --json` 保留既有 Codex `records`、`errors` 和 `count` 字段，并另外包含 `pi_sessions`、`pi_failures`、`pi_count` 与 `total_count`。Pi 只提取结构/展示所需元数据：会话 ID、精确文件路径与状态、版本、时间、cwd、父/子会话关系、会话名称、provider/model 以及是否使用 OpenAI Codex；不保留或输出 message、thinking、tool 参数或聊天正文。默认布局只扫描 `root/<project>/*.jsonl`，自定义 sessionDir 扫描 `root/*.jsonl`；兼容模式最多检查两层，绝不无界递归。
+
+来源视图有明确边界：`--platform cindy` 显示 Cindy 专用 `codex-home` 中的全部对话及其前端映射，即使 SQLite 映射已经消失；`--platform aionui` 因与原生 Codex 共享数据目录，只显示有明确 AionUI 映射的对话和未映射行；`--platform native` 显示原生 `CODEX_HOME` 的完整底层清单；默认 `all` 显示三者并集。`delete` 使用同样的可选目标视图，但安全盘点始终读取相关数据目录的完整原生状态，并把所有已发现的 Cindy/AionUI adapter 保留为前端引用 guard，不会因为显示过滤而放宽删除检查。
+
+TTY 中逐项选择任意记录永久删除：
+
+```powershell
+codex-session-janitor delete
+```
+
+输入编号或范围（例如 `1,3-4`）；`delete` 不接受 `all`。最终计划会展示完整根 ID、所有级联关联任务对话、绝对数据目录、计划指纹和不会被删除的 Cindy/AionUI 引用。输入专用确认句 `客户端已关闭并确认永久删除` 后，工具会重建清单、精确比较批准指纹，再调用官方接口。
+
+非 TTY/自动化必须先明确目标做一次预览；预览退出码为 `2`，JSON 中包含所选范围的 `plan_fingerprint`：
+
+```powershell
+codex-session-janitor delete --thread-id 0198abcd --json
+
+codex-session-janitor delete --action-id 完整动作ID `
+  --plan-fingerprint 完整所选计划指纹 `
+  --clients-closed --yes --json
+```
+
+非 TTY 执行缺少明确的 `--thread-id`/完整 `--action-id`、匹配的计划指纹、`--clients-closed` 或 `--yes` 中任一条件都会停止且零修改。`--yes` 不能代替目标选择；执行前清单、级联范围、原生 artifact 或前端引用快照发生变化也会停止。
+
+Pi 删除使用 Pi 的公开语义：永久删除一份精确批准的本地 `.jsonl`，不会调用 Codex `thread/delete`，不会读取或修改 `auth.json`，也不会修改 `settings.json` 或任何服务端历史。为解析 session 目录优先级，工具只读 `settings.json` 的 `sessionDir`。它与 Codex 删除不能混用：
+
+```powershell
+# 先生成只读 JSON 预览，获得 session_id/action_id 和 plan_fingerprint
+codex-session-janitor delete --platform pi --session-id 完整Pi会话ID --json
+
+# 非 TTY 执行：必须绑定预览指纹并声明 Pi 客户端已关闭
+codex-session-janitor delete --platform pi --session-id 完整Pi会话ID `
+  --plan-fingerprint 完整所选计划指纹 --clients-closed --yes --json
+```
+
+TTY 可在 Pi 清单显示后输入一个临时编号；不支持 `all`。最终必须输入 `Pi 客户端已关闭并确认永久删除`。若继承的 `PI_SESSION_FILE` 标记目标为活动会话，或文件状态在预览后变化、目标不是常规 `.jsonl` 会话文件，命令会停止；其他仍在运行的 Pi 进程需由操作者通过 `--clients-closed` 或 TTY 确认保证已关闭。请先备份整个 Pi session 目录。
 
 仅扫描一个来源：
 
@@ -200,13 +261,15 @@ codex-session-janitor clean --platform native --codex-home 'D:\CodexData' `
 
 ## 删除是怎样完成的
 
-本工具不会直接 `DELETE` Codex SQLite 行，也不会直接删除 rollout JSONL。可安全处理的对话会按各自的 `CODEX_HOME` 启动对应 Codex：
+本工具不会直接 `DELETE` Codex SQLite 行，也不会直接删除 Codex rollout JSONL。可安全处理的 Codex 对话会按各自的 `CODEX_HOME` 启动对应 Codex：
 
 ```text
 initialize → initialized → thread/delete → 删除后验证
 ```
 
-官方 `thread/delete` 会硬删除活动或已归档对话，并一同删除由该对话创建的关联任务对话；rollout 已缺失时会按“已删除”处理。详见 [Codex app-server API 概览](https://learn.chatgpt.com/docs/app-server#api-overview)。
+官方 `thread/delete` 会硬删除活动或已归档对话，并一同删除由该对话创建的关联任务对话；rollout 已缺失时会按“已删除”处理。详见 [Codex app-server API](https://developers.openai.com/codex/app-server/)。
+
+Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `sessions/` 下的单个 JSONL，且 `/resume` 的删除操作也是删除该文件；本工具仅在批准后删除该精确文件。依据：[Pi Session File Format](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md)。
 
 这也意味着：
 
@@ -253,7 +316,7 @@ initialize → initialized → thread/delete → 删除后验证
 
 | 退出码 | 含义 |
 |---:|---|
-| `0` | 扫描成功，或所选删除、旧索引修复/还原成功 |
+| `0` | 扫描/记录清单成功，或所选删除、旧索引修复/还原成功 |
 | `1` | 扫描、选择、重验证、执行或执行后验证发生错误 |
 | `2` | 非 TTY 的修改命令未传 `--yes`，仅预览计划，没有修改 |
 
@@ -261,7 +324,7 @@ initialize → initialized → thread/delete → 删除后验证
 
 ## 重要限制
 
-- 当前只识别有明确证据的 AionUI/Cindy/Codex 状态；数据库 schema 变化可能导致 adapter 暂时不可用。
+- 当前只识别有明确证据的 AionUI/Cindy/Codex/Pi 状态；数据库 schema 或 Pi session 格式变化可能导致来源暂时不可用。
 - Finding 是 adapter 证据格式，不等于删除目标。计划生成器会把它聚合为 Observation，并根据完整当前状态生成 CandidateAction。
 - 兼容期仍读取 adapter 的能力证据，但它们不是 CLI 的唯一分区依据；冲突、活跃引用、范围不明或状态读取失败都会阻止动作。
 - rollout 扫描只读取首行 `session_meta`，不会解析或上传聊天正文。
@@ -270,6 +333,7 @@ initialize → initialized → thread/delete → 删除后验证
 - 路径错位、重复文件和残留关联记录不应通过手工“删一个文件”解决；单独关系修复等动作目前只显示、不执行。唯一直接文件替换例外是旧版聚合索引：严格清单只移除已证明无 live 会话的原始整行，并要求独占锁、审批快照、备份清单、原子替换和受保护还原。
 - 扫描失败按 Codex 数据目录归属，只阻止受影响位置；无法归属到保存位置的错误按 fail closed 处理。
 - 工具不清理 AionUI/Cindy 自身的消息表或软删除记录；它只处理经确认的 Codex 侧残留。
+- `scan` 与 `clean` 目前不处理 Pi；传入 `--platform pi` 会返回明确的不支持错误，而不是空成功。
 
 更多说明：
 
@@ -277,6 +341,8 @@ initialize → initialized → thread/delete → 删除后验证
 - [Finding 类型](docs/findings.md)
 - [Adapter 贡献指南](docs/adapters.md)
 - [给上游项目的修复建议](docs/upstream-fixes.md)
+- [全量记录与选择性删除设计及 review](docs/selective-record-management-design.md)
+- [Pi Agent 支持设计](docs/pi-agent-support-design.md)
 - [安全政策与操作清单](SECURITY.md)
 
 ## 开发

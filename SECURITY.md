@@ -14,6 +14,7 @@
 - AionUI、Cindy、Codex 二进制和本地数据库不是由攻击者控制的；
 - `PATH`、`CODEX_HOME`、`APPDATA`、`LOCALAPPDATA`、`COMSPEC` 等环境变量可信；
 - 本机没有恶意进程在扫描和删除之间替换数据库、rollout 或 Codex 可执行文件。
+- Pi 的 `sessions/` 目录、会话 JSONL 路径和 Pi Agent 进程不受攻击者控制；`--pi-agent-dir`/`--pi-session-dir` 指向操作者预期的本地目录。
 
 若这些条件不成立，请只使用隔离环境中的 `scan`，不要在 TTY 中确认删除，也不要执行带 `--yes` 的清理。
 
@@ -30,11 +31,13 @@
 
 对于 Cindy，前端数据库中的 `status='deleted'` 只是软删除证据。清除对应 Codex 对话后，即使手工恢复 Cindy 的状态，也无法恢复已经硬删除的 Codex 历史。
 
+Pi 删除是另一条独立路径：只可删除清单和计划中完全匹配的一份普通 `.jsonl` 会话文件，绝不递归删除目录，绝不按文件名模糊匹配。它只提取 session 的结构与展示元数据，消息正文不保留或输出；`auth.json` 永不读取或修改；`settings.json` 仅为解析 `sessionDir` 而只读，绝不修改；`models.json` 与 extensions 不读取。Pi OAuth token、登录状态和远端服务端历史不在本项目的信任边界内。
+
 ## 安全操作清单
 
 执行永久删除前：
 
-1. 完全退出 AionUI、Cindy、Codex Desktop/CLI，以及使用同一 `CODEX_HOME` 的后台进程。
+1. 完全退出 AionUI、Cindy、Codex Desktop/CLI，以及使用同一 `CODEX_HOME` 的后台进程；删除 Pi 前也完全退出 Pi 及可能写入同一 session 目录的后台进程。
 2. 备份相关前端数据库与完整 `CODEX_HOME`。
 3. 先执行 `scan --json`，检查错误属于哪些保存位置；无法归属的错误会阻止全部动作。
 4. 查看 `clean --json` 中的 Observation、CandidateAction、风险、影响、阻断理由、会话摘要目录和快照指纹。
@@ -98,6 +101,8 @@
 
 如果官方 `thread/delete` 无法安全处理某个状态，应报告并保留数据，而不是降级为直接文件/SQLite 删除。
 
+Pi 的直接文件删除是经上游公开会话格式确认的专用例外：只允许 `delete --platform pi`，只针对已解析 header、位于批准 session root 内、无 symlink/reparse-point 风险且删除前 `stat`/哈希仍匹配的普通 JSONL。任何活动会话、路径边界、文件身份或 TOCTOU 证据不完整都必须 fail closed。发布前应在 Windows 与 POSIX 合成 fixture 中覆盖：拒绝 `all`、拒绝 Pi 与其他平台混合、拒绝 auth/settings、拒绝文件替换/重写，并证明删除后仅指定 JSONL 消失。
+
 删除后结果必须是 `deleted`、`not_deleted`、`partial` 或 `unknown`。协议错误和超时不能代替验证：若实际范围已全部消失，应报告 `deleted` 并保留请求警告；若只消失一部分，应报告 `partial`。
 
 ## 发布安全门槛
@@ -129,6 +134,7 @@
 
 - 前端可能在扫描后恢复或重新关联软删除会话；
 - 后台 agent 可能仍在写 rollout；
+- Pi 可能在会话正在写入时追加 JSONL，或在预览后重建/替换目标文件；
 - 内容文件可能在路径和对话 ID 不变时改变来源 metadata 或文件状态；
 - 对话关联关系可能在扫描后新增；
 - SQLite WAL 中可能存在尚未被当前快照观察到的更新；
@@ -154,6 +160,7 @@
 - AionUI 数据目录中的 `aionui-backend.db` 及相关 `-wal`/`-shm`（若存在）；
 - Cindy 的数据库和独立 `codex-home`；
 - 标准 Codex 的完整 `.codex` 目录。
+- Pi 的完整 session root（通常为 `~/.pi/agent/sessions`）；不要以删除为目的复制或暴露 `~/.pi/agent/auth.json`。
 
 不要在 SQLite 仍有写入进程时只复制主 `.db` 文件。恢复时也应先关闭所有使用这些目录的进程，并恢复为一个一致的完整快照。
 

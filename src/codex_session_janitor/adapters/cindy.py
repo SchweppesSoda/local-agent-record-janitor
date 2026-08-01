@@ -12,8 +12,10 @@ from ..sqlite_utils import connect_readonly
 from .base import (
     AdapterScanError,
     FrontendAdapter,
+    optional_database_file_exists,
     read_codex_evidence,
     require_table_columns,
+    table_columns,
 )
 
 
@@ -31,6 +33,87 @@ class CindyAdapter(FrontendAdapter):
         super().__init__(database=database, codex_home=codex_home)
         root = cindy_root or database.parent
         self.codex_bin_hint = codex_bin_hint or discover_cindy_codex(root)
+
+    def list_sessions(self) -> list["FrontendSessionRecord"]:
+        """Read all Cindy Codex rows, including unassigned sessions."""
+
+        from ..inventory import FrontendSessionRecord
+
+        if not optional_database_file_exists(self.database):
+            return []
+        try:
+            with closing(connect_readonly(self.database)) as connection:
+                require_table_columns(
+                    connection,
+                    table_name="sessions",
+                    required_columns={
+                        "id",
+                        "sdk_session_id",
+                        "status",
+                        "agent_kind",
+                    },
+                    database=self.database,
+                )
+                columns = table_columns(
+                    connection,
+                    table_name="sessions",
+                    database=self.database,
+                )
+                optional = (
+                    "source",
+                    "created_at",
+                    "updated_at",
+                    "parent_session_id",
+                    "title",
+                    "working_dir",
+                )
+                projections = [
+                    column if column in columns else f"NULL AS {column}"
+                    for column in optional
+                ]
+                rows = connection.execute(
+                    f"""
+                    SELECT id, sdk_session_id, status, agent_kind,
+                           {", ".join(projections)}
+                    FROM sessions
+                    WHERE LOWER(TRIM(agent_kind)) = 'codex'
+                    ORDER BY id
+                    """
+                ).fetchall()
+        except AdapterScanError:
+            raise
+        except sqlite3.Error as exc:
+            raise AdapterScanError(
+                f"Could not inspect Cindy database {self.database}: {exc}"
+            ) from exc
+
+        if any(not isinstance(row["id"], str) or not row["id"].strip() for row in rows):
+            raise AdapterScanError(
+                f"{self.database} is incompatible: sessions.id contains an invalid value"
+            )
+        return [
+            FrontendSessionRecord(
+                platform=self.name,
+                platform_session_id=row["id"],
+                thread_id=_display_thread_id(row["sdk_session_id"]),
+                database=self.database,
+                codex_home=self.codex_home,
+                backend="codex",
+                status=_display_string(row["status"]),
+                updated_at_ms=_as_int(row["updated_at"]),
+                title=_display_string(row["title"]),
+                is_live=_normalized_string(row["status"]) != "deleted",
+                details={
+                    "agent_kind": row["agent_kind"],
+                    "source": row["source"],
+                    "created_at": row["created_at"],
+                    "parent_session_id": row["parent_session_id"],
+                    "working_dir": row["working_dir"],
+                },
+                codex_bin_hint=self.codex_bin_hint,
+            )
+            for row in rows
+        ]
 
     def scan(self) -> list[Finding]:
         self._replace_live_thread_ids(set())
@@ -135,7 +218,7 @@ class CindyAdapter(FrontendAdapter):
                 for record in records
                 if (normalized := _normalized_string(record.originator)) is not None
             }
-            foreign_originators = originators - {"cindy"}
+            foreign_originators = originators - {"cindy", "xdt-maker"}
             ownership_conflict = bool(foreign_originators)
             live_reference_count = int(row["live_reference_count"] or 0)
             descendants = evidence.descendants_by_parent.get(thread_id, ())
@@ -199,6 +282,7 @@ class CindyAdapter(FrontendAdapter):
                         "ownership_evidence": {
                             "agent_kind": "codex",
                             "expected_originator": "cindy",
+                            "expected_originators": ["cindy", "xdt-maker"],
                             "observed_originators": sorted(originators),
                             "legacy_missing_originator_accepted": not originators,
                         },
@@ -256,3 +340,14 @@ def _normalized_string(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized or None
+
+
+def _display_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _display_thread_id(value: object) -> str | None:
+    return _display_string(value)

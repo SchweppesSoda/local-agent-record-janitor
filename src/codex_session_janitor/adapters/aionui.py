@@ -13,8 +13,10 @@ from ..sqlite_utils import connect_readonly, table_exists
 from .base import (
     AdapterScanError,
     FrontendAdapter,
+    optional_database_file_exists,
     read_codex_evidence,
     require_table_columns,
+    table_columns,
 )
 
 
@@ -30,6 +32,102 @@ class AionUIAdapter(FrontendAdapter):
     ) -> None:
         super().__init__(database=database, codex_home=codex_home)
         self.codex_bin_hint = codex_bin_hint or discover_aionui_codex()
+
+    def list_sessions(self) -> list["FrontendSessionRecord"]:
+        """Read every AionUI Codex mapping across current and old schemas."""
+
+        from ..inventory import FrontendSessionRecord
+
+        if not optional_database_file_exists(self.database):
+            return []
+        try:
+            with closing(connect_readonly(self.database)) as connection:
+                require_table_columns(
+                    connection,
+                    table_name="acp_session",
+                    required_columns={
+                        "conversation_id",
+                        "session_id",
+                        "agent_id",
+                        "agent_source",
+                        "session_status",
+                        "last_active_at",
+                    },
+                    database=self.database,
+                )
+                require_table_columns(
+                    connection,
+                    table_name="conversations",
+                    required_columns={"id"},
+                    database=self.database,
+                )
+                metadata_join, backend_column = _backend_sql(connection, self.database)
+                conversation_columns = table_columns(
+                    connection,
+                    table_name="conversations",
+                    database=self.database,
+                )
+                title_column = "c.title" if "title" in conversation_columns else "NULL"
+                rows = connection.execute(
+                    f"""
+                    SELECT
+                        a.conversation_id,
+                        a.session_id,
+                        a.agent_id,
+                        a.agent_source,
+                        a.session_status,
+                        a.last_active_at,
+                        {backend_column} AS backend,
+                        {title_column} AS title,
+                        CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS conversation_exists
+                    FROM acp_session a
+                    LEFT JOIN conversations c ON c.id = a.conversation_id
+                    {metadata_join}
+                    ORDER BY a.conversation_id
+                    """
+                ).fetchall()
+        except AdapterScanError:
+            raise
+        except sqlite3.Error as exc:
+            raise AdapterScanError(
+                f"Could not inspect AionUI database {self.database}: {exc}"
+            ) from exc
+
+        if any(
+            not isinstance(row["conversation_id"], str)
+            or not row["conversation_id"].strip()
+            for row in rows
+        ):
+            raise AdapterScanError(
+                f"{self.database} is incompatible: acp_session.conversation_id "
+                "contains an invalid value"
+            )
+        # A current/old explicit backend is authoritative.  Unknown rows are
+        # retained so the catalog can confirm them using AionUI rollout
+        # originator evidence without rereading the frontend database.
+        return [
+            FrontendSessionRecord(
+                platform=self.name,
+                platform_session_id=row["conversation_id"],
+                thread_id=_display_string(row["session_id"]),
+                database=self.database,
+                codex_home=self.codex_home,
+                backend=_normalized_string(row["backend"]),
+                status=_display_string(row["session_status"]),
+                updated_at_ms=_as_int(row["last_active_at"]),
+                title=_display_string(row["title"]),
+                is_live=bool(row["conversation_exists"]),
+                details={
+                    "agent_id": row["agent_id"],
+                    "agent_source": row["agent_source"],
+                    "conversation_exists": bool(row["conversation_exists"]),
+                    "backend_known": _normalized_string(row["backend"]) is not None,
+                },
+                codex_bin_hint=self.codex_bin_hint,
+            )
+            for row in rows
+            if _normalized_string(row["backend"]) in {None, "codex"}
+        ]
 
     def scan(self) -> list[Finding]:
         self._replace_live_thread_ids(set())
@@ -56,20 +154,10 @@ class AionUIAdapter(FrontendAdapter):
                     required_columns={"id"},
                     database=self.database,
                 )
-                has_metadata = table_exists(connection, "agent_metadata")
-                if has_metadata:
-                    require_table_columns(
-                        connection,
-                        table_name="agent_metadata",
-                        required_columns={"agent_id", "backend"},
-                        database=self.database,
-                    )
-                metadata_join = (
-                    "LEFT JOIN agent_metadata m ON m.agent_id = a.agent_id"
-                    if has_metadata
-                    else ""
+                metadata_join, backend_column = _backend_sql(
+                    connection,
+                    self.database,
                 )
-                backend_column = "m.backend" if has_metadata else "NULL"
                 rows = connection.execute(
                     f"""
                     SELECT
@@ -289,6 +377,69 @@ def _normalized_string(value: object) -> str | None:
         return None
     normalized = value.strip().lower()
     return normalized or None
+
+
+def _display_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _backend_sql(
+    connection: sqlite3.Connection,
+    database: Path,
+) -> tuple[str, str]:
+    """Return a safe metadata join and normalized backend expression.
+
+    Current AionCore stores ``acp_session.agent_backend`` directly and uses
+    ``agent_metadata.id``.  Older AionUI databases have no direct column and
+    use ``agent_metadata.agent_id``.  No untrusted identifier is accepted.
+    """
+
+    acp_columns = table_columns(
+        connection,
+        table_name="acp_session",
+        database=database,
+    )
+    direct_backend = "agent_backend" in acp_columns
+    if not table_exists(connection, "agent_metadata"):
+        return "", "a.agent_backend" if direct_backend else "NULL"
+
+    metadata_columns = table_columns(
+        connection,
+        table_name="agent_metadata",
+        database=database,
+    )
+    join_key = (
+        "id"
+        if "id" in metadata_columns
+        else "agent_id"
+        if "agent_id" in metadata_columns
+        else None
+    )
+    if "backend" not in metadata_columns or join_key is None:
+        if direct_backend:
+            # The direct current-schema column is sufficient.  A stale or
+            # unrelated metadata table must not make it unreadable.
+            return "", "a.agent_backend"
+        missing = []
+        if "backend" not in metadata_columns:
+            missing.append("backend")
+        if join_key is None:
+            missing.append("id or agent_id")
+        raise AdapterScanError(
+            f"{database} is incompatible: table 'agent_metadata' is missing "
+            f"column(s) {', '.join(missing)}"
+        )
+
+    join = f"LEFT JOIN agent_metadata m ON m.{join_key} = a.agent_id"
+    backend = (
+        "COALESCE(a.agent_backend, m.backend)"
+        if direct_backend
+        else "m.backend"
+    )
+    return join, backend
 
 
 def _aionui_ownership(

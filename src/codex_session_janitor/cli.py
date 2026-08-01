@@ -32,6 +32,8 @@ from .discovery import (
     choose_codex_binary,
     default_appdata,
     default_codex_home,
+    discover_aionui_databases,
+    discover_cindy_profiles,
 )
 from .models import Finding
 from .rendering import safe_single_line
@@ -49,6 +51,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFIRMATION_REQUIRED = 2
 DEFAULT_HUMAN_LIMIT = 20
+MANUAL_DELETE_CONFIRMATION = "客户端已关闭并确认永久删除"
+PI_DELETE_CONFIRMATION = "Pi 客户端已关闭并确认永久删除"
 
 _RISK_ORDER = ("low", "review", "high", "blocked")
 _RISK_LABELS = {
@@ -471,6 +475,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(scan)
 
+    records = subparsers.add_parser(
+        "records",
+        help="只读列出 Codex 对话及 Pi Agent 本地会话",
+        description=(
+            "只读聚合 Codex 本地记录、Cindy/AionUI 引用以及 Pi Agent 会话；"
+            "不会启动 app-server，也不会修改任何数据库或文件。"
+        ),
+    )
+    _add_common_arguments(records)
+
+    delete = subparsers.add_parser(
+        "delete",
+        help="逐项永久删除 Codex 对话，或精确删除 Pi JSONL 会话文件",
+        description=(
+            "列出正常和异常对话，逐项选择 storage-qualified thread，"
+            "经客户端关闭确认和执行前精确重验证后调用官方 thread/delete；"
+            "仅 --platform pi 时删除精确批准的 Pi JSONL。Cindy/AionUI 引用只展示。"
+        ),
+    )
+    _add_common_arguments(delete)
+    delete.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过 TTY 最终确认提示；不能替代目标选择或客户端关闭声明",
+    )
+    delete.add_argument(
+        "--action-id",
+        action="append",
+        default=[],
+        metavar="ACTION_ID",
+        help=(
+            "选择 records/delete 计划中的完整稳定 action ID；可重复，"
+            "不能与 --thread-id 同时使用"
+        ),
+    )
+    delete.add_argument(
+        "--session-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="仅 --platform pi：选择完整 Pi session ID；可重复，不能与 --action-id 同时使用",
+    )
+    delete.add_argument(
+        "--plan-fingerprint",
+        metavar="FINGERPRINT",
+        help="非 TTY 执行时回传此前预览得到的完整所选计划指纹",
+    )
+    delete.add_argument(
+        "--clients-closed",
+        action="store_true",
+        help="确认所选 Codex 或 Pi session 目录的相关客户端均已关闭",
+    )
+    delete.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        metavar="SECONDS",
+        help="app-server 请求超时秒数（默认：30）",
+    )
+
     clean = subparsers.add_parser(
         "clean",
         help="生成动作计划，并通过官方 Codex app-server 清理明确选择的对话",
@@ -561,7 +625,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--platform",
         action="append",
-        choices=("all", "aionui", "cindy", "native"),
+        choices=("all", "aionui", "cindy", "native", "pi"),
         help="选择扫描来源；可重复（默认：all）",
     )
     parser.add_argument(
@@ -582,7 +646,8 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_HUMAN_LIMIT,
         metavar="COUNT",
         help=(
-            "人类可读输出中 scan 最多显示的问题数、clean 最多显示的候选目标数；"
+            "人类可读输出中 scan 最多显示的问题数，records/delete/clean "
+            "最多显示的记录或候选目标数；"
             "最终计划和执行结果始终完整；0 表示全部"
             f"（默认：{DEFAULT_HUMAN_LIMIT}；JSON 不受限制）"
         ),
@@ -610,6 +675,18 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cindy-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-db", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-codex-home", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--pi-agent-dir",
+        type=Path,
+        metavar="PATH",
+        help="Pi Agent 数据目录（否则 PI_CODING_AGENT_DIR，再否则 ~/.pi/agent）",
+    )
+    parser.add_argument(
+        "--pi-session-dir",
+        type=Path,
+        metavar="PATH",
+        help="Pi session JSONL 根目录（优先于环境变量、settings.json 与 agentDir 默认值）",
+    )
 
 
 def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
@@ -620,30 +697,58 @@ def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
     adapters: list[FrontendAdapter] = []
 
     if "aionui" in selected:
-        aionui_db = args.aionui_db or (
-            appdata / "AionUi" / "aionui" / "aionui-backend.db"
-        )
         aionui_home = args.aionui_codex_home or native_codex_home
-        adapters.append(
-            AionUIAdapter(
-                database=aionui_db,
-                codex_home=aionui_home,
-                codex_bin_hint=codex_bin,
-            )
+        aionui_databases = (
+            (args.aionui_db,)
+            if args.aionui_db is not None
+            else discover_aionui_databases(appdata)
         )
+        if not aionui_databases:
+            # Keep a missing current path visible as an inventory diagnostic.
+            aionui_databases = (appdata / "AionUi" / "aionui" / "aionui.db",)
+        for aionui_db in aionui_databases:
+            adapters.append(
+                AionUIAdapter(
+                    database=aionui_db,
+                    codex_home=aionui_home,
+                    codex_bin_hint=codex_bin,
+                )
+            )
 
     if "cindy" in selected:
-        cindy_root = args.cindy_root or (appdata / "CindyGlobal")
-        cindy_db = args.cindy_db or (cindy_root / "cindy-local-v1.db")
-        cindy_home = args.cindy_codex_home or (cindy_root / "codex-home")
-        adapters.append(
-            CindyAdapter(
-                database=cindy_db,
-                codex_home=cindy_home,
-                cindy_root=cindy_root,
-                codex_bin_hint=codex_bin,
+        explicit_cindy = any(
+            value is not None
+            for value in (
+                args.cindy_root,
+                args.cindy_db,
+                args.cindy_codex_home,
             )
         )
+        if explicit_cindy:
+            cindy_root = args.cindy_root or (appdata / "CindyGlobal")
+            cindy_db = args.cindy_db or (cindy_root / "cindy-local-v1.db")
+            cindy_home = args.cindy_codex_home or (cindy_root / "codex-home")
+            cindy_profiles = ((cindy_root, cindy_db, cindy_home),)
+        else:
+            discovered = discover_cindy_profiles(appdata)
+            cindy_profiles = tuple(
+                (profile.root, profile.database, profile.codex_home)
+                for profile in discovered
+            )
+            if not cindy_profiles:
+                root = appdata / "CindyGlobal"
+                cindy_profiles = (
+                    (root, root / "cindy-local-v1.db", root / "codex-home"),
+                )
+        for cindy_root, cindy_db, cindy_home in cindy_profiles:
+            adapters.append(
+                CindyAdapter(
+                    database=cindy_db,
+                    codex_home=cindy_home,
+                    cindy_root=cindy_root,
+                    codex_bin_hint=codex_bin,
+                )
+            )
 
     if "native" in selected:
         try:
@@ -670,6 +775,8 @@ def main(
     stderr: TextIO | None = None,
     app_server_factory: AppServerFactory = CodexAppServer,
     binary_resolver: BinaryResolver = choose_codex_binary,
+    pi_catalog_builder: Any | None = None,
+    pi_delete_executor: Any | None = None,
 ) -> int:
     input_stream = stdin or sys.stdin
     output = stdout or sys.stdout
@@ -685,8 +792,39 @@ def main(
             stderr=error_output,
         )
 
+    if args.command in {"scan", "clean"} and _has_explicit_pi(args.platform):
+        return _emit_fatal_error(
+            args.command,
+            RuntimeError(
+                "Pi Agent 当前仅支持 records 和 delete；scan/clean 不支持 --platform pi。"
+            ),
+            json_output=args.json,
+            stdout=output,
+            stderr=error_output,
+        )
+
+    if args.command == "delete" and _has_explicit_pi(args.platform):
+        if not _is_exact_pi_platform(args.platform):
+            return _emit_fatal_error(
+                "delete",
+                RuntimeError(
+                    "Pi 删除不能与其他 --platform 混用；请仅使用 --platform pi。"
+                ),
+                json_output=args.json,
+                stdout=output,
+                stderr=error_output,
+            )
+        return _run_pi_delete(
+            args,
+            stdin=input_stream,
+            stdout=output,
+            stderr=error_output,
+            catalog_builder=pi_catalog_builder,
+            delete_executor=pi_delete_executor,
+        )
+
     try:
-        if args.command == "clean":
+        if args.command in {"clean", "delete"}:
             if adapters is not None:
                 # All supplied adapters participate as live-reference guards;
                 # --platform filters candidates only after the protected scan.
@@ -708,6 +846,35 @@ def main(
             json_output=args.json,
             stdout=output,
             stderr=error_output,
+        )
+
+    if args.command == "records":
+        return _run_records(
+            args,
+            active_adapters=active_adapters,
+            stdout=output,
+            stderr=error_output,
+            pi_catalog_builder=pi_catalog_builder,
+            include_pi=(
+                _records_include_pi(args.platform)
+                and (
+                    adapters is None
+                    or pi_catalog_builder is not None
+                    or _has_explicit_pi(args.platform)
+                    or args.pi_agent_dir is not None
+                    or args.pi_session_dir is not None
+                )
+            ),
+        )
+    if args.command == "delete":
+        return _run_manual_delete(
+            args,
+            active_adapters=active_adapters,
+            stdin=input_stream,
+            stdout=output,
+            stderr=error_output,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
         )
 
     scan_report = scan_adapters(active_adapters)
@@ -744,6 +911,1075 @@ def main(
         stderr=error_output,
     )
     return EXIT_OK if selected_report.ok else EXIT_ERROR
+
+
+def _run_records(
+    args: argparse.Namespace,
+    *,
+    active_adapters: Sequence[FrontendAdapter],
+    stdout: TextIO,
+    stderr: TextIO,
+    pi_catalog_builder: Any | None = None,
+    include_pi: bool = True,
+) -> int:
+    """Build and render the full read-only session catalog."""
+
+    try:
+        catalog: Any | None = None
+        conversations: tuple[Any, ...] = ()
+        unmapped_sessions: tuple[Any, ...] = ()
+        if _is_exact_pi_platform(args.platform) and args.thread_id:
+            raise ActionSelectionError(
+                "Pi records 不支持 --thread-id；请列出 Pi 会话后使用 delete --session-id 或 --action-id。",
+                kind="pi_thread_selector_unsupported",
+            )
+        if not _is_exact_pi_platform(args.platform):
+            from .inventory import build_session_catalog
+
+            catalog = build_session_catalog(active_adapters)
+            platform_conversations = _platform_visible_conversations(
+                tuple(catalog.conversations),
+                args.platform,
+                adapters=active_adapters,
+            )
+            conversations = _filter_record_conversations(
+                platform_conversations,
+                tuple(args.thread_id),
+            )
+            unmapped_sessions = _platform_visible_frontend_sessions(
+                tuple(catalog.unmapped_frontend_sessions),
+                args.platform,
+            )
+        pi_catalog = (
+            _build_pi_catalog(args, pi_catalog_builder)
+            if include_pi
+            else None
+        )
+    except Exception as exc:
+        return _emit_fatal_error(
+            "records",
+            exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    if args.json:
+        payload = _catalog_payload(catalog) if catalog is not None else {
+            "schema_version": 1,
+            "records": [],
+            "unmapped_frontend_sessions": [],
+            "errors": [],
+            "count": 0,
+        }
+        payload["command"] = "records"
+        payload["records"] = [
+            _object_dict(conversation) for conversation in conversations
+        ]
+        payload["unmapped_frontend_sessions"] = [
+            _object_dict(session) for session in unmapped_sessions
+        ]
+        payload["count"] = len(conversations)
+        if pi_catalog is not None:
+            payload.update(_pi_catalog_payload(pi_catalog))
+        payload["total_count"] = len(conversations) + int(
+            payload.get("pi_count", 0)
+        )
+        # JSON is deliberately never truncated by --limit.
+        _write_json(payload, stdout)
+    else:
+        if catalog is not None:
+            _write_records_catalog(
+                catalog,
+                conversations=conversations,
+                stdout=stdout,
+                stderr=stderr,
+                limit=args.limit,
+                unmapped_sessions=unmapped_sessions,
+            )
+        if pi_catalog is not None:
+            _write_pi_session_catalog(pi_catalog, stdout=stdout, stderr=stderr, limit=args.limit)
+    catalog_failures = tuple(catalog.failures) if catalog is not None else ()
+    pi_failures = tuple(getattr(pi_catalog, "failures", getattr(pi_catalog, "errors", ())) or ())
+    return EXIT_ERROR if catalog_failures or pi_failures else EXIT_OK
+
+
+def _build_pi_catalog(args: argparse.Namespace, builder: Any | None = None) -> Any:
+    """Call Pi's public catalog builder; CLI never parses transcripts itself."""
+
+    if builder is None:
+        from .pi_sessions import build_pi_session_catalog
+
+        builder = build_pi_session_catalog
+    return builder(
+        agent_dir=args.pi_agent_dir,
+        session_root=args.pi_session_dir,
+    )
+
+
+def _pi_catalog_payload(catalog: Any) -> dict[str, Any]:
+    raw = _object_dict(catalog)
+    sessions = raw.get("records", raw.get("sessions", ()))
+    failures = raw.get("errors", raw.get("failures", ()))
+    return {
+        "pi_sessions": list(sessions),
+        "pi_failures": list(failures),
+        "pi_count": len(sessions),
+    }
+
+
+def _write_pi_session_catalog(
+    catalog: Any,
+    *,
+    stdout: TextIO,
+    stderr: TextIO,
+    limit: int,
+) -> None:
+    sessions = tuple(sorted(
+        getattr(catalog, "sessions", getattr(catalog, "records", ())) or (),
+        key=lambda session: _path_identity(
+            _record_field(session, "path", default=".")
+        ),
+    ))
+    failures = tuple(getattr(catalog, "failures", getattr(catalog, "errors", ())) or ())
+    stdout.write(f"\nPi Agent 会话：{len(sessions)} 条（只读；不显示正文）。\n")
+    visible, hidden = _visible_items(sessions, limit)
+    for session in visible:
+        stdout.write(
+            "  - ID："
+            f"{_display_value(_record_field(session, 'session_id', default='-'), max_width=None)}\n"
+            "    文件："
+            f"{_display_value(_record_field(session, 'path', default='-'), max_width=220)}\n"
+        )
+        timestamp = _record_field(session, "timestamp", default=None)
+        cwd = _record_field(session, "cwd", default=None)
+        if timestamp:
+            stdout.write(f"    时间：{_display_value(timestamp)}\n")
+        if cwd:
+            stdout.write(f"    工作目录：{_display_value(cwd, max_width=220)}\n")
+        action_id = _record_field(session, "action_id", default=None)
+        if action_id:
+            stdout.write(
+                "    Pi 删除 action ID："
+                f"{_display_value(action_id, max_width=None)}\n"
+            )
+    if hidden:
+        stdout.write(f"  ... 另有 {hidden} 条 Pi 会话未显示；请使用 --json 或增大 --limit。\n")
+    for failure in failures:
+        stderr.write(
+            "错误：Pi 会话清单读取失败："
+            f"{_human_message(_record_field(failure, 'message', default=failure))}\n"
+        )
+
+
+def _run_pi_delete(
+    args: argparse.Namespace,
+    *,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    catalog_builder: Any | None,
+    delete_executor: Any | None,
+) -> int:
+    """Handle Pi's separate, file-level delete contract without Codex RPC."""
+
+    try:
+        from .pi_delete import build_pi_delete_plan, execute_pi_delete
+
+        catalog = _build_pi_catalog(args, catalog_builder)
+        plan = build_pi_delete_plan(catalog)
+        executor = delete_executor or execute_pi_delete
+        if args.thread_id:
+            raise ActionSelectionError(
+                "--platform pi 请使用 --session-id 或 --action-id，不能使用 --thread-id。",
+                kind="pi_selector_required",
+            )
+        if args.action_id and args.session_id:
+            raise ActionSelectionError(
+                "Pi 删除中 --action-id 与 --session-id 不能同时使用。",
+                kind="conflicting_selectors",
+            )
+    except Exception as exc:
+        return _emit_pi_delete_error(exc, plan=None, json_output=args.json, stdout=stdout, stderr=stderr)
+
+    tty = (
+        not args.json
+        and bool(getattr(stdin, "isatty", lambda: False)())
+        and bool(getattr(stdout, "isatty", lambda: False)())
+    )
+    selectors = tuple(args.action_id or args.session_id)
+    try:
+        if not selectors and tty:
+            _write_pi_session_catalog(catalog, stdout=stdout, stderr=stderr, limit=args.limit)
+            actions, hidden = _visible_items(tuple(plan.executable_actions), args.limit)
+            _write_pi_delete_action_catalog(actions, stdout=stdout)
+            if hidden:
+                stdout.write(f"另有 {hidden} 条 Pi 删除目标未进入本次编号；请增大 --limit。\n")
+            if not actions:
+                stdout.write("没有可安全删除的 Pi 会话；未做任何更改。\n")
+                return EXIT_ERROR if tuple(plan.errors) else EXIT_OK
+            stdout.write("\n请输入要永久删除的 Pi 会话编号（例如 1,3-5；不支持 all）：")
+            stdout.flush()
+            raw = stdin.readline()
+            if raw == "":
+                stdout.write("\n输入已结束，已取消；未做任何更改。\n")
+                return EXIT_OK
+            numbers = parse_number_selection(raw, item_count=len(actions))
+            selectors = tuple(str(actions[index - 1].action_id) for index in numbers)
+        elif not selectors:
+            raise ActionSelectionError(
+                "Pi 删除不支持 all 或隐式批量选择；请使用 --session-id、--action-id 或 TTY 编号。",
+                kind="selection_required",
+            )
+        selected_plan = plan.with_selected_actions(selectors)
+    except Exception as exc:
+        return _emit_pi_delete_error(exc, plan=plan, json_output=args.json, stdout=stdout, stderr=stderr)
+
+    plan_rendered = False
+    if not args.yes:
+        if args.json:
+            _write_json(_pi_delete_preview(selected_plan, confirmation_required=True), stdout)
+        else:
+            _write_pi_delete_plan(selected_plan, stdout=stdout)
+            plan_rendered = True
+        if not tty:
+            return EXIT_CONFIRMATION_REQUIRED
+        stdout.write(f"请输入“{PI_DELETE_CONFIRMATION}”继续，输入其他内容取消：")
+        stdout.flush()
+        if stdin.readline().strip() != PI_DELETE_CONFIRMATION:
+            stdout.write("已取消；未做任何更改。\n")
+            return EXIT_OK
+        clients_closed = True
+    else:
+        if not args.clients_closed:
+            return _emit_pi_delete_error(
+                ActionSelectionError(
+                    "使用 --yes 执行 Pi 永久删除时必须同时提供 --clients-closed。",
+                    kind="clients_not_closed",
+                ),
+                plan=selected_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        clients_closed = True
+
+    approved_fingerprint = str(selected_plan.plan_fingerprint or "")
+    if not tty:
+        if not args.plan_fingerprint:
+            return _emit_pi_delete_error(
+                ActionSelectionError("非 TTY Pi 删除必须提供 --plan-fingerprint。", kind="fingerprint_required"),
+                plan=selected_plan, json_output=args.json, stdout=stdout, stderr=stderr,
+            )
+        approved_fingerprint = str(args.plan_fingerprint)
+        if approved_fingerprint != str(selected_plan.plan_fingerprint):
+            return _emit_pi_delete_error(
+                ActionSelectionError("Pi 计划指纹与当前精确文件状态不一致；请重新预览。", kind="fingerprint_mismatch"),
+                plan=selected_plan, json_output=args.json, stdout=stdout, stderr=stderr,
+            )
+    elif not args.json and not plan_rendered:
+        _write_pi_delete_plan(selected_plan, stdout=stdout)
+
+    try:
+        result = executor(
+            selected_plan,
+            catalog_builder=lambda: _build_pi_catalog(args, catalog_builder),
+            approved_plan_fingerprint=approved_fingerprint,
+            clients_closed=clients_closed,
+        )
+    except Exception as exc:
+        return _emit_pi_delete_error(exc, plan=selected_plan, json_output=args.json, stdout=stdout, stderr=stderr)
+    _emit_pi_delete_result(result, selected_plan, json_output=args.json, stdout=stdout)
+    return EXIT_OK if not tuple(getattr(result, "not_deleted", ())) and not tuple(getattr(result, "unknown", ())) else EXIT_ERROR
+
+
+def _pi_delete_preview(plan: Any, *, confirmation_required: bool) -> dict[str, Any]:
+    return {
+        "command": "delete",
+        "platform": "pi",
+        "confirmation_required": confirmation_required,
+        "plan": _object_dict(plan),
+        "plan_fingerprint": str(getattr(plan, "plan_fingerprint", "") or ""),
+        "selected_actions": [_object_dict(action) for action in tuple(plan.actions)],
+    }
+
+
+def _write_pi_delete_plan(plan: Any, *, stdout: TextIO) -> None:
+    stdout.write("\nPi 永久删除最终计划（每项仅删除一个 JSONL 文件）：\n")
+    for action in tuple(plan.actions):
+        stdout.write(
+            "  - Pi session ID：" f"{_display_value(action.session_id, max_width=None)}\n"
+            "    文件：" f"{_display_value(action.path, max_width=220)}\n"
+            "    action ID：" f"{_display_value(action.action_id, max_width=None)}\n"
+        )
+    stdout.write(
+        "  所选计划指纹：" f"{_display_value(plan.plan_fingerprint, max_width=None)}\n"
+        "  永久性：仅删除上述 Pi JSONL；不会触碰 auth.json、settings 或服务端历史。\n"
+    )
+
+
+def _write_pi_delete_action_catalog(actions: Sequence[Any], *, stdout: TextIO) -> None:
+    """Number exactly the sequence accepted by the TTY selector."""
+
+    stdout.write("\n可永久删除的 Pi 会话（不支持 all）：\n")
+    for index, action in enumerate(actions, start=1):
+        stdout.write(
+            f"  {index}. Pi session ID：{_display_value(action.session_id, max_width=None)}\n"
+            f"     文件：{_display_value(action.path, max_width=220)}\n"
+            f"     action ID：{_display_value(action.action_id, max_width=None)}\n"
+        )
+
+
+def _emit_pi_delete_error(error: Exception, *, plan: Any | None, json_output: bool, stdout: TextIO, stderr: TextIO) -> int:
+    if json_output:
+        payload: dict[str, Any] = {
+            "command": "delete", "platform": "pi",
+            "error": {"type": type(error).__name__, "kind": str(getattr(error, "kind", "invalid")), "message": str(error)},
+        }
+        if plan is not None:
+            payload.update(_pi_delete_preview(plan, confirmation_required=False))
+            payload["error"] = {"type": type(error).__name__, "kind": str(getattr(error, "kind", "invalid")), "message": str(error)}
+        _write_json(payload, stdout)
+    else:
+        stderr.write(f"错误：{_human_message(error)}\n")
+    return EXIT_ERROR
+
+
+def _emit_pi_delete_result(result: Any, plan: Any, *, json_output: bool, stdout: TextIO) -> None:
+    if json_output:
+        _write_json({**_pi_delete_preview(plan, confirmation_required=False), **_object_dict(result)}, stdout)
+        return
+    deleted = len(tuple(getattr(result, "deleted", ()) or ()))
+    failures = len(tuple(getattr(result, "not_deleted", ()) or ())) + len(tuple(getattr(result, "unknown", ()) or ()))
+    stdout.write(f"Pi 永久删除完成：已验证删除 {deleted} 条，未确认或失败 {failures} 条。\n")
+    for item in tuple(getattr(result, "results", ()) or ()):
+        stdout.write(f"  {item.status} {item.session_id}：{_display_value(item.path, max_width=220)}\n")
+        if item.error:
+            stdout.write(f"    原因：{_human_message(item.error)}\n")
+
+
+def _has_explicit_pi(platforms: Sequence[str] | None) -> bool:
+    return bool(platforms and "pi" in platforms)
+
+
+def _is_exact_pi_platform(platforms: Sequence[str] | None) -> bool:
+    return bool(platforms) and set(platforms) == {"pi"}
+
+
+def _records_include_pi(platforms: Sequence[str] | None) -> bool:
+    return not platforms or "all" in platforms or "pi" in platforms
+
+
+def _run_manual_delete(
+    args: argparse.Namespace,
+    *,
+    active_adapters: Sequence[FrontendAdapter],
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+) -> int:
+    """Preview and execute explicit, fingerprint-bound manual deletions."""
+
+    try:
+        from .inventory import build_session_catalog
+        from .manual_delete import (
+            build_manual_delete_plan,
+            execute_manual_delete,
+        )
+
+        catalog = build_session_catalog(active_adapters)
+        plan = build_manual_delete_plan(catalog)
+        visible_conversations = _platform_visible_conversations(
+            tuple(catalog.conversations),
+            args.platform,
+            adapters=active_adapters,
+        )
+        visible_unmapped = _platform_visible_frontend_sessions(
+            tuple(catalog.unmapped_frontend_sessions),
+            args.platform,
+        )
+        eligible_action_ids = {
+            str(conversation.action_id)
+            for conversation in visible_conversations
+        }
+    except Exception as exc:
+        return _emit_fatal_error(
+            "delete",
+            exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    tty = (
+        not args.json
+        and bool(getattr(stdin, "isatty", lambda: False)())
+        and bool(getattr(stdout, "isatty", lambda: False)())
+    )
+    interactive_selection = tty and not args.action_id and not args.thread_id
+
+    try:
+        if args.action_id and args.thread_id:
+            raise ActionSelectionError(
+                "--action-id 与 --thread-id 不能同时使用。",
+                kind="conflicting_selectors",
+            )
+        selectors = tuple(args.action_id or args.thread_id)
+        if interactive_selection:
+            _write_records_catalog(
+                catalog,
+                conversations=visible_conversations,
+                stdout=stdout,
+                stderr=stderr,
+                limit=args.limit,
+                unmapped_sessions=visible_unmapped,
+            )
+            available_actions = tuple(
+                action
+                for action in plan.actions
+                if bool(action.available)
+                and str(action.action_id) in eligible_action_ids
+            )
+            selection_actions, hidden_actions = _visible_items(
+                available_actions,
+                args.limit,
+            )
+            _write_manual_action_catalog(
+                plan,
+                actions=selection_actions,
+                stdout=stdout,
+                limit=0,
+            )
+            if hidden_actions:
+                stdout.write(
+                    f"  ... 另有 {hidden_actions} 条目标未进入本次编号；"
+                    "请增大 --limit 后再选择。\n"
+                )
+            if not selection_actions:
+                stdout.write("没有可选择的永久删除目标；未做任何更改。\n")
+                return EXIT_ERROR if tuple(catalog.failures) else EXIT_OK
+            stdout.write(
+                "\n请输入要永久删除的编号或范围（例如 1,3-5；不支持 all）："
+            )
+            stdout.flush()
+            raw_selection = stdin.readline()
+            if raw_selection == "":
+                stdout.write("\n输入已结束，已取消；未做任何更改。\n")
+                return EXIT_OK
+            numbers = parse_number_selection(
+                raw_selection,
+                item_count=len(selection_actions),
+            )
+            selectors = tuple(
+                str(action.action_id)
+                for index, action in enumerate(selection_actions, start=1)
+                if index in numbers
+            )
+        elif not selectors:
+            raise ActionSelectionError(
+                "delete 不支持 all 或隐式批量选择；请使用 --thread-id、"
+                "--action-id 或 TTY 交互编号逐项选择。",
+                kind="selection_required",
+            )
+
+        selected_plan = plan.with_selected_actions(selectors)
+        outside_view = tuple(
+            action
+            for action in selected_plan.actions
+            if str(action.action_id) not in eligible_action_ids
+        )
+        if outside_view:
+            raise ActionSelectionError(
+                "所选目标不属于 --platform 指定的记录视图；"
+                "aionui/cindy 视图只允许选择该前端映射的对话。",
+                kind="platform_mismatch",
+                matches=tuple(str(action.action_id) for action in outside_view),
+            )
+    except Exception as exc:
+        return _emit_manual_delete_error(
+            exc,
+            catalog=catalog,
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    approved_fingerprint = str(selected_plan.plan_fingerprint or "")
+    if not args.json:
+        _write_manual_delete_plan(selected_plan, stdout=stdout)
+
+    if not args.yes:
+        if not tty:
+            if args.json:
+                _write_manual_delete_preview(
+                    selected_plan,
+                    catalog=catalog,
+                    confirmation_required=True,
+                    stdout=stdout,
+                )
+            else:
+                stdout.write(
+                    "未做任何更改。非 TTY 执行必须回传以上计划指纹，并同时提供 "
+                    "--clients-closed --yes。\n"
+                )
+            return EXIT_CONFIRMATION_REQUIRED
+        stdout.write(
+            f"请输入“{MANUAL_DELETE_CONFIRMATION}”继续，输入其他内容取消："
+        )
+        stdout.flush()
+        confirmation = stdin.readline()
+        if confirmation.strip() != MANUAL_DELETE_CONFIRMATION:
+            stdout.write("已取消；未做任何更改。\n")
+            return EXIT_OK
+        clients_closed = True
+    else:
+        if not args.clients_closed:
+            return _emit_manual_delete_error(
+                ActionSelectionError(
+                    "使用 --yes 执行永久删除时必须同时提供 --clients-closed。",
+                    kind="clients_not_closed",
+                ),
+                catalog=catalog,
+                plan=selected_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        clients_closed = True
+        if not tty:
+            if not args.plan_fingerprint:
+                return _emit_manual_delete_error(
+                    ActionSelectionError(
+                        "非 TTY 执行必须提供此前预览得到的 --plan-fingerprint。",
+                        kind="fingerprint_required",
+                    ),
+                    catalog=catalog,
+                    plan=selected_plan,
+                    json_output=args.json,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            approved_fingerprint = str(args.plan_fingerprint)
+            if approved_fingerprint != str(selected_plan.plan_fingerprint):
+                return _emit_manual_delete_error(
+                    ActionSelectionError(
+                        "计划指纹与当前所选目标、级联范围或引用快照不一致；"
+                        "请重新预览。",
+                        kind="fingerprint_mismatch",
+                    ),
+                    catalog=catalog,
+                    plan=selected_plan,
+                    json_output=args.json,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+    def rebuild_catalog() -> Any:
+        return build_session_catalog(active_adapters)
+
+    try:
+        report = execute_manual_delete(
+            selected_plan,
+            catalog_builder=rebuild_catalog,
+            approved_plan_fingerprint=approved_fingerprint,
+            clients_closed=clients_closed,
+            timeout=args.timeout,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+        )
+    except Exception as exc:
+        return _emit_manual_delete_error(
+            exc,
+            catalog=catalog,
+            plan=selected_plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    _emit_manual_delete_result(
+        report,
+        plan=selected_plan,
+        json_output=args.json,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return EXIT_OK if report.ok else EXIT_ERROR
+
+
+def _object_dict(value: Any) -> dict[str, Any]:
+    converter = getattr(value, "to_dict", None)
+    if callable(converter):
+        result = converter()
+        if isinstance(result, dict):
+            return result
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {
+        key: item
+        for key, item in vars(value).items()
+        if not key.startswith("_")
+    }
+
+
+def _catalog_payload(catalog: Any) -> dict[str, Any]:
+    payload = _object_dict(catalog)
+    # Keep these documented keys stable even for a third-party catalog
+    # implementation whose serializer omits an empty collection.
+    payload.setdefault(
+        "records",
+        [_object_dict(item) for item in catalog.conversations],
+    )
+    payload.setdefault(
+        "unmapped_frontend_sessions",
+        [_object_dict(item) for item in catalog.unmapped_frontend_sessions],
+    )
+    payload.setdefault(
+        "errors",
+        [_object_dict(item) for item in catalog.failures],
+    )
+    payload.setdefault("count", len(catalog.conversations))
+    return payload
+
+
+def _filter_record_conversations(
+    conversations: Sequence[Any],
+    selectors: Sequence[str],
+) -> tuple[Any, ...]:
+    requested = tuple(selector.strip() for selector in selectors if selector.strip())
+    if not requested:
+        return tuple(conversations)
+    selected: list[Any] = []
+    selected_keys: set[tuple[str, str]] = set()
+    for selector in requested:
+        exact = [
+            item for item in conversations if str(item.thread_id) == selector
+        ]
+        matches = exact or [
+            item
+            for item in conversations
+            if str(item.thread_id).startswith(selector)
+        ]
+        if not matches:
+            raise ActionSelectionError(
+                f"未找到对话：{selector}",
+                kind="not_found",
+                selector=selector,
+            )
+        for item in matches:
+            key = (str(item.codex_home), str(item.thread_id))
+            if key not in selected_keys:
+                selected.append(item)
+                selected_keys.add(key)
+    return tuple(selected)
+
+
+def _platform_visible_conversations(
+    conversations: Sequence[Any],
+    platforms: Sequence[str] | None,
+    *,
+    adapters: Sequence[Any] | None = None,
+) -> tuple[Any, ...]:
+    """Apply source-view semantics without pruning the safety catalog.
+
+    ``native`` and ``all`` expose the complete native inventory for the
+    adapters' homes. Cindy's dedicated Codex homes are themselves source
+    evidence, while shared-home AionUI records require a frontend mapping.
+    The underlying catalog remains complete for deletion guards.
+    """
+
+    selected = _selected_platforms(platforms)
+    if not platforms or "all" in platforms:
+        return tuple(conversations)
+    native_homes = {
+        _path_identity(getattr(adapter, "codex_home"))
+        for adapter in tuple(adapters or ())
+        if str(getattr(adapter, "name", "")).lower() == "native"
+        and getattr(adapter, "codex_home", None) is not None
+    }
+    cindy_homes = {
+        _path_identity(getattr(adapter, "codex_home"))
+        for adapter in tuple(adapters or ())
+        if str(getattr(adapter, "name", "")).lower() == "cindy"
+        and getattr(adapter, "codex_home", None) is not None
+    }
+    return tuple(
+        conversation
+        for conversation in conversations
+        if (
+            "native" in selected
+            and (
+                not adapters
+                or _path_identity(conversation.codex_home) in native_homes
+            )
+        )
+        or (
+            "cindy" in selected
+            and _path_identity(conversation.codex_home) in cindy_homes
+        )
+        or any(
+            str(_record_field(session, "platform", default="")).lower()
+            in selected
+            for session in tuple(getattr(conversation, "frontend_sessions", ()) or ())
+        )
+    )
+
+
+def _path_identity(value: Any) -> str:
+    path = Path(value).expanduser()
+    try:
+        canonical = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        canonical = Path(os.path.abspath(os.fspath(path)))
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(canonical))))
+
+
+def _platform_visible_frontend_sessions(
+    sessions: Sequence[Any],
+    platforms: Sequence[str] | None,
+) -> tuple[Any, ...]:
+    selected = _selected_platforms(platforms)
+    return tuple(
+        session
+        for session in sessions
+        if str(_record_field(session, "platform", default="")).lower()
+        in selected
+    )
+
+
+def _write_records_catalog(
+    catalog: Any,
+    *,
+    conversations: Sequence[Any],
+    stdout: TextIO,
+    stderr: TextIO,
+    limit: int,
+    unmapped_sessions: Sequence[Any] | None = None,
+) -> None:
+    unmapped = tuple(
+        catalog.unmapped_frontend_sessions
+        if unmapped_sessions is None
+        else unmapped_sessions
+    )
+    stdout.write(
+        f"会话记录：{len(conversations)} 条 Codex 对话，"
+        f"{len(unmapped)} 条未映射前端记录。\n"
+    )
+    visible, hidden = _visible_items(conversations, limit)
+    grouped: dict[str, list[Any]] = {}
+    for conversation in visible:
+        grouped.setdefault(str(conversation.codex_home), []).append(conversation)
+    for codex_home, items in grouped.items():
+        stdout.write(
+            "\nCodex 数据目录："
+            f"{_display_value(codex_home, max_width=220)}\n"
+        )
+        for conversation in items:
+            _write_managed_conversation(conversation, stdout=stdout)
+    if hidden:
+        stdout.write(
+            f"... 另有 {hidden} 条对话未显示；请使用 --json 或增大 --limit。\n"
+        )
+
+    if unmapped:
+        stdout.write("\n未分配或无效的前端会话映射（不可删除）：\n")
+        unmapped_visible, unmapped_hidden = _visible_items(unmapped, limit)
+        for session in unmapped_visible:
+            stdout.write(
+                "  - "
+                f"{_display_value(_record_field(session, 'platform', default='frontend'))} "
+                f"session={_display_value(_record_field(session, 'platform_session_id', 'session_id', default='-'), max_width=None)} "
+                f"status={_display_value(_record_field(session, 'status', default='unknown'))} "
+                f"db={_display_value(_record_field(session, 'platform_db', 'database', default='-'), max_width=180)}\n"
+            )
+        if unmapped_hidden:
+            stdout.write(f"  ... 另有 {unmapped_hidden} 条未显示。\n")
+    for failure in tuple(catalog.failures):
+        stderr.write(
+            "错误：清单来源读取失败："
+            f"{_display_value(_record_field(failure, 'platform', 'source', default='unknown'))}："
+            f"{_human_message(_record_field(failure, 'message', default=failure))}\n"
+        )
+
+
+def _write_managed_conversation(conversation: Any, *, stdout: TextIO) -> None:
+    summary = getattr(conversation, "summary", None)
+    name = _record_field(
+        summary,
+        "display_name",
+        "name",
+        "title",
+        default=None,
+    )
+    project = _record_field(summary, "project_label", default=None)
+    cwd = _record_field(summary, "cwd", default=None)
+    thread_id = str(conversation.thread_id)
+    stdout.write(
+        "  - "
+        f"{_display_value(name or '(未命名对话)')}"
+        f"  [{_display_value(project or '未知项目')}]\n"
+        "    ID："
+        f"{_display_value(thread_id, max_width=None)}\n"
+    )
+    if cwd:
+        stdout.write(
+            "    工作目录："
+            f"{_display_value(cwd, max_width=220)}\n"
+        )
+    rollouts = tuple(getattr(conversation, "rollouts", ()) or ())
+    archived = _record_field(summary, "archived", default=None)
+    state = [
+        f"indexed={'yes' if bool(getattr(conversation, 'indexed', False)) else 'no'}",
+        f"legacy_indexed={'yes' if bool(getattr(conversation, 'legacy_indexed', False)) else 'no'}",
+        f"rollouts={len(rollouts)}",
+        f"archived={archived if archived is not None else 'unknown'}",
+        f"artifacts={'yes' if bool(getattr(conversation, 'artifact_present', False)) else 'no'}",
+    ]
+    stdout.write(f"    Codex 状态：{', '.join(state)}\n")
+    originator = _record_field(summary, "originator", default=None)
+    if originator:
+        stdout.write(f"    来源：{_display_value(originator)}\n")
+    descendants = tuple(
+        str(value)
+        for value in getattr(conversation, "descendant_thread_ids", ())
+    )
+    if descendants:
+        stdout.write(
+            f"    永久删除将级联 {len(descendants)} 条关联任务对话："
+            f"{', '.join(_display_value(value, max_width=None) for value in descendants)}\n"
+        )
+    if bool(getattr(conversation, "cascade_unknown", False)):
+        stdout.write("    级联范围：无法完整确认，禁止删除。\n")
+    frontend_sessions = tuple(
+        getattr(conversation, "frontend_sessions", ()) or ()
+    )
+    for session in frontend_sessions:
+        stdout.write(
+            "    前端引用（只读保留）："
+            f"{_display_value(_record_field(session, 'platform', default='frontend'))} "
+            f"session={_display_value(_record_field(session, 'platform_session_id', 'session_id', default='-'), max_width=None)} "
+            f"status={_display_value(_record_field(session, 'status', default='unknown'))} "
+            f"live={'yes' if bool(_record_field(session, 'is_live', 'live', default=False)) else 'no'}\n"
+        )
+    blockers = tuple(getattr(conversation, "blockers", ()) or ())
+    if blockers:
+        stdout.write(
+            "    不可删除："
+            f"{'; '.join(_human_message(value) for value in blockers)}\n"
+        )
+    elif bool(getattr(conversation, "delete_supported", False)):
+        stdout.write(
+            "    删除动作 ID："
+            f"{_display_value(getattr(conversation, 'action_id', ''), max_width=None)}\n"
+        )
+    else:
+        stdout.write("    不可删除：没有可验证的 SQLite thread 行或 rollout。\n")
+
+
+def _record_field(
+    value: Any,
+    *names: str,
+    default: Any = None,
+) -> Any:
+    if value is None:
+        return default
+    for name in names:
+        if isinstance(value, Mapping) and name in value:
+            candidate = value[name]
+        else:
+            candidate = getattr(value, name, None)
+        if candidate not in (None, ""):
+            return candidate
+    return default
+
+
+def _write_manual_action_catalog(
+    plan: Any,
+    *,
+    actions: Sequence[Any],
+    stdout: TextIO,
+    limit: int,
+) -> None:
+    stdout.write("\n可永久删除的根目标（不支持 all）：\n")
+    visible, hidden = _visible_items(actions, limit)
+    for index, action in enumerate(visible, start=1):
+        stdout.write(
+            f"  {index}. {_display_value(action.thread_id, max_width=None)}\n"
+            "     Codex 数据目录："
+            f"{_display_value(action.codex_home, max_width=220)}\n"
+            "     action ID："
+            f"{_display_value(action.action_id, max_width=None)}；"
+            f"级联范围 {len(tuple(action.affected_thread_ids))} 条\n"
+        )
+    if hidden:
+        stdout.write(
+            f"  ... 另有 {hidden} 条目标未显示；请增大 --limit 后再选择。\n"
+        )
+
+
+def _write_manual_delete_plan(plan: Any, *, stdout: TextIO) -> None:
+    stdout.write("\n永久删除最终计划：\n")
+    for action in tuple(plan.actions):
+        stdout.write(
+            "  - 根对话："
+            f"{_display_value(action.thread_id, max_width=None)}\n"
+            "    Codex 数据目录："
+            f"{_display_value(action.codex_home, max_width=220)}\n"
+            "    完整影响范围："
+            f"{', '.join(_display_value(value, max_width=None) for value in action.affected_thread_ids)}\n"
+            "    action ID："
+            f"{_display_value(action.action_id, max_width=None)}\n"
+        )
+        frontend_sessions = tuple(action.frontend_sessions)
+        if frontend_sessions:
+            stdout.write(
+                f"    警告：{len(frontend_sessions)} 条 Cindy/AionUI 前端引用"
+                "不会被删除，执行后可能成为孤立映射。\n"
+            )
+            for session in frontend_sessions:
+                stdout.write(
+                    "      - "
+                    f"{_display_value(_record_field(session, 'platform', default='frontend'))} "
+                    f"session={_display_value(_record_field(session, 'platform_session_id', 'session_id', default='-'), max_width=None)} "
+                    f"db={_display_value(_record_field(session, 'platform_db', 'database', default='-'), max_width=180)}（保留）\n"
+                )
+    stdout.write(
+        "  所选计划指纹："
+        f"{_display_value(plan.plan_fingerprint, max_width=None)}\n"
+        "  永久性：thread/delete 不可撤销，并会删除以上关联任务对话；"
+        "第三方数据库行不会被改写。\n"
+    )
+
+
+def _write_manual_delete_preview(
+    plan: Any,
+    *,
+    catalog: Any,
+    confirmation_required: bool,
+    stdout: TextIO,
+) -> None:
+    _write_json(
+        {
+            "command": "delete",
+            "confirmation_required": confirmation_required,
+            "plan": _object_dict(plan),
+            "plan_fingerprint": str(plan.plan_fingerprint or ""),
+            "selected_actions": [
+                _object_dict(action) for action in tuple(plan.actions)
+            ],
+            "catalog_failures": [
+                _object_dict(item) for item in tuple(catalog.failures)
+            ],
+            "third_party_references_deleted": False,
+        },
+        stdout,
+    )
+
+
+def _emit_manual_delete_error(
+    error: Exception,
+    *,
+    catalog: Any,
+    plan: Any,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if json_output:
+        _write_json(
+            {
+                "command": "delete",
+                "error": {
+                    "type": type(error).__name__,
+                    "kind": str(getattr(error, "kind", "invalid")),
+                    "message": str(error),
+                },
+                "plan": _object_dict(plan),
+                "plan_fingerprint": str(
+                    getattr(plan, "plan_fingerprint", "") or ""
+                ),
+                "catalog_failures": [
+                    _object_dict(item) for item in tuple(catalog.failures)
+                ],
+                "third_party_references_deleted": False,
+            },
+            stdout,
+        )
+    else:
+        stderr.write(f"错误：{_human_message(error)}\n")
+    return EXIT_ERROR
+
+
+def _emit_manual_delete_result(
+    report: CleanupReport,
+    *,
+    plan: Any,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> None:
+    if json_output:
+        _write_json(
+            {
+                "command": "delete",
+                "confirmation_required": False,
+                "plan_fingerprint": str(plan.plan_fingerprint or ""),
+                "selected_actions": [
+                    _object_dict(action) for action in tuple(plan.actions)
+                ],
+                **report.to_dict(),
+                "third_party_references_deleted": False,
+                "retained_frontend_sessions": [
+                    _object_dict(session)
+                    for action in tuple(plan.actions)
+                    for session in tuple(action.frontend_sessions)
+                ],
+            },
+            stdout,
+        )
+        return
+    stdout.write(
+        f"永久删除完成：已验证删除 {report.succeeded} 条根目标，"
+        f"未成功 {report.failed} 条。\n"
+    )
+    action_by_target = {
+        (str(action.codex_home), str(action.thread_id)): action
+        for action in tuple(plan.actions)
+    }
+    labels = {
+        "deleted": "已删除",
+        "not_deleted": "未删除",
+        "partial": "部分删除",
+        "unknown": "无法确认",
+    }
+    for result in report.results:
+        stdout.write(
+            f"  {labels.get(result.status, result.status)} "
+            f"{_display_value(result.finding.thread_id, max_width=None)}"
+        )
+        if result.error:
+            stdout.write(f"：{_human_message(result.error)}")
+        stdout.write("\n")
+        action = action_by_target.get(
+            (str(result.finding.codex_home), str(result.finding.thread_id))
+        )
+        if action is not None and tuple(action.frontend_sessions):
+            stdout.write(
+                f"    注意：{len(tuple(action.frontend_sessions))} 条第三方前端引用"
+                "仍保留，未从 Cindy/AionUI 数据库删除。\n"
+            )
+        for artifact in result.remaining_artifacts:
+            stdout.write(
+                "    仍存在："
+                f"{_display_value(artifact, max_width=240)}\n"
+            )
+    _write_scan_errors(
+        ScanReport(findings=[], errors=report.scan_errors),
+        stderr,
+    )
 
 
 def _run_legacy_index_restore(
@@ -2956,6 +4192,7 @@ __all__ = [
     "EXIT_CONFIRMATION_REQUIRED",
     "EXIT_ERROR",
     "EXIT_OK",
+    "MANUAL_DELETE_CONFIRMATION",
     "NumberSelectionError",
     "build_parser",
     "create_default_adapters",
