@@ -46,6 +46,14 @@ class Failure:
 
 
 @dataclass(frozen=True)
+class QualifiedFailure:
+    agent_dir: Path
+    session_root: Path
+    message: str
+    blocks_delete: bool = True
+
+
+@dataclass(frozen=True)
 class Catalog:
     records: tuple[Record, ...]
     errors: tuple[Failure, ...] = ()
@@ -105,7 +113,97 @@ class PiDeleteTests(unittest.TestCase):
         duplicate = build_pi_delete_plan(Catalog((parent, same_id)))
         self.assertFalse(duplicate.actions[0].available)
         duplicate_uuid = build_pi_delete_plan(Catalog((parent, replace(child, session_id="parent"))))
-        self.assertTrue(all(not action.available for action in duplicate_uuid.actions))
+        self.assertTrue(all(action.available for action in duplicate_uuid.actions))
+        with self.assertRaises(PiDeleteSelectionError):
+            duplicate_uuid.with_selected_actions(("parent",))
+
+    def test_same_session_id_across_roots_is_actionable_only_by_qualified_action(self) -> None:
+        standalone = self.record("same")
+        cindy_root = Path(self.temp.name) / "Cindy" / "pi-agent-home"
+        cindy_session_root = cindy_root / "sessions"
+        cindy_path = cindy_session_root / "same.jsonl"
+        cindy = self.record("same", path=cindy_path)
+        cindy = replace(
+            cindy,
+            pi_root=cindy_root,
+            session_root=cindy_session_root,
+            action_id="pi:cindy:same",
+        )
+
+        plan = build_pi_delete_plan(Catalog((standalone, cindy)))
+
+        self.assertTrue(all(action.available for action in plan.actions))
+        with self.assertRaises(PiDeleteSelectionError):
+            plan.with_selected_actions(("same",))
+        selected = plan.with_selected_actions((cindy.action_id,))
+        self.assertEqual(selected.actions[0].path, cindy.path)
+
+    def test_catalog_failures_are_root_scoped_and_unqualified_failures_are_global(self) -> None:
+        standalone = self.record("standalone")
+        cindy_root = Path(self.temp.name) / "Cindy" / "pi-agent-home"
+        cindy_session_root = cindy_root / "sessions"
+        cindy_path = cindy_session_root / "cindy.jsonl"
+        cindy = replace(
+            self.record("cindy", path=cindy_path),
+            pi_root=cindy_root,
+            session_root=cindy_session_root,
+            action_id="pi:cindy",
+        )
+        cindy_failure = QualifiedFailure(
+            cindy_root,
+            cindy_session_root,
+            "Cindy reference DB is incompatible",
+        )
+
+        scoped = build_pi_delete_plan(Catalog((standalone, cindy), (cindy_failure,)))
+        by_id = {action.action_id: action for action in scoped.actions}
+
+        self.assertTrue(by_id[standalone.action_id].available)
+        self.assertEqual(by_id[standalone.action_id].catalog_blocking_failures, ())
+        self.assertFalse(by_id[cindy.action_id].available)
+        self.assertIn(
+            "Cindy reference DB is incompatible",
+            by_id[cindy.action_id].catalog_blocking_failures[0],
+        )
+        self.assertIn(
+            "Cindy reference DB is incompatible",
+            str(by_id[cindy.action_id].approval_payload()),
+        )
+
+        global_plan = build_pi_delete_plan(
+            Catalog((standalone, cindy), (Failure("unknown root failure"),))
+        )
+        self.assertTrue(all(not action.available for action in global_plan.actions))
+
+    def test_new_root_scoped_failure_after_approval_stops_that_action(self) -> None:
+        record = self.record("standalone")
+        original = Catalog((record,))
+        selected = build_pi_delete_plan(original).with_selected_actions(
+            (record.action_id,)
+        )
+        changed = Catalog(
+            (record,),
+            (
+                QualifiedFailure(
+                    record.pi_root,
+                    record.session_root,
+                    "new storage failure",
+                ),
+            ),
+        )
+        unlinks: list[Path] = []
+
+        with self.assertRaises(PiDeletePlanError):
+            execute_pi_delete(
+                selected,
+                catalog_builder=lambda: changed,
+                approved_plan_fingerprint=selected.plan_fingerprint or "",
+                clients_closed=True,
+                unlink_fn=unlinks.append,
+            )
+
+        self.assertEqual(unlinks, [])
+        self.assertTrue(record.path.exists())
 
     def test_v1_header_without_version_is_a_valid_precise_target(self) -> None:
         record = self.record("v1")
@@ -172,6 +270,67 @@ class PiDeleteTests(unittest.TestCase):
             execute_pi_delete(selected, catalog_builder=lambda: Catalog((changed,)),
                               approved_plan_fingerprint=selected.plan_fingerprint or "",
                               clients_closed=True, unlink_fn=lambda path: unlinks.append(path))
+        self.assertEqual(unlinks, [])
+        self.assertTrue(record.path.exists())
+
+    def test_cindy_reference_snapshot_drift_and_new_live_reference_never_unlink(self) -> None:
+        record = self.record("cindy")
+        base_values = dict(record.__dict__)
+        base_values.update(
+            storage_kind="cindy",
+            cindy_profile_root=self.pi_root.parent / "Cindy",
+            reference_classification="deleted_frontend_reference",
+            cindy_references=(
+                {
+                    "database": "C:/Cindy/cindy.db",
+                    "cindy_session_id": "maker",
+                    "reference_kind": "current",
+                    "session_status": "deleted",
+                    "is_live": False,
+                },
+            ),
+        )
+        deleted = SimpleNamespace(**base_values)
+        selected = build_pi_delete_plan(
+            SimpleNamespace(records=(deleted,), errors=())
+        ).with_selected_actions((record.action_id,))
+
+        historical_values = dict(base_values)
+        historical_values["cindy_references"] = (
+            {**base_values["cindy_references"][0], "reference_kind": "agent_switch"},
+        )
+        unlinks: list[Path] = []
+        with self.assertRaises(PiDeletePlanError):
+            execute_pi_delete(
+                selected,
+                catalog_builder=lambda: SimpleNamespace(
+                    records=(SimpleNamespace(**historical_values),), errors=()
+                ),
+                approved_plan_fingerprint=selected.plan_fingerprint or "",
+                clients_closed=True,
+                unlink_fn=unlinks.append,
+            )
+        self.assertEqual(unlinks, [])
+
+        live_values = dict(base_values)
+        live_values.update(
+            deletable=False,
+            blockers=("A live Cindy session currently references this Pi session",),
+            reference_classification="live_current_reference",
+            cindy_references=(
+                {**base_values["cindy_references"][0], "session_status": "active", "is_live": True},
+            ),
+        )
+        with self.assertRaises(PiDeletePlanError):
+            execute_pi_delete(
+                selected,
+                catalog_builder=lambda: SimpleNamespace(
+                    records=(SimpleNamespace(**live_values),), errors=()
+                ),
+                approved_plan_fingerprint=selected.plan_fingerprint or "",
+                clients_closed=True,
+                unlink_fn=unlinks.append,
+            )
         self.assertEqual(unlinks, [])
         self.assertTrue(record.path.exists())
 

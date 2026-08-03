@@ -36,6 +36,8 @@ class PiRecord:
     stat_mtime_ns: int
     sha256: str
     action_id: str
+    storage_kind: str = "standalone"
+    reference_classification: str = "unreferenced"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +57,7 @@ class PiRecord:
 class PiCatalog:
     records: tuple[PiRecord, ...]
     errors: tuple[object, ...] = ()
+    frontend_only_references: tuple[object, ...] = ()
 
     @property
     def sessions(self) -> tuple[PiRecord, ...]:
@@ -133,6 +136,64 @@ class PiCliTests(unittest.TestCase):
         self.assertEqual(payload["total_count"], 1)
         self.assertEqual(payload["pi_sessions"][0]["session_id"], "pi-session-1")
         self.assertNotIn("super secret body", output.getvalue())
+
+    def test_pi_human_records_explain_storage_and_blockers_in_plain_chinese(self) -> None:
+        self.catalog = PiCatalog((replace(
+            self.record,
+            deletable=False,
+            reference_classification="live_current_reference",
+            blockers=(
+                "A live Cindy session currently references this Pi session\nprivate",
+                "A live Cindy session retains a historical reference to this Pi session",
+            ),
+        ),))
+        output = StringIO()
+        status = main(
+            ["records", "--platform", "pi"], adapters=(), stdin=StringIO(),
+            stdout=output, stderr=StringIO(), pi_catalog_builder=self.builder,
+        )
+        rendered = output.getvalue()
+        self.assertEqual(status, EXIT_OK)
+        self.assertIn("存储位置：独立 Pi Agent 数据目录", rendered)
+        self.assertIn("Cindy 使用情况：仍被活跃 Cindy 会话当前使用", rendered)
+        self.assertIn("删除资格：当前不能选择删除", rendered)
+        self.assertIn("不能删除原因：活跃 Cindy 会话当前正在使用这个 Pi 会话", rendered)
+        self.assertIn("不能删除原因：活跃 Cindy 会话仍保留这个 Pi 历史切换或派生会话", rendered)
+        self.assertNotIn("\nprivate", rendered)
+        self.assertNotIn("standalone", rendered)
+        self.assertNotIn("live_current_reference", rendered)
+        self.assertNotIn("storage", rendered)
+        self.assertNotIn("classification", rendered)
+        self.assertNotIn("descendant", rendered)
+        self.assertNotIn("后代", rendered)
+        self.assertNotIn("无后代", rendered)
+        self.assertNotIn("删除操作 ID", rendered)
+
+    def test_pi_human_records_explain_cindy_reference_with_no_file(self) -> None:
+        self.catalog = PiCatalog(
+            (),
+            frontend_only_references=(
+                {
+                    "native_session_id": "missing-pi-session",
+                    "profile_root": self.root / "Cindy",
+                    "reference_kind": "agent_switch",
+                    "is_live": True,
+                },
+            ),
+        )
+        output = StringIO()
+        status = main(
+            ["records", "--platform", "pi"], adapters=(), stdin=StringIO(),
+            stdout=output, stderr=StringIO(), pi_catalog_builder=self.builder,
+        )
+        rendered = output.getvalue()
+        self.assertEqual(status, EXIT_OK)
+        self.assertIn("Cindy 使用情况：仍被活跃 Cindy 会话作为历史切换或派生会话保留", rendered)
+        self.assertIn("文件情况：本地 Pi 会话文件已不存在", rendered)
+        self.assertIn("删除资格：没有文件可删", rendered)
+        self.assertNotIn("frontend_only", rendered)
+        self.assertNotIn("classification", rendered)
+        self.assertNotIn("storage", rendered)
 
     def test_real_inventory_builder_and_cli_accept_custom_session_root(self) -> None:
         """Exercise the public Pi inventory object, not only an injected fake."""
@@ -326,8 +387,10 @@ class PiCliTests(unittest.TestCase):
         )
         rendered = output.getvalue()
         self.assertEqual(status, EXIT_OK)
-        self.assertIn("1. Pi session ID：pi-session-1", rendered)
+        self.assertIn("1. 会话 ID：pi-session-1", rendered)
         self.assertIn("另有 1 条 Pi 删除目标未进入本次编号", rendered)
+        self.assertIn("已删除：会话 ID pi-session-1", rendered)
+        self.assertNotIn(" deleted ", rendered)
         self.assertFalse(self.path.exists())
         self.assertTrue(other_path.exists())
         self.assertEqual(rendered.count("Pi 永久删除最终计划"), 1)

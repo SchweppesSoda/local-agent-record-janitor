@@ -35,7 +35,7 @@ class FrontendSessionRecord:
     codex_bin_hint: Path | None = None
 
     def approval_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": 1,
             "platform": self.platform,
             "database": _normalized_path(self.database),
@@ -46,6 +46,21 @@ class FrontendSessionRecord:
             "updated_at_ms": self.updated_at_ms,
             "is_live": self.is_live,
         }
+        if self.platform == "cindy":
+            payload.update(
+                {
+                    "reference_kind": self.details.get("reference_kind", "current"),
+                    "boundary_id": self.details.get("boundary_id"),
+                    "boundary_created_at_ms": self.details.get(
+                        "boundary_created_at_ms"
+                    ),
+                    "boundary_rewind_at_ms": self.details.get(
+                        "boundary_rewind_at_ms"
+                    ),
+                    "cindy_profile_root": self.details.get("cindy_profile_root"),
+                }
+            )
+        return payload
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -352,6 +367,24 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             artifact_present = indexed or bool(records)
             descendants = tuple(sorted(_transitive_descendants(graph, thread_id)))
             blockers = list(blocking_messages)
+            live_cindy = [
+                reference
+                for reference in references
+                if reference.platform == "cindy" and reference.is_live
+            ]
+            if live_cindy:
+                kinds = {
+                    str(reference.details.get("reference_kind", "current"))
+                    for reference in live_cindy
+                }
+                label = (
+                    "live historical"
+                    if kinds == {"agent_switch"}
+                    else "live current or historical"
+                )
+                blockers.append(
+                    f"Cindy retains a {label} native-session reference"
+                )
             if not artifact_present:
                 blockers.append("No SQLite thread row or verifiable rollout remains")
             if cascade_unknown:

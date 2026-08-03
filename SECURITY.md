@@ -15,6 +15,7 @@
 - `PATH`、`CODEX_HOME`、`APPDATA`、`LOCALAPPDATA`、`COMSPEC` 等环境变量可信；
 - 本机没有恶意进程在扫描和删除之间替换数据库、rollout 或 Codex 可执行文件。
 - Pi 的 `sessions/` 目录、会话 JSONL 路径和 Pi Agent 进程不受攻击者控制；`--pi-agent-dir`/`--pi-session-dir` 指向操作者预期的本地目录。
+- Claude Code config root、project transcript、session 专属辅助目录和 Cindy 引用数据库不受攻击者控制；`--claude-config-dir` 指向操作者预期的本地目录。
 
 若这些条件不成立，请只使用隔离环境中的 `scan`，不要在 TTY 中确认删除，也不要执行带 `--yes` 的清理。
 
@@ -33,11 +34,13 @@
 
 Pi 删除是另一条独立路径：只可删除清单和计划中完全匹配的一份普通 `.jsonl` 会话文件，绝不递归删除目录，绝不按文件名模糊匹配。它只提取 session 的结构与展示元数据，消息正文不保留或输出；`auth.json` 永不读取或修改；`settings.json` 仅为解析 `sessionDir` 而只读，绝不修改；`models.json` 与 extensions 不读取。Pi OAuth token、登录状态和远端服务端历史不在本项目的信任边界内。
 
+Claude Code 删除也是独立路径。Claude Code 当前没有本地逐 session 官方删除命令；官方 `claude project purge` 只能按项目 purge，不用于逐 session 选择。本工具只删除批准 manifest 中的精确 transcript 副本和 session 专属路径，包括当前布局的 `debug/<session-id>.txt`，以及文件名严格满足 canonical session UUID、`-agent-`、非空安全 token 和 `.json` 的旧 TodoWrite 文件。相似前缀、非普通文件、link/reparse 和未知节点不会被模糊纳入；盘点不完整时删除被阻止。删除前后均重建 catalog 并比较完整 manifest。credentials、settings、plugins、skills、agents、commands、project memory、`CLAUDE.md`、`.claude.json`、stats cache 及共享 prompt history/index 永不修改。删除 transcript 不等于清空整个 Claude config root。
+
 ## 安全操作清单
 
 执行永久删除前：
 
-1. 完全退出 AionUI、Cindy、Codex Desktop/CLI，以及使用同一 `CODEX_HOME` 的后台进程；删除 Pi 前也完全退出 Pi 及可能写入同一 session 目录的后台进程。
+1. 完全退出 AionUI、Cindy、Codex Desktop/CLI，以及使用同一 `CODEX_HOME` 的后台进程；删除 Pi/Claude 前也退出可能写入相关 session storage 的客户端和后台进程。
 2. 备份相关前端数据库与完整 `CODEX_HOME`。
 3. 先执行 `scan --json`，检查错误属于哪些保存位置；无法归属的错误会阻止全部动作。
 4. 查看 `clean --json` 中的 Observation、CandidateAction、风险、影响、阻断理由、会话摘要目录和快照指纹。
@@ -103,6 +106,8 @@ Pi 删除是另一条独立路径：只可删除清单和计划中完全匹配�
 
 Pi 的直接文件删除是经上游公开会话格式确认的专用例外：只允许 `delete --platform pi`，只针对已解析 header、位于批准 session root 内、无 symlink/reparse-point 风险且删除前 `stat`/哈希仍匹配的普通 JSONL。任何活动会话、路径边界、文件身份或 TOCTOU 证据不完整都必须 fail closed。发布前应在 Windows 与 POSIX 合成 fixture 中覆盖：拒绝 `all`、拒绝 Pi 与其他平台混合、拒绝 auth/settings、拒绝文件替换/重写，并证明删除后仅指定 JSONL 消失。
 
+Claude 直接文件删除只允许 `delete --platform claude`，并绑定 `(config root, session ID, exact manifest)`。它拒绝 symlink/junction/reparse、越界、未知节点、重复路径、manifest 变化和 Cindy live current/historical 引用。非 TTY 执行 Pi/Claude 删除均必须同时提供显式 selector、当前预览指纹、`--clients-closed` 和 `--yes`。
+
 删除后结果必须是 `deleted`、`not_deleted`、`partial` 或 `unknown`。协议错误和超时不能代替验证：若实际范围已全部消失，应报告 `deleted` 并保留请求警告；若只消失一部分，应报告 `partial`。
 
 ## 发布安全门槛
@@ -135,6 +140,7 @@ Pi 的直接文件删除是经上游公开会话格式确认的专用例外：�
 - 前端可能在扫描后恢复或重新关联软删除会话；
 - 后台 agent 可能仍在写 rollout；
 - Pi 可能在会话正在写入时追加 JSONL，或在预览后重建/替换目标文件；
+- Claude Code 可能在预览后追加 transcript、新增副本/辅助路径，或 Cindy 可能新增 current/historical 引用；
 - 内容文件可能在路径和对话 ID 不变时改变来源 metadata 或文件状态；
 - 对话关联关系可能在扫描后新增；
 - SQLite WAL 中可能存在尚未被当前快照观察到的更新；

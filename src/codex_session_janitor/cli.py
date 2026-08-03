@@ -53,6 +53,7 @@ EXIT_CONFIRMATION_REQUIRED = 2
 DEFAULT_HUMAN_LIMIT = 20
 MANUAL_DELETE_CONFIRMATION = "客户端已关闭并确认永久删除"
 PI_DELETE_CONFIRMATION = "Pi 客户端已关闭并确认永久删除"
+CLAUDE_DELETE_CONFIRMATION = "Claude Code 客户端已关闭并确认永久删除"
 
 _RISK_ORDER = ("low", "review", "high", "blocked")
 _RISK_LABELS = {
@@ -458,8 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _ChineseArgumentParser(
         prog="codex-session-janitor",
         description=(
-            "检查前端残留和 Codex 本地对话状态，生成保守的动作计划，"
-            "并通过官方接口安全清理明确选择的目标。"
+            "检查前端残留，只读盘点 Codex、Pi Agent 与 Claude Code 本地会话，"
+            "并保守清理明确选择且重验证通过的目标。"
         ),
     )
     subparsers = parser.add_subparsers(
@@ -477,9 +478,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     records = subparsers.add_parser(
         "records",
-        help="只读列出 Codex 对话及 Pi Agent 本地会话",
+        help="只读列出 Codex、Pi Agent 及 Claude Code 本地会话",
         description=(
-            "只读聚合 Codex 本地记录、Cindy/AionUI 引用以及 Pi Agent 会话；"
+            "只读聚合 Codex 本地记录、Cindy/AionUI 引用以及 "
+            "Pi Agent/Claude Code 会话；"
             "不会启动 app-server，也不会修改任何数据库或文件。"
         ),
     )
@@ -487,11 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     delete = subparsers.add_parser(
         "delete",
-        help="逐项永久删除 Codex 对话，或精确删除 Pi JSONL 会话文件",
+        help="逐项永久删除 Codex、Pi 或 Claude Code 会话",
         description=(
-            "列出正常和异常对话，逐项选择 storage-qualified thread，"
-            "经客户端关闭确认和执行前精确重验证后调用官方 thread/delete；"
-            "仅 --platform pi 时删除精确批准的 Pi JSONL。Cindy/AionUI 引用只展示。"
+            "列出正常和异常对话，逐项选择保存位置明确的会话，"
+            "经客户端关闭确认和执行前精确重验证后调用官方删除接口；"
+            "仅 --platform pi 时删除精确批准的 Pi 会话文件；"
+            "仅 --platform claude 时删除精确批准的 Claude 会话文件清单。"
         ),
     )
     _add_common_arguments(delete)
@@ -506,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ACTION_ID",
         help=(
-            "选择 records/delete 计划中的完整稳定 action ID；可重复，"
+            "选择 records/delete 计划中的完整稳定删除操作 ID；可重复，"
             "不能与 --thread-id 同时使用"
         ),
     )
@@ -515,7 +518,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="ID",
-        help="仅 --platform pi：选择完整 Pi session ID；可重复，不能与 --action-id 同时使用",
+        help=(
+            "仅 --platform pi/claude：选择完整会话 ID；"
+            "可重复，不能与 --action-id 同时使用"
+        ),
     )
     delete.add_argument(
         "--plan-fingerprint",
@@ -525,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     delete.add_argument(
         "--clients-closed",
         action="store_true",
-        help="确认所选 Codex 或 Pi session 目录的相关客户端均已关闭",
+        help="确认使用所选 Codex、Pi 或 Claude Code 会话的相关客户端均已关闭",
     )
     delete.add_argument(
         "--timeout",
@@ -625,7 +631,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--platform",
         action="append",
-        choices=("all", "aionui", "cindy", "native", "pi"),
+        choices=("all", "aionui", "cindy", "native", "pi", "claude"),
         help="选择扫描来源；可重复（默认：all）",
     )
     parser.add_argument(
@@ -686,6 +692,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         metavar="PATH",
         help="Pi session JSONL 根目录（优先于环境变量、settings.json 与 agentDir 默认值）",
+    )
+    parser.add_argument(
+        "--claude-config-dir",
+        type=Path,
+        metavar="PATH",
+        help="Claude Code 配置根目录（否则 CLAUDE_CONFIG_DIR，再否则 ~/.claude）",
     )
 
 
@@ -777,6 +789,8 @@ def main(
     binary_resolver: BinaryResolver = choose_codex_binary,
     pi_catalog_builder: Any | None = None,
     pi_delete_executor: Any | None = None,
+    claude_catalog_builder: Any | None = None,
+    claude_delete_executor: Any | None = None,
 ) -> int:
     input_stream = stdin or sys.stdin
     output = stdout or sys.stdout
@@ -792,11 +806,13 @@ def main(
             stderr=error_output,
         )
 
-    if args.command in {"scan", "clean"} and _has_explicit_pi(args.platform):
+    unsupported_engine = _explicit_unsupported_scan_engine(args.platform)
+    if args.command in {"scan", "clean"} and unsupported_engine:
         return _emit_fatal_error(
             args.command,
             RuntimeError(
-                "Pi Agent 当前仅支持 records 和 delete；scan/clean 不支持 --platform pi。"
+                f"{unsupported_engine} 当前仅支持 records 和 delete；"
+                f"scan/clean 不支持 --platform {unsupported_engine.lower().split()[0]}。"
             ),
             json_output=args.json,
             stdout=output,
@@ -813,6 +829,12 @@ def main(
                 json_output=args.json,
                 stdout=output,
                 stderr=error_output,
+                )
+        if adapters is not None and pi_catalog_builder is None:
+            return _emit_fatal_error(
+                "delete",
+                RuntimeError("注入 adapters 时必须同时注入 Pi catalog builder；未读取本机 Pi home。"),
+                json_output=args.json, stdout=output, stderr=error_output,
             )
         return _run_pi_delete(
             args,
@@ -822,6 +844,47 @@ def main(
             catalog_builder=pi_catalog_builder,
             delete_executor=pi_delete_executor,
         )
+
+    if args.command == "delete" and _has_explicit_claude(args.platform):
+        if not _is_exact_claude_platform(args.platform):
+            return _emit_fatal_error(
+                "delete",
+                RuntimeError(
+                    "Claude 删除不能与其他 --platform 混用；"
+                    "请仅使用 --platform claude。"
+                ),
+                json_output=args.json, stdout=output, stderr=error_output,
+            )
+        if adapters is not None and claude_catalog_builder is None:
+            return _emit_fatal_error(
+                "delete",
+                RuntimeError("注入 adapters 时必须同时注入 Claude catalog builder；未读取本机 Claude home。"),
+                json_output=args.json, stdout=output, stderr=error_output,
+            )
+        return _run_claude_delete(
+            args, stdin=input_stream, stdout=output, stderr=error_output,
+            catalog_builder=claude_catalog_builder,
+            delete_executor=claude_delete_executor,
+        )
+
+    if args.command == "records" and adapters is not None:
+        missing_builder: str | None = None
+        if _is_exact_pi_platform(args.platform) and pi_catalog_builder is None:
+            missing_builder = "Pi"
+        elif _is_exact_claude_platform(args.platform) and claude_catalog_builder is None:
+            missing_builder = "Claude"
+        if missing_builder is not None:
+            return _emit_fatal_error(
+                "records",
+                RuntimeError(
+                    f"注入 adapters 时，records --platform {missing_builder.lower()} "
+                    f"必须同时注入 {missing_builder} catalog builder；"
+                    "未读取本机会话目录。"
+                ),
+                json_output=args.json,
+                stdout=output,
+                stderr=error_output,
+            )
 
     try:
         if args.command in {"clean", "delete"}:
@@ -860,13 +923,24 @@ def main(
                 and (
                     adapters is None
                     or pi_catalog_builder is not None
-                    or _has_explicit_pi(args.platform)
-                    or args.pi_agent_dir is not None
-                    or args.pi_session_dir is not None
+                )
+            ),
+            claude_catalog_builder=claude_catalog_builder,
+            include_claude=(
+                _records_include_claude(args.platform)
+                and (
+                    adapters is None
+                    or claude_catalog_builder is not None
                 )
             ),
         )
     if args.command == "delete":
+        if args.session_id:
+            return _emit_fatal_error(
+                "delete",
+                RuntimeError("--session-id 仅可用于 --platform pi 或 --platform claude。"),
+                json_output=args.json, stdout=output, stderr=error_output,
+            )
         return _run_manual_delete(
             args,
             active_adapters=active_adapters,
@@ -921,6 +995,8 @@ def _run_records(
     stderr: TextIO,
     pi_catalog_builder: Any | None = None,
     include_pi: bool = True,
+    claude_catalog_builder: Any | None = None,
+    include_claude: bool = True,
 ) -> int:
     """Build and render the full read-only session catalog."""
 
@@ -928,12 +1004,14 @@ def _run_records(
         catalog: Any | None = None
         conversations: tuple[Any, ...] = ()
         unmapped_sessions: tuple[Any, ...] = ()
-        if _is_exact_pi_platform(args.platform) and args.thread_id:
+        if (_is_exact_pi_platform(args.platform) or _is_exact_claude_platform(args.platform)) and args.thread_id:
+            engine_label = "Pi" if _is_exact_pi_platform(args.platform) else "Claude"
             raise ActionSelectionError(
-                "Pi records 不支持 --thread-id；请列出 Pi 会话后使用 delete --session-id 或 --action-id。",
-                kind="pi_thread_selector_unsupported",
+                f"{engine_label} records 不支持 --thread-id；"
+                "请列出原生会话后使用 delete --session-id 或 --action-id。",
+                kind="native_session_thread_selector_unsupported",
             )
-        if not _is_exact_pi_platform(args.platform):
+        if not (_is_exact_pi_platform(args.platform) or _is_exact_claude_platform(args.platform)):
             from .inventory import build_session_catalog
 
             catalog = build_session_catalog(active_adapters)
@@ -953,6 +1031,11 @@ def _run_records(
         pi_catalog = (
             _build_pi_catalog(args, pi_catalog_builder)
             if include_pi
+            else None
+        )
+        claude_catalog = (
+            _build_claude_catalog(args, claude_catalog_builder)
+            if include_claude
             else None
         )
     except Exception as exc:
@@ -982,9 +1065,11 @@ def _run_records(
         payload["count"] = len(conversations)
         if pi_catalog is not None:
             payload.update(_pi_catalog_payload(pi_catalog))
+        if claude_catalog is not None:
+            payload.update(_claude_catalog_payload(claude_catalog))
         payload["total_count"] = len(conversations) + int(
             payload.get("pi_count", 0)
-        )
+        ) + int(payload.get("claude_count", 0))
         # JSON is deliberately never truncated by --limit.
         _write_json(payload, stdout)
     else:
@@ -999,21 +1084,58 @@ def _run_records(
             )
         if pi_catalog is not None:
             _write_pi_session_catalog(pi_catalog, stdout=stdout, stderr=stderr, limit=args.limit)
+        if claude_catalog is not None:
+            _write_claude_session_catalog(
+                claude_catalog, stdout=stdout, stderr=stderr, limit=args.limit
+            )
     catalog_failures = tuple(catalog.failures) if catalog is not None else ()
     pi_failures = tuple(getattr(pi_catalog, "failures", getattr(pi_catalog, "errors", ())) or ())
-    return EXIT_ERROR if catalog_failures or pi_failures else EXIT_OK
+    claude_failures = tuple(getattr(claude_catalog, "failures", getattr(claude_catalog, "errors", ())) or ())
+    return EXIT_ERROR if catalog_failures or pi_failures or claude_failures else EXIT_OK
 
 
 def _build_pi_catalog(args: argparse.Namespace, builder: Any | None = None) -> Any:
     """Call Pi's public catalog builder; CLI never parses transcripts itself."""
 
-    if builder is None:
-        from .pi_sessions import build_pi_session_catalog
+    if builder is not None:
+        # Preserve the original injected-builder call contract.
+        return builder(
+            agent_dir=args.pi_agent_dir,
+            session_root=args.pi_session_dir,
+        )
 
-        builder = build_pi_session_catalog
-    return builder(
-        agent_dir=args.pi_agent_dir,
-        session_root=args.pi_session_dir,
+    from .pi_sessions import (
+        build_pi_root_qualified_catalog,
+        build_pi_session_inventory,
+    )
+
+    appdata = (args.appdata or default_appdata()).expanduser()
+    if args.cindy_root is not None or args.cindy_db is not None:
+        from .discovery import CindyProfile
+
+        cindy_root = (args.cindy_root or appdata / "CindyGlobal").expanduser()
+        cindy_profiles = (
+            CindyProfile(
+                root=cindy_root,
+                database=(args.cindy_db or cindy_root / "cindy-local-v1.db").expanduser(),
+                codex_home=cindy_root / "codex-home",
+            ),
+        )
+    else:
+        cindy_profiles = discover_cindy_profiles(appdata)
+
+    if args.pi_agent_dir is not None or args.pi_session_dir is not None:
+        # Explicit path options deliberately limit the view to one user-chosen
+        # Pi storage rather than unexpectedly adding Cindy roots.  They do not
+        # bypass ownership qualification when that one root belongs to Cindy.
+        return build_pi_root_qualified_catalog(
+            agent_dir=args.pi_agent_dir,
+            session_root=args.pi_session_dir,
+            cindy_profiles=cindy_profiles,
+        )
+    return build_pi_session_inventory(
+        standalone_options={},
+        cindy_profiles=cindy_profiles,
     )
 
 
@@ -1021,11 +1143,323 @@ def _pi_catalog_payload(catalog: Any) -> dict[str, Any]:
     raw = _object_dict(catalog)
     sessions = raw.get("records", raw.get("sessions", ()))
     failures = raw.get("errors", raw.get("failures", ()))
+    frontend_only = raw.get("frontend_only_references", ())
     return {
         "pi_sessions": list(sessions),
         "pi_failures": list(failures),
+        "pi_frontend_only_references": list(frontend_only),
         "pi_count": len(sessions),
     }
+
+
+def _build_claude_catalog(args: argparse.Namespace, builder: Any | None = None) -> Any:
+    """Build Claude's root-qualified inventory without parsing transcripts here."""
+
+    if builder is not None:
+        return builder(claude_config_dir=args.claude_config_dir)
+
+    from .cindy_references import (
+        CindyReferenceFailure,
+        build_cindy_reference_catalog,
+    )
+    from .claude_sessions import (
+        build_claude_multi_root_catalog,
+        resolve_claude_paths,
+    )
+    from .discovery import CindyProfile
+
+    effective = resolve_claude_paths(config_dir=args.claude_config_dir)
+    roots: list[Path] = [effective.config_dir]
+    explicit_root = args.claude_config_dir is not None
+    appdata = (args.appdata or default_appdata()).expanduser()
+    profiles: list[Any]
+    if args.cindy_root is not None or args.cindy_db is not None:
+        root = (args.cindy_root or appdata / "CindyGlobal").expanduser()
+        profiles = [
+            CindyProfile(
+                root=root,
+                database=(args.cindy_db or root / "cindy-local-v1.db").expanduser(),
+                codex_home=(args.cindy_codex_home or root / "codex-home").expanduser(),
+            )
+        ]
+    else:
+        profiles = list(discover_cindy_profiles(appdata))
+        known_profile_roots = {
+            _path_identity(profile.root) for profile in profiles
+        }
+        for brand in ("CindyGlobal", "Cindy", "CindyDev", "xdt-maker"):
+            root = appdata / brand
+            if _path_identity(root) in known_profile_roots:
+                continue
+            try:
+                has_claude_home = (root / "claude-home").is_dir()
+            except OSError:
+                has_claude_home = False
+            if has_claude_home:
+                # Keep a surviving dedicated Claude store visible even if the
+                # frontend DB and codex-home have already been removed.
+                profiles.append(
+                    CindyProfile(
+                        root=root,
+                        database=root / "cindy-local-v1.db",
+                        codex_home=root / "codex-home",
+                    )
+                )
+
+    default_root = Path.home() / ".claude"
+    qualified_references: list[dict[str, Any]] = []
+    reference_failures: list[Any] = []
+    seen_databases: set[str] = set()
+    for profile in profiles:
+        database_key = _path_identity(profile.database)
+        if database_key in seen_databases:
+            continue
+        seen_databases.add(database_key)
+        reference_catalog = build_cindy_reference_catalog(
+            profile.database, profile_root=profile.root
+        )
+        cc_references = tuple(reference_catalog.for_backend("claude"))
+        dedicated_root = profile.root / "claude-home"
+        try:
+            dedicated_exists = dedicated_root.is_dir()
+        except OSError as exc:
+            dedicated_exists = False
+            reference_failures.append(
+                CindyReferenceFailure(
+                    profile.database,
+                    profile.root,
+                    type(exc).__name__,
+                    "Could not inspect Cindy Claude storage root",
+                )
+            )
+
+        if dedicated_exists and not explicit_root:
+            # A surviving dedicated store is inventory-worthy even when it is
+            # stale.  It does not, by itself, decide where production Cindy's
+            # references belong.
+            roots.append(dedicated_root)
+
+        target_root: Path | None
+        production_profile = profile.root.name.casefold() in {"cindyglobal", "cindy"}
+        if production_profile and effective.config_dir_source in {"default", "environment"}:
+            # Production Cindy always uses Claude's ordinary default root.
+            # The inherited CLAUDE_CONFIG_DIR, when present, is the effective
+            # shared root.  A stale profile/claude-home must never steal refs.
+            target_root = effective.config_dir
+            if cc_references and not explicit_root:
+                roots.append(target_root)
+        elif production_profile and _path_identity(effective.config_dir) == _path_identity(default_root):
+            # An explicitly supplied literal default root is still uniquely
+            # attributable to production Cindy.
+            target_root = default_root
+        elif production_profile:
+            target_root = None
+            if cc_references:
+                reference_failures.append(
+                    CindyReferenceFailure(
+                        profile.database,
+                        profile.root,
+                        "AmbiguousStorageRoot",
+                        "Explicit Claude config root cannot be uniquely attributed to production Cindy",
+                    )
+                )
+        elif dedicated_exists:
+            target_root = dedicated_root
+        else:
+            target_root = None
+            if cc_references:
+                reference_failures.append(
+                    CindyReferenceFailure(
+                        profile.database,
+                        profile.root,
+                        "AmbiguousStorageRoot",
+                        "Cindy Claude references have no unique Claude config root",
+                    )
+                )
+
+        for failure in reference_catalog.failures:
+            if target_root is None:
+                reference_failures.append(failure)
+            else:
+                reference_failures.append(
+                    {
+                        **failure.to_dict(),
+                        "config_dir": str(target_root),
+                    }
+                )
+        if target_root is None:
+            continue
+        if explicit_root and _path_identity(target_root) != _path_identity(effective.config_dir):
+            # A user-limited single root must not be decorated with evidence
+            # belonging to another config directory.
+            continue
+        for reference in cc_references:
+            qualified = reference.to_dict()
+            qualified["claude_config_dir"] = str(target_root)
+            qualified_references.append(qualified)
+
+    unique_roots: list[Path] = []
+    seen_roots: set[str] = set()
+    for root in roots:
+        key = _path_identity(root)
+        if key not in seen_roots:
+            seen_roots.add(key)
+            unique_roots.append(root)
+    return build_claude_multi_root_catalog(
+        unique_roots,
+        frontend_references=qualified_references,
+        reference_errors=reference_failures,
+    )
+
+
+def _claude_catalog_payload(catalog: Any) -> dict[str, Any]:
+    raw = _object_dict(catalog)
+    sessions = raw.get("records", raw.get("sessions", ()))
+    failures = raw.get("errors", raw.get("failures", ()))
+    return {
+        "claude_sessions": list(sessions),
+        "claude_failures": list(failures),
+        "claude_count": len(sessions),
+    }
+
+
+def _storage_kind_explanation(value: object) -> str:
+    explanations = {
+        "standalone": "独立 Pi Agent 数据目录",
+        "cindy": "Cindy 配置目录内的 Pi Agent 数据",
+    }
+    normalized = _enum_value(value).strip().lower()
+    return explanations.get(normalized, "无法确认，需要复核")
+
+
+def _classification_explanation(value: object) -> str:
+    explanations = {
+        "unreferenced": "未发现 Cindy 正在使用这个会话",
+        "deleted_frontend_reference": (
+            "没有活跃 Cindy 会话正在使用；仅有已删除的 Cindy 会话记录"
+        ),
+        "live_current_reference": "仍被活跃 Cindy 会话当前使用",
+        "live_historical_reference": (
+            "仍被活跃 Cindy 会话作为历史切换或派生会话保留"
+        ),
+        "frontend_only": "Cindy 仍有引用，但本地会话文件已不存在",
+        "inventory_incomplete": "无法确认 Cindy 是否仍在使用：会话盘点不完整",
+    }
+    normalized = _enum_value(value).strip().lower()
+    return explanations.get(normalized, "无法确认 Cindy 是否仍在使用，需要复核")
+
+
+def _delete_eligibility_label(classification: object, deletable: bool) -> str:
+    if _enum_value(classification).strip().lower() == "frontend_only":
+        return "没有文件可删"
+    return "可以选择删除" if deletable else "当前不能选择删除"
+
+
+def _human_backend_blocker(value: object) -> str:
+    raw = str(value)
+    lowered = raw.lower()
+    translations = (
+        ("currently references this pi session", "活跃 Cindy 会话当前正在使用这个 Pi 会话"),
+        (
+            "historically references this pi session",
+            "活跃 Cindy 会话仍保留这个 Pi 历史切换或派生会话",
+        ),
+        (
+            "retains a historical reference to this pi session",
+            "活跃 Cindy 会话仍保留这个 Pi 历史切换或派生会话",
+        ),
+        ("current active session", "Pi 客户端将它标记为当前正在写入的会话"),
+        ("session id is duplicated", "同一 Pi session ID 对应多个文件，无法唯一选定"),
+        (
+            "frontend reference has no local claude transcript",
+            "Cindy 仍有引用，但本地 Claude 会话文件已不存在",
+        ),
+        ("live_current_reference", "活跃 Cindy 会话当前正在使用这个 Claude 会话"),
+        (
+            "live_historical_reference",
+            "活跃 Cindy 会话仍保留这个 Claude 历史切换或派生会话",
+        ),
+        (
+            "pi_session_file identifies this as the current active session",
+            "Pi 客户端将它标记为当前正在写入的会话",
+        ),
+        (
+            "unable to establish physical identity",
+            "无法确认会话文件的真实位置，不能安全确定删除范围",
+        ),
+        (
+            "unable to establish physical ownership",
+            "无法确认会话数据目录的真实归属，不能安全确定删除范围",
+        ),
+    )
+    for needle, translated in translations:
+        if needle in lowered:
+            return safe_single_line(translated, max_width=240)
+    if re.search(r"[\u3400-\u9fff]", raw):
+        return _human_message(raw)
+    return "会话清单存在异常，无法安全确认删除范围"
+
+
+def _human_backend_error(value: object, *, backend: str) -> str:
+    """Keep backend exception codes in JSON while making terminal errors useful."""
+
+    raw = str(value)
+    lowered = " ".join(raw.lower().split())
+    label = "Pi" if backend == "pi" else "Claude Code"
+    translations = (
+        ("at least one explicit", f"请明确选择至少一个 {label} 会话"),
+        ("must be non-empty strings", "删除目标不能为空"),
+        ("must be non-empty", "删除目标不能为空"),
+        ("never accepts an all selector", "不支持使用 all 批量删除"),
+        ("never accepts all", "不支持使用 all 批量删除"),
+        ("matched no action", "未找到对应的可删除会话；请重新查看会话清单"),
+        ("matched no pi action", "未找到对应的可删除 Pi 会话；请重新查看会话清单"),
+        ("is ambiguous", "该选择对应多个保存位置；请使用完整的删除操作 ID"),
+        ("selected more than once", "同一会话被重复选择"),
+        ("clients-closed", f"必须先确认 {label} 客户端已关闭"),
+        ("clients closed", f"必须先确认 {label} 客户端已关闭"),
+        ("fingerprint does not match", "删除计划已经变化；请重新预览后再确认"),
+        ("plan fingerprint", "删除计划已经变化；请重新预览后再确认"),
+        ("plan changed after approval", "批准后的删除计划已经变化；没有删除任何文件"),
+        ("changed after approval", "批准后的会话文件或 Cindy 使用状态已经变化；没有删除任何文件"),
+        ("became unsafe", "批准后的会话路径已不再安全；没有删除任何文件"),
+        ("changed node type", "批准后的会话路径类型已经变化；没有删除任何文件"),
+        ("changed during", "会话文件在安全校验期间发生变化；没有删除任何文件"),
+        ("content changed", "会话文件内容在批准后发生变化；没有删除任何文件"),
+        ("stat changed", "会话文件状态在批准后发生变化；没有删除任何文件"),
+        ("escaped", "会话路径超出批准的数据目录；没有删除任何文件"),
+        ("outside", "会话路径超出批准的数据目录；没有删除任何文件"),
+        ("symlink", "会话路径包含链接或重定向点；为保护数据没有删除任何文件"),
+        ("reparse point", "会话路径包含链接或重定向点；为保护数据没有删除任何文件"),
+        ("invalid", "会话清单数据无效，不能安全执行删除"),
+    )
+    for needle, translated in translations:
+        if needle in lowered:
+            return safe_single_line(translated, max_width=240)
+    if re.search(r"[\u3400-\u9fff]", raw):
+        return _human_message(raw)
+    return f"{label} 删除安全检查未通过；没有删除任何文件，请重新查看会话清单"
+
+
+def _delete_result_status_label(value: object) -> str:
+    labels = {
+        "deleted": "已删除",
+        "not_deleted": "未删除",
+        "unknown": "删除结果未确认",
+    }
+    return labels.get(_enum_value(value).strip().lower(), "删除结果未确认")
+
+
+def _frontend_reference_usage(reference: object) -> str:
+    live = bool(_record_field(reference, "is_live", "live", default=False))
+    kind = _enum_value(
+        _record_field(reference, "reference_kind", default="current")
+    ).strip().lower()
+    if live and kind in {"historical", "agent_switch", "switch", "parked"}:
+        return "仍被活跃 Cindy 会话作为历史切换或派生会话保留"
+    if live:
+        return "仍被活跃 Cindy 会话当前使用"
+    return "没有活跃 Cindy 会话正在使用；仅有已删除的 Cindy 会话记录"
 
 
 def _write_pi_session_catalog(
@@ -1046,9 +1480,9 @@ def _write_pi_session_catalog(
     visible, hidden = _visible_items(sessions, limit)
     for session in visible:
         stdout.write(
-            "  - ID："
+            "  - 会话 ID："
             f"{_display_value(_record_field(session, 'session_id', default='-'), max_width=None)}\n"
-            "    文件："
+            "    会话文件："
             f"{_display_value(_record_field(session, 'path', default='-'), max_width=220)}\n"
         )
         timestamp = _record_field(session, "timestamp", default=None)
@@ -1057,18 +1491,113 @@ def _write_pi_session_catalog(
             stdout.write(f"    时间：{_display_value(timestamp)}\n")
         if cwd:
             stdout.write(f"    工作目录：{_display_value(cwd, max_width=220)}\n")
+        storage_kind = _record_field(session, "storage_kind", default="standalone")
+        classification = _record_field(
+            session, "reference_classification", "classification", default="unreferenced"
+        )
+        stdout.write(
+            f"    存储位置：{_storage_kind_explanation(storage_kind)}\n"
+            f"    Cindy 使用情况：{_classification_explanation(classification)}\n"
+        )
+        profile_root = _record_field(session, "cindy_profile_root", default=None)
+        if profile_root:
+            stdout.write(f"    Cindy 配置目录：{_display_value(profile_root, max_width=220)}\n")
+        deletable = bool(_record_field(session, "deletable", "delete_supported", default=False))
+        stdout.write(f"    删除资格：{_delete_eligibility_label(classification, deletable)}\n")
+        blockers = tuple(_record_field(session, "blockers", default=()) or ())
+        if not deletable:
+            seen_reasons: set[str] = set()
+            for blocker in blockers or (_classification_explanation(classification),):
+                reason = _human_backend_blocker(blocker)
+                if reason not in seen_reasons:
+                    seen_reasons.add(reason)
+                    stdout.write(f"      不能删除原因：{reason}\n")
         action_id = _record_field(session, "action_id", default=None)
-        if action_id:
+        if action_id and deletable:
             stdout.write(
-                "    Pi 删除 action ID："
+                "    删除操作 ID："
                 f"{_display_value(action_id, max_width=None)}\n"
             )
+    frontend_only = tuple(getattr(catalog, "frontend_only_references", ()) or ())
+    if frontend_only:
+        stdout.write(f"  Cindy 中没有对应本地文件的 Pi 会话：{len(frontend_only)} 条。\n")
+        visible_refs, hidden_refs = _visible_items(frontend_only, limit)
+        for reference in visible_refs:
+            stdout.write(
+                "    - 会话 ID："
+                f"{_display_value(_record_field(reference, 'native_session_id', default='-'), max_width=None)}\n"
+                "      Cindy 配置目录："
+                f"{_display_value(_record_field(reference, 'profile_root', default='-'), max_width=180)}\n"
+                f"      Cindy 使用情况：{_frontend_reference_usage(reference)}\n"
+                "      文件情况：本地 Pi 会话文件已不存在\n"
+                "      删除资格：没有文件可删\n"
+            )
+        if hidden_refs:
+            stdout.write(f"    ... 另有 {hidden_refs} 条没有本地文件的 Cindy 引用未显示。\n")
     if hidden:
         stdout.write(f"  ... 另有 {hidden} 条 Pi 会话未显示；请使用 --json 或增大 --limit。\n")
     for failure in failures:
         stderr.write(
             "错误：Pi 会话清单读取失败："
-            f"{_human_message(_record_field(failure, 'message', default=failure))}\n"
+            f"{_human_backend_blocker(_record_field(failure, 'message', default=failure))}\n"
+        )
+
+
+def _write_claude_session_catalog(
+    catalog: Any,
+    *,
+    stdout: TextIO,
+    stderr: TextIO,
+    limit: int,
+) -> None:
+    sessions = tuple(
+        sorted(
+            getattr(catalog, "sessions", getattr(catalog, "records", ())) or (),
+            key=lambda session: (
+                _path_identity(_record_field(session, "config_dir", default=".")),
+                str(_record_field(session, "session_id", default="")),
+            ),
+        )
+    )
+    failures = tuple(getattr(catalog, "failures", getattr(catalog, "errors", ())) or ())
+    stdout.write(f"\nClaude Code 会话：{len(sessions)} 条（只读；不显示正文）。\n")
+    visible, hidden = _visible_items(sessions, limit)
+    for session in visible:
+        classification = _record_field(
+            session, "classification", "reference_classification", default="unreferenced"
+        )
+        stdout.write(
+            "  - 会话 ID："
+            f"{_display_value(_record_field(session, 'session_id', default='-'), max_width=None)}\n"
+            "    Claude 配置目录："
+            f"{_display_value(_record_field(session, 'config_dir', default='-'), max_width=220)}\n"
+            "    Cindy 使用情况："
+            f"{_classification_explanation(classification)}\n"
+        )
+        transcripts = tuple(_record_field(session, "transcript_paths", default=()) or ())
+        stdout.write(f"    本地会话文件：{len(transcripts)} 份\n")
+        deletable = bool(_record_field(session, "deletable", "delete_supported", default=False))
+        stdout.write(f"    删除资格：{_delete_eligibility_label(classification, deletable)}\n")
+        blockers = tuple(_record_field(session, "blockers", default=()) or ())
+        if not deletable:
+            seen_reasons: set[str] = set()
+            for blocker in blockers or (_classification_explanation(classification),):
+                reason = _human_backend_blocker(blocker)
+                if reason not in seen_reasons:
+                    seen_reasons.add(reason)
+                    stdout.write(f"      不能删除原因：{reason}\n")
+        action_id = _record_field(session, "action_id", default=None)
+        if action_id and deletable:
+            stdout.write(
+                "    删除操作 ID："
+                f"{_display_value(action_id, max_width=None)}\n"
+            )
+    if hidden:
+        stdout.write(f"  ... 另有 {hidden} 条 Claude 会话未显示；请使用 --json 或增大 --limit。\n")
+    for failure in failures:
+        stderr.write(
+            "错误：Claude Code 会话清单读取失败："
+            f"{_human_backend_blocker(_record_field(failure, 'message', default=failure))}\n"
         )
 
 
@@ -1205,16 +1734,16 @@ def _pi_delete_preview(plan: Any, *, confirmation_required: bool) -> dict[str, A
 
 
 def _write_pi_delete_plan(plan: Any, *, stdout: TextIO) -> None:
-    stdout.write("\nPi 永久删除最终计划（每项仅删除一个 JSONL 文件）：\n")
+    stdout.write("\nPi 永久删除最终计划（每项只删除一个会话文件）：\n")
     for action in tuple(plan.actions):
         stdout.write(
-            "  - Pi session ID：" f"{_display_value(action.session_id, max_width=None)}\n"
-            "    文件：" f"{_display_value(action.path, max_width=220)}\n"
-            "    action ID：" f"{_display_value(action.action_id, max_width=None)}\n"
+            "  - 会话 ID：" f"{_display_value(action.session_id, max_width=None)}\n"
+            "    会话文件：" f"{_display_value(action.path, max_width=220)}\n"
+            "    删除操作 ID：" f"{_display_value(action.action_id, max_width=None)}\n"
         )
     stdout.write(
         "  所选计划指纹：" f"{_display_value(plan.plan_fingerprint, max_width=None)}\n"
-        "  永久性：仅删除上述 Pi JSONL；不会触碰 auth.json、settings 或服务端历史。\n"
+        "  永久性：只删除上述 Pi 会话文件；不会修改登录信息、设置或服务端历史。\n"
     )
 
 
@@ -1224,9 +1753,9 @@ def _write_pi_delete_action_catalog(actions: Sequence[Any], *, stdout: TextIO) -
     stdout.write("\n可永久删除的 Pi 会话（不支持 all）：\n")
     for index, action in enumerate(actions, start=1):
         stdout.write(
-            f"  {index}. Pi session ID：{_display_value(action.session_id, max_width=None)}\n"
-            f"     文件：{_display_value(action.path, max_width=220)}\n"
-            f"     action ID：{_display_value(action.action_id, max_width=None)}\n"
+            f"  {index}. 会话 ID：{_display_value(action.session_id, max_width=None)}\n"
+            f"     会话文件：{_display_value(action.path, max_width=220)}\n"
+            f"     删除操作 ID：{_display_value(action.action_id, max_width=None)}\n"
         )
 
 
@@ -1241,7 +1770,7 @@ def _emit_pi_delete_error(error: Exception, *, plan: Any | None, json_output: bo
             payload["error"] = {"type": type(error).__name__, "kind": str(getattr(error, "kind", "invalid")), "message": str(error)}
         _write_json(payload, stdout)
     else:
-        stderr.write(f"错误：{_human_message(error)}\n")
+        stderr.write(f"错误：{_human_backend_error(error, backend='pi')}\n")
     return EXIT_ERROR
 
 
@@ -1253,9 +1782,278 @@ def _emit_pi_delete_result(result: Any, plan: Any, *, json_output: bool, stdout:
     failures = len(tuple(getattr(result, "not_deleted", ()) or ())) + len(tuple(getattr(result, "unknown", ()) or ()))
     stdout.write(f"Pi 永久删除完成：已验证删除 {deleted} 条，未确认或失败 {failures} 条。\n")
     for item in tuple(getattr(result, "results", ()) or ()):
-        stdout.write(f"  {item.status} {item.session_id}：{_display_value(item.path, max_width=220)}\n")
+        stdout.write(
+            f"  {_delete_result_status_label(item.status)}："
+            f"会话 ID {_display_value(item.session_id, max_width=None)}；"
+            f"会话文件 {_display_value(item.path, max_width=220)}\n"
+        )
         if item.error:
-            stdout.write(f"    原因：{_human_message(item.error)}\n")
+            stdout.write(f"    原因：{_human_backend_error(item.error, backend='pi')}\n")
+
+
+def _run_claude_delete(
+    args: argparse.Namespace,
+    *,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    catalog_builder: Any | None,
+    delete_executor: Any | None,
+) -> int:
+    """Handle Claude's separate, manifest-level local delete contract."""
+
+    try:
+        from .claude_delete import build_claude_delete_plan, execute_claude_delete
+
+        catalog = _build_claude_catalog(args, catalog_builder)
+        plan = build_claude_delete_plan(catalog)
+        executor = delete_executor or execute_claude_delete
+        if args.thread_id:
+            raise ActionSelectionError(
+                "--platform claude 只可使用 --session-id 或 --action-id，"
+                "不能使用 --thread-id。",
+                kind="claude_thread_selector_unsupported",
+            )
+        if args.action_id and args.session_id:
+            raise ActionSelectionError(
+                "Claude 删除中 --action-id 与 --session-id 不能同时使用。",
+                kind="conflicting_selectors",
+            )
+    except Exception as exc:
+        return _emit_claude_delete_error(
+            exc, plan=None, json_output=args.json, stdout=stdout, stderr=stderr
+        )
+
+    tty = (
+        not args.json
+        and bool(getattr(stdin, "isatty", lambda: False)())
+        and bool(getattr(stdout, "isatty", lambda: False)())
+    )
+    selectors = tuple(args.action_id or args.session_id)
+    try:
+        if not selectors and tty:
+            _write_claude_session_catalog(
+                catalog, stdout=stdout, stderr=stderr, limit=args.limit
+            )
+            actions, hidden = _visible_items(tuple(plan.executable_actions), args.limit)
+            _write_claude_delete_action_catalog(actions, stdout=stdout)
+            if hidden:
+                stdout.write(
+                    f"另有 {hidden} 条 Claude 删除目标未进入本次编号；"
+                    "请增大 --limit。\n"
+                )
+            if not actions:
+                stdout.write("没有可安全删除的 Claude 会话；未做任何更改。\n")
+                return EXIT_ERROR if tuple(plan.errors) else EXIT_OK
+            stdout.write(
+                "\n请输入要永久删除的 Claude 会话编号"
+                "（例如 1,3-5；不支持 all）："
+            )
+            stdout.flush()
+            raw = stdin.readline()
+            if raw == "":
+                stdout.write("\n输入已结束，已取消；未做任何更改。\n")
+                return EXIT_OK
+            numbers = parse_number_selection(raw, item_count=len(actions))
+            selectors = tuple(str(actions[index - 1].action_id) for index in numbers)
+        elif not selectors:
+            raise ActionSelectionError(
+                "Claude 删除不支持 all 或隐式批量选择；"
+                "请使用 --session-id、--action-id 或 TTY 编号。",
+                kind="selection_required",
+            )
+        selected_plan = plan.with_selected_actions(selectors)
+    except Exception as exc:
+        return _emit_claude_delete_error(
+            exc, plan=plan, json_output=args.json, stdout=stdout, stderr=stderr
+        )
+
+    plan_rendered = False
+    if not args.yes:
+        if args.json:
+            _write_json(
+                _claude_delete_preview(selected_plan, confirmation_required=True), stdout
+            )
+        else:
+            _write_claude_delete_plan(selected_plan, stdout=stdout)
+            plan_rendered = True
+        if not tty:
+            return EXIT_CONFIRMATION_REQUIRED
+        stdout.write(
+            f"请输入“{CLAUDE_DELETE_CONFIRMATION}”继续，输入其他内容取消："
+        )
+        stdout.flush()
+        if stdin.readline().strip() != CLAUDE_DELETE_CONFIRMATION:
+            stdout.write("已取消；未做任何更改。\n")
+            return EXIT_OK
+        clients_closed = True
+    else:
+        if not args.clients_closed:
+            return _emit_claude_delete_error(
+                ActionSelectionError(
+                    "使用 --yes 执行 Claude 永久删除时必须同时提供 --clients-closed。",
+                    kind="clients_not_closed",
+                ),
+                plan=selected_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        clients_closed = True
+
+    approved_fingerprint = str(selected_plan.plan_fingerprint or "")
+    if not tty:
+        if not args.plan_fingerprint:
+            return _emit_claude_delete_error(
+                ActionSelectionError(
+                    "非 TTY Claude 删除必须提供 --plan-fingerprint。",
+                    kind="fingerprint_required",
+                ),
+                plan=selected_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        approved_fingerprint = str(args.plan_fingerprint)
+        if approved_fingerprint != str(selected_plan.plan_fingerprint):
+            return _emit_claude_delete_error(
+                ActionSelectionError(
+                    "Claude 计划指纹与当前 session manifest 不一致；请重新预览。",
+                    kind="fingerprint_mismatch",
+                ),
+                plan=selected_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+    elif not args.json and not plan_rendered:
+        _write_claude_delete_plan(selected_plan, stdout=stdout)
+
+    try:
+        result = executor(
+            selected_plan,
+            catalog_builder=lambda: _build_claude_catalog(args, catalog_builder),
+            approved_plan_fingerprint=approved_fingerprint,
+            clients_closed=clients_closed,
+        )
+    except Exception as exc:
+        return _emit_claude_delete_error(
+            exc,
+            plan=selected_plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    _emit_claude_delete_result(
+        result, selected_plan, json_output=args.json, stdout=stdout
+    )
+    return (
+        EXIT_OK
+        if not tuple(getattr(result, "not_deleted", ()))
+        and not tuple(getattr(result, "unknown", ()))
+        else EXIT_ERROR
+    )
+
+
+def _claude_delete_preview(plan: Any, *, confirmation_required: bool) -> dict[str, Any]:
+    return {
+        "command": "delete",
+        "platform": "claude",
+        "confirmation_required": confirmation_required,
+        "plan": _object_dict(plan),
+        "plan_fingerprint": str(getattr(plan, "plan_fingerprint", "") or ""),
+        "selected_actions": [_object_dict(action) for action in tuple(plan.actions)],
+        "shared_records_preserved": True,
+    }
+
+
+def _write_claude_delete_plan(plan: Any, *, stdout: TextIO) -> None:
+    stdout.write("\nClaude Code 永久删除最终计划（精确文件清单）：\n")
+    for action in tuple(plan.actions):
+        stdout.write(
+            f"  - 会话 ID：{_display_value(action.session_id, max_width=None)}\n"
+            f"    Claude 配置目录：{_display_value(action.config_dir, max_width=220)}\n"
+            f"    将删除的会话专属文件或目录：{len(tuple(action.manifest))} 个\n"
+            f"    删除操作 ID：{_display_value(action.action_id, max_width=None)}\n"
+        )
+    stdout.write(
+        f"  所选计划指纹：{_display_value(plan.plan_fingerprint, max_width=None)}\n"
+        "  共享数据保留：登录信息、设置、插件、技能、代理、命令、"
+        "项目记忆、CLAUDE.md、统计缓存、共享历史记录和索引均不修改。\n"
+    )
+
+
+def _write_claude_delete_action_catalog(actions: Sequence[Any], *, stdout: TextIO) -> None:
+    stdout.write("\n可永久删除的 Claude Code 会话（不支持 all）：\n")
+    for index, action in enumerate(actions, start=1):
+        stdout.write(
+            f"  {index}. 会话 ID：{_display_value(action.session_id, max_width=None)}\n"
+            f"     Claude 配置目录：{_display_value(action.config_dir, max_width=220)}\n"
+            f"     删除操作 ID：{_display_value(action.action_id, max_width=None)}\n"
+        )
+
+
+def _emit_claude_delete_error(
+    error: Exception,
+    *,
+    plan: Any | None,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if json_output:
+        error_payload = {
+            "type": type(error).__name__,
+            "kind": str(getattr(error, "kind", "invalid")),
+            "message": str(error),
+        }
+        payload: dict[str, Any] = {
+            "command": "delete",
+            "platform": "claude",
+            "error": error_payload,
+        }
+        if plan is not None:
+            payload.update(
+                _claude_delete_preview(plan, confirmation_required=False)
+            )
+            payload["error"] = error_payload
+        _write_json(payload, stdout)
+    else:
+        stderr.write(f"错误：{_human_backend_error(error, backend='claude')}\n")
+    return EXIT_ERROR
+
+
+def _emit_claude_delete_result(
+    result: Any, plan: Any, *, json_output: bool, stdout: TextIO
+) -> None:
+    if json_output:
+        _write_json(
+            {
+                **_claude_delete_preview(plan, confirmation_required=False),
+                **_object_dict(result),
+            },
+            stdout,
+        )
+        return
+    deleted = len(tuple(getattr(result, "deleted", ()) or ()))
+    failures = len(tuple(getattr(result, "not_deleted", ()) or ())) + len(
+        tuple(getattr(result, "unknown", ()) or ())
+    )
+    stdout.write(
+        f"Claude Code 永久删除完成：已验证删除 {deleted} 条，"
+        f"未确认或失败 {failures} 条；共享记录已保留。\n"
+    )
+    for item in tuple(getattr(result, "results", ()) or ()):
+        stdout.write(
+            f"  {_delete_result_status_label(item.status)}："
+            f"会话 ID {_display_value(item.session_id, max_width=None)}；"
+            "Claude 配置目录 "
+            f"{_display_value(item.config_dir, max_width=220)}\n"
+        )
+        if item.error:
+            stdout.write(
+                f"    原因：{_human_backend_error(item.error, backend='claude')}\n"
+            )
 
 
 def _has_explicit_pi(platforms: Sequence[str] | None) -> bool:
@@ -1268,6 +2066,28 @@ def _is_exact_pi_platform(platforms: Sequence[str] | None) -> bool:
 
 def _records_include_pi(platforms: Sequence[str] | None) -> bool:
     return not platforms or "all" in platforms or "pi" in platforms
+
+
+def _has_explicit_claude(platforms: Sequence[str] | None) -> bool:
+    return bool(platforms and "claude" in platforms)
+
+
+def _is_exact_claude_platform(platforms: Sequence[str] | None) -> bool:
+    return bool(platforms) and set(platforms) == {"claude"}
+
+
+def _records_include_claude(platforms: Sequence[str] | None) -> bool:
+    return not platforms or "all" in platforms or "claude" in platforms
+
+
+def _explicit_unsupported_scan_engine(
+    platforms: Sequence[str] | None,
+) -> str | None:
+    if _has_explicit_pi(platforms):
+        return "Pi Agent"
+    if _has_explicit_claude(platforms):
+        return "Claude Code"
+    return None
 
 
 def _run_manual_delete(

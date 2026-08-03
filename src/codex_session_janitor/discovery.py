@@ -123,13 +123,20 @@ def discover_cindy_profiles(appdata: Path | None = None) -> tuple[CindyProfile, 
                     codex_home=root / "codex-home",
                 )
             )
-        if (
-            not discovered_databases
-            and _optional_directory_exists(root / "codex-home")
-        ):
-            # The frontend DB may have been removed while its dedicated Codex
-            # storage survived. A missing placeholder DB contributes no
-            # frontend rows but keeps that storage visible in the native union.
+        dedicated_store_exists = False
+        if not discovered_databases:
+            codex_store_exists = _optional_directory_exists(root / "codex-home")
+            pi_home_exists = _optional_directory_exists(root / "pi-agent-home")
+            pi_store_exists = (
+                _optional_directory_exists(root / "pi-agent-home" / "sessions")
+                if pi_home_exists
+                else False
+            )
+            dedicated_store_exists = codex_store_exists or pi_store_exists
+        if not discovered_databases and dedicated_store_exists:
+            # The frontend DB may have been removed while a dedicated native
+            # store survived. A missing placeholder DB contributes no
+            # frontend rows but keeps that Cindy-owned storage discoverable.
             profiles.append(
                 CindyProfile(
                     root=root,
@@ -194,11 +201,19 @@ def _unique_existing_files(candidates: list[Path]) -> tuple[Path, ...]:
 
 def _optional_directory_exists(path: Path) -> bool:
     try:
-        path_status = path.stat()
+        path_status = path.lstat()
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise RuntimeError(f"Could not inspect frontend profile {path}: {exc}") from exc
+    attributes = getattr(path_status, "st_file_attributes", 0)
+    is_reparse = bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    )
+    if stat.S_ISLNK(path_status.st_mode) or is_reparse:
+        raise RuntimeError(
+            f"Frontend profile path is a symlink or reparse point: {path}"
+        )
     if not stat.S_ISDIR(path_status.st_mode):
         raise RuntimeError(f"Frontend profile path is not a directory: {path}")
     return True

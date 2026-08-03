@@ -5,9 +5,13 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from codex_session_janitor.discovery import CindyProfile
 from codex_session_janitor.pi_sessions import (
+    PiInventoryError,
     PiSelectionError,
+    build_pi_root_qualified_catalog,
     build_pi_session_catalog,
     resolve_pi_paths,
     select_pi_sessions,
@@ -110,7 +114,7 @@ class PiSessionCatalogTests(unittest.TestCase):
         self.assertTrue(catalog.errors)
         self.assertNotIn("not valid json", json.dumps(catalog.to_dict()))
 
-    def test_active_duplicate_and_child_reference_are_conservative(self) -> None:
+    def test_active_duplicate_id_and_child_reference_keep_qualified_identity(self) -> None:
         parent = self._write_session("--project--/parent.jsonl", session_id="same")
         child = self._write_session("--project--/child.jsonl", session_id="child", parent_session=str(parent))
         self._write_session("--other--/duplicate.jsonl", session_id="same")
@@ -123,8 +127,9 @@ class PiSessionCatalogTests(unittest.TestCase):
         self.assertTrue(by_path[child].active)
         self.assertFalse(by_path[child].deletable)
         self.assertIn(child, by_path[parent].child_paths)
-        self.assertFalse(by_path[parent].deletable)
-        self.assertGreaterEqual(sum(error.error_type == "DuplicateSessionId" for error in catalog.errors), 2)
+        self.assertTrue(by_path[parent].deletable)
+        self.assertTrue(by_path[self.sessions / "--other--/duplicate.jsonl"].deletable)
+        self.assertFalse(any(error.error_type == "DuplicateSessionId" for error in catalog.errors))
         with self.assertRaises(PiSelectionError):
             select_pi_sessions(catalog, ["same"])
         self.assertEqual(select_pi_sessions(catalog, [by_path[child].action_id]), (by_path[child],))
@@ -149,6 +154,37 @@ class PiSessionCatalogTests(unittest.TestCase):
 
         self.assertTrue(catalog.errors)
         self.assertIn("not a directory", catalog.errors[0].message)
+
+    def test_failed_physical_qualification_never_falls_back_to_deletable(self) -> None:
+        self._write_session("--project--/candidate.jsonl", session_id="candidate")
+        cindy_root = self.root / "Cindy"
+        profile = CindyProfile(
+            root=cindy_root,
+            database=cindy_root / "cindy-local-v1.db",
+            codex_home=cindy_root / "codex-home",
+        )
+
+        with patch(
+            "codex_session_janitor.pi_sessions._physical_storage_identity",
+            side_effect=PiInventoryError("denied"),
+        ):
+            catalog = build_pi_root_qualified_catalog(
+                environ=self._env(),
+                cwd=self.project,
+                home=self.home,
+                agent_dir=self.agent,
+                session_root=self.sessions,
+                cindy_profiles=[profile],
+            )
+
+        self.assertEqual(len(catalog.records), 1)
+        self.assertFalse(catalog.records[0].deletable)
+        self.assertEqual(
+            catalog.records[0].reference_classification, "inventory_incomplete"
+        )
+        self.assertTrue(
+            any(error.source == "pi-storage-qualification" for error in catalog.errors)
+        )
 
     @unittest.skipUnless(hasattr(os, "symlink"), "platform lacks symlink support")
     def test_symlink_is_explicitly_rejected(self) -> None:

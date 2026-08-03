@@ -15,6 +15,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .cindy_references import (
+    CindyNativeReference,
+    CindyReferenceFailure,
+    build_cindy_reference_catalog,
+)
+
 
 _SUPPORTED_SESSION_VERSIONS = frozenset((1, 2, 3))
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
@@ -90,6 +96,10 @@ class PiSessionRecord:
     child_paths: tuple[Path, ...] = ()
     deletable: bool = False
     blockers: tuple[str, ...] = ()
+    storage_kind: str = "standalone"
+    cindy_profile_root: Path | None = None
+    cindy_references: tuple[CindyNativeReference, ...] = ()
+    reference_classification: str = "unreferenced"
     stat_dev: int = 0
     stat_ino: int = 0
     stat_mode: int = 0
@@ -113,6 +123,12 @@ class PiSessionRecord:
                 "session_root": _normalized_path(self.session_root),
                 "path": _normalized_path(self.path),
                 "session_id": self.session_id,
+                "storage_kind": self.storage_kind,
+                "cindy_profile_root": (
+                    _normalized_path(self.cindy_profile_root)
+                    if self.cindy_profile_root is not None
+                    else None
+                ),
             }
         )
 
@@ -134,6 +150,16 @@ class PiSessionRecord:
             "agent_dir": _normalized_path(self.agent_dir),
             "session_root": _normalized_path(self.session_root),
             "session_id": self.session_id,
+            "storage_kind": self.storage_kind,
+            "cindy_profile_root": (
+                _normalized_path(self.cindy_profile_root)
+                if self.cindy_profile_root is not None
+                else None
+            ),
+            "reference_classification": self.reference_classification,
+            "cindy_references": [
+                reference.approval_payload() for reference in self.cindy_references
+            ],
             "file": {
                 "path": _normalized_path(self.path),
                 "st_dev": self.stat_dev,
@@ -162,6 +188,10 @@ class PiSessionRecord:
             "child_paths": [str(path) for path in self.child_paths],
             "deletable": self.deletable,
             "blockers": list(self.blockers),
+            "reference_classification": self.reference_classification,
+            "cindy_references": [
+                reference.to_dict() for reference in self.cindy_references
+            ],
         }
 
 
@@ -172,6 +202,9 @@ class PiSessionCatalog:
     session_root_source: str | None = None
     records: tuple[PiSessionRecord, ...] = ()
     errors: tuple[PiInventoryFailure, ...] = ()
+    storage_kind: str = "standalone"
+    cindy_profile_root: Path | None = None
+    frontend_only_references: tuple[CindyNativeReference, ...] = ()
 
     @property
     def sessions(self) -> tuple[PiSessionRecord, ...]:
@@ -191,8 +224,67 @@ class PiSessionCatalog:
             "agent_dir": str(self.agent_dir),
             "session_root": str(self.session_root) if self.session_root else None,
             "session_root_source": self.session_root_source,
+            "storage_kind": self.storage_kind,
+            "cindy_profile_root": (
+                str(self.cindy_profile_root)
+                if self.cindy_profile_root is not None
+                else None
+            ),
             "records": [record.to_dict() for record in self.records],
             "errors": [failure.to_dict() for failure in self.errors],
+            "frontend_only_references": [
+                reference.to_dict() for reference in self.frontend_only_references
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class PiMultiRootCatalog:
+    """A clean aggregate over independent standalone and Cindy Pi stores."""
+
+    catalogs: tuple[PiSessionCatalog, ...] = ()
+
+    @property
+    def records(self) -> tuple[PiSessionRecord, ...]:
+        return tuple(
+            sorted(
+                (record for catalog in self.catalogs for record in catalog.records),
+                key=lambda record: (
+                    _normalized_path(record.session_root),
+                    _normalized_path(record.path),
+                ),
+            )
+        )
+
+    @property
+    def sessions(self) -> tuple[PiSessionRecord, ...]:
+        return self.records
+
+    @property
+    def errors(self) -> tuple[PiInventoryFailure, ...]:
+        return tuple(failure for catalog in self.catalogs for failure in catalog.errors)
+
+    @property
+    def failures(self) -> tuple[PiInventoryFailure, ...]:
+        return self.errors
+
+    @property
+    def frontend_only_references(self) -> tuple[CindyNativeReference, ...]:
+        return tuple(
+            reference
+            for catalog in self.catalogs
+            for reference in catalog.frontend_only_references
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "catalogs": [catalog.to_dict() for catalog in self.catalogs],
+            "records": [record.to_dict() for record in self.records],
+            "errors": [failure.to_dict() for failure in self.errors],
+            "frontend_only_references": [
+                reference.to_dict() for reference in self.frontend_only_references
+            ],
         }
 
 
@@ -277,6 +369,10 @@ def build_pi_session_catalog(
     agent_dir: Path | str | None = None,
     pi_root: Path | str | None = None,
     session_root: Path | str | None = None,
+    storage_kind: str = "standalone",
+    cindy_profile_root: Path | str | None = None,
+    cindy_references: Sequence[CindyNativeReference] = (),
+    cindy_failures: Sequence[CindyReferenceFailure] = (),
 ) -> PiSessionCatalog:
     """Inventory Pi JSONL files at most one project directory below the root.
 
@@ -309,9 +405,36 @@ def build_pi_session_catalog(
                     message="Unable to resolve Pi session storage paths",
                 ),
             ),
+            storage_kind=storage_kind,
+            cindy_profile_root=(
+                _absolute_path(Path(cindy_profile_root))
+                if cindy_profile_root is not None
+                else None
+            ),
+            frontend_only_references=tuple(
+                reference
+                for reference in cindy_references
+                if reference.backend == "pi" and reference.native_session_id is not None
+            ),
         )
 
     failures: list[PiInventoryFailure] = []
+    profile_path = (
+        _absolute_path(Path(cindy_profile_root))
+        if cindy_profile_root is not None
+        else None
+    )
+    for failure in cindy_failures:
+        failures.append(
+            PiInventoryFailure(
+                agent_dir=paths.agent_dir,
+                session_root=paths.session_root,
+                source="cindy-reference",
+                error_type=failure.error_type,
+                message=failure.message,
+                path=failure.database,
+            )
+        )
     try:
         files = _discover_session_files(paths.session_root)
     except Exception as exc:
@@ -348,42 +471,84 @@ def build_pi_session_catalog(
         except Exception as exc:
             failures.append(_failure(paths, "pi-session-jsonl", exc, path=file_path))
 
-    # UUIDs are selectors in Pi.  A duplicate makes a record unsafe to target.
-    by_id: dict[str, list[PiSessionRecord]] = {}
-    for record in records:
-        by_id.setdefault(record.session_id, []).append(record)
-    for duplicate_records in by_id.values():
-        if len(duplicate_records) > 1:
-            paths_text = ", ".join(_normalized_path(item.path) for item in duplicate_records)
-            for item in duplicate_records:
-                failures.append(
-                    PiInventoryFailure(
-                        agent_dir=paths.agent_dir,
-                        session_root=paths.session_root,
-                        source="pi-session-id",
-                        error_type="DuplicateSessionId",
-                        message=f"Session id is duplicated across catalog paths: {paths_text}",
-                        path=item.path,
-                    )
-                )
-
     children_by_parent: dict[str, list[Path]] = {}
     for record in records:
         if record.parent_session:
             parent_key = _normalized_path(_resolve_reference_path(record.parent_session, record.path))
             children_by_parent.setdefault(parent_key, []).append(record.path)
 
+    matched_by_path: dict[str, list[CindyNativeReference]] = {
+        _normalized_path(record.path): [] for record in records
+    }
+    reference_identity_failed = False
+    for reference in cindy_references:
+        if reference.backend != "pi" or reference.native_session_id is None:
+            continue
+        for record in records:
+            try:
+                matches = _pi_reference_matches(reference.native_session_id, record)
+            except PiInventoryError:
+                reference_identity_failed = True
+                break
+            if matches:
+                matched_by_path[_normalized_path(record.path)].append(reference)
+        if reference_identity_failed:
+            break
+    if reference_identity_failed:
+        failures.append(
+            PiInventoryFailure(
+                agent_dir=paths.agent_dir,
+                session_root=paths.session_root,
+                source="cindy-reference-path",
+                error_type="ReferencePathIdentityError",
+                message="Unable to establish physical identity of a Cindy Pi reference path",
+                path=paths.session_root,
+            )
+        )
+
     root_blockers = tuple(
         sorted({f"{failure.source}: {failure.message}" for failure in failures if failure.blocks_delete})
     )
     enriched: list[PiSessionRecord] = []
-    duplicate_ids = {key for key, value in by_id.items() if len(value) > 1}
     for record in records:
         blockers = list(root_blockers)
         if record.active:
             blockers.append("PI_SESSION_FILE identifies this as the current active session")
-        if record.session_id in duplicate_ids:
-            blockers.append("Session id is duplicated")
+        matched_references = tuple(
+            sorted(
+                matched_by_path.get(_normalized_path(record.path), ()),
+                key=lambda reference: (
+                    str(reference.database),
+                    reference.cindy_session_id,
+                    reference.reference_kind,
+                    reference.boundary_created_at_ms or -1,
+                    reference.boundary_id or "",
+                ),
+            )
+        )
+        live_current = any(
+            reference.is_live and reference.reference_kind == "current"
+            for reference in matched_references
+        )
+        live_historical = any(
+            reference.is_live and reference.reference_kind == "agent_switch"
+            for reference in matched_references
+        )
+        if live_current:
+            blockers.append("A live Cindy session currently references this Pi session")
+        if live_historical:
+            blockers.append("A live Cindy session retains a historical reference to this Pi session")
+        classification = (
+            "inventory_incomplete"
+            if reference_identity_failed
+            else "live_current_reference"
+            if live_current
+            else "live_historical_reference"
+            if live_historical
+            else "deleted_frontend_reference"
+            if matched_references
+            else "unreferenced"
+        )
         child_paths = tuple(sorted(children_by_parent.get(_normalized_path(record.path), ()), key=_normalized_path))
         enriched.append(
             replace(
@@ -391,14 +556,331 @@ def build_pi_session_catalog(
                 child_paths=child_paths,
                 blockers=tuple(sorted(set(blockers))),
                 deletable=not blockers,
+                storage_kind=storage_kind,
+                cindy_profile_root=profile_path,
+                cindy_references=matched_references,
+                reference_classification=classification,
             )
         )
+    matched_reference_keys = {
+        _cindy_reference_key(reference)
+        for record in enriched
+        for reference in record.cindy_references
+    }
+    frontend_only = tuple(
+        sorted(
+            (
+                reference
+                for reference in cindy_references
+                if reference.backend == "pi"
+                and reference.native_session_id is not None
+                and _cindy_reference_key(reference) not in matched_reference_keys
+            ),
+            key=lambda reference: (
+                str(reference.database),
+                reference.cindy_session_id,
+                reference.reference_kind,
+                reference.boundary_created_at_ms or -1,
+                reference.boundary_id or "",
+            ),
+        )
+    )
     return PiSessionCatalog(
         agent_dir=paths.agent_dir,
         session_root=paths.session_root,
         session_root_source=paths.session_root_source,
         records=tuple(sorted(enriched, key=lambda item: _normalized_path(item.path))),
         errors=tuple(sorted(failures, key=lambda item: (item.source, _normalized_path(item.path) if item.path else "", item.message))),
+        storage_kind=storage_kind,
+        cindy_profile_root=profile_path,
+        frontend_only_references=frontend_only,
+    )
+
+
+def build_pi_multi_root_catalog(
+    catalogs: Sequence[PiSessionCatalog],
+) -> PiMultiRootCatalog:
+    """Aggregate already-built roots without merging their identities."""
+
+    return PiMultiRootCatalog(tuple(catalogs))
+
+
+def build_pi_root_qualified_catalog(
+    *,
+    cindy_profiles: Sequence[object] = (),
+    environ: Mapping[str, str] | None = None,
+    cwd: Path | str | None = None,
+    home: Path | str | None = None,
+    agent_dir: Path | str | None = None,
+    pi_root: Path | str | None = None,
+    session_root: Path | str | None = None,
+) -> PiSessionCatalog:
+    """Build exactly one Pi root while retaining Cindy ownership guards.
+
+    Explicit path options limit enumeration, but they are not evidence that a
+    Cindy-owned store became standalone.  The effective session root is first
+    resolved with Pi's normal precedence and then compared to every supplied
+    Cindy ``<profile>/pi-agent-home/sessions`` root.
+    """
+
+    options = {
+        "environ": environ,
+        "cwd": cwd,
+        "home": home,
+        "agent_dir": agent_dir,
+        "pi_root": pi_root,
+        "session_root": session_root,
+    }
+    try:
+        effective = resolve_pi_paths(**options)
+    except Exception:
+        # Preserve the ordinary structured path failure.  No action from this
+        # result can be executable, so qualification cannot weaken safety.
+        return build_pi_session_catalog(**options)
+
+    grouped = _group_cindy_profiles(cindy_profiles)
+    match, qualification_error = _match_cindy_pi_storage(
+        effective.session_root,
+        grouped,
+    )
+    if qualification_error is not None:
+        return _qualification_failed_catalog(options)
+    if match is not None:
+        root, profiles = match
+        return _build_cindy_pi_catalog(root, profiles, environ=environ)
+    return build_pi_session_catalog(**options)
+
+
+def build_pi_session_inventory(
+    *,
+    standalone_options: Mapping[str, Any] | None = None,
+    cindy_profiles: Sequence[object] = (),
+    include_standalone: bool = True,
+) -> PiMultiRootCatalog:
+    """Build standalone Pi plus every supplied Cindy profile Pi root.
+
+    ``cindy_profiles`` accepts the public ``discovery.CindyProfile`` shape
+    (``root`` and ``database`` attributes), keeping discovery separate from
+    this deterministic inventory layer.
+    """
+
+    catalogs: list[PiSessionCatalog] = []
+    grouped = _group_cindy_profiles(cindy_profiles)
+    inventory_environ = dict(standalone_options or {}).get("environ")
+    if include_standalone:
+        standalone = build_pi_session_catalog(**dict(standalone_options or {}))
+        duplicate_match: tuple[Path, list[object]] | None = None
+        qualification_error: Exception | None = None
+        if standalone.session_root is not None:
+            duplicate_match, qualification_error = _match_cindy_pi_storage(
+                standalone.session_root,
+                grouped,
+            )
+        if qualification_error is not None:
+            standalone = _block_catalog_for_qualification(standalone)
+        if duplicate_match is None:
+            catalogs.append(standalone)
+
+    for _, (root, profiles) in sorted(grouped.items()):
+        catalogs.append(
+            _build_cindy_pi_catalog(root, profiles, environ=inventory_environ)
+        )
+    return build_pi_multi_root_catalog(catalogs)
+
+
+def _group_cindy_profiles(
+    cindy_profiles: Sequence[object],
+) -> dict[str, tuple[Path, list[object]]]:
+    grouped: dict[str, tuple[Path, list[object]]] = {}
+    for profile in cindy_profiles:
+        root_value = getattr(profile, "root", None)
+        database_value = getattr(profile, "database", None)
+        if not isinstance(root_value, Path) or not isinstance(database_value, Path):
+            raise PiInventoryError("Cindy profiles must provide Path root and database values")
+        root = _absolute_path(root_value)
+        key = _normalized_path(root)
+        grouped.setdefault(key, (root, []))[1].append(profile)
+    return grouped
+
+
+def _match_cindy_pi_storage(
+    session_root: Path,
+    grouped: Mapping[str, tuple[Path, list[object]]],
+) -> tuple[tuple[Path, list[object]] | None, Exception | None]:
+    """Compare storage by canonical path and directory file identity."""
+
+    try:
+        target = _physical_storage_identity(session_root)
+        for _, (root, profiles) in sorted(grouped.items()):
+            expected = _physical_storage_identity(
+                root / "pi-agent-home" / "sessions"
+            )
+            if _same_physical_storage(target, expected):
+                return (root, profiles), None
+    except (OSError, RuntimeError, PiInventoryError) as exc:
+        # If physical ownership cannot be established, treating the target as
+        # standalone would permit an alias to bypass Cindy's live guard.
+        return None, exc
+    return None, None
+
+
+def _physical_storage_identity(
+    path: Path,
+) -> tuple[str, tuple[int, int] | None]:
+    absolute = _absolute_path(path)
+    try:
+        canonical = absolute.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise PiInventoryError("Unable to canonicalize Pi session storage") from exc
+    directory_identity: tuple[int, int] | None = None
+    try:
+        status = absolute.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PiInventoryError("Unable to inspect physical Pi session storage") from exc
+    else:
+        if not stat.S_ISDIR(status.st_mode):
+            raise PiInventoryError("Pi session storage is not a directory")
+        directory_identity = (status.st_dev, status.st_ino)
+    return _normalized_path(canonical), directory_identity
+
+
+def _same_physical_storage(
+    left: tuple[str, tuple[int, int] | None],
+    right: tuple[str, tuple[int, int] | None],
+) -> bool:
+    if left[0] == right[0]:
+        return True
+    left_stat, right_stat = left[1], right[1]
+    return (
+        left_stat is not None
+        and right_stat is not None
+        and left_stat == right_stat
+        and left_stat != (0, 0)
+    )
+
+
+def _qualification_failed_catalog(options: Mapping[str, Any]) -> PiSessionCatalog:
+    return _block_catalog_for_qualification(build_pi_session_catalog(**options))
+
+
+def _block_catalog_for_qualification(
+    catalog: PiSessionCatalog,
+) -> PiSessionCatalog:
+    failure = PiInventoryFailure(
+        agent_dir=catalog.agent_dir,
+        session_root=catalog.session_root,
+        source="pi-storage-qualification",
+        error_type="StorageQualificationError",
+        message="Unable to establish physical ownership of Pi session storage",
+        path=catalog.session_root,
+    )
+    blocker = f"{failure.source}: {failure.message}"
+    return replace(
+        catalog,
+        records=tuple(
+            replace(
+                record,
+                blockers=tuple(sorted(set((*record.blockers, blocker)))),
+                deletable=False,
+                reference_classification="inventory_incomplete",
+            )
+            for record in catalog.records
+        ),
+        errors=tuple((*catalog.errors, failure)),
+    )
+
+
+def _build_cindy_pi_catalog(
+    root: Path,
+    profiles: Sequence[object],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> PiSessionCatalog:
+    references: list[CindyNativeReference] = []
+    reference_failures: list[CindyReferenceFailure] = []
+    seen_databases: set[str] = set()
+    for profile in profiles:
+        database = getattr(profile, "database")
+        database_key = _normalized_path(database)
+        if database_key in seen_databases:
+            continue
+        seen_databases.add(database_key)
+        reference_catalog = build_cindy_reference_catalog(
+            database,
+            profile_root=root,
+        )
+        references.extend(reference_catalog.references)
+        reference_failures.extend(reference_catalog.failures)
+    agent_home = root / "pi-agent-home"
+    return build_pi_session_catalog(
+        # Explicit storage arguments keep this catalog pinned to Cindy while
+        # the inherited environment preserves PI_SESSION_FILE activity and
+        # malformed-marker failures.
+        environ=environ,
+        cwd=root,
+        home=root,
+        agent_dir=agent_home,
+        session_root=agent_home / "sessions",
+        storage_kind="cindy",
+        cindy_profile_root=root,
+        cindy_references=references,
+        cindy_failures=reference_failures,
+    )
+
+
+def _pi_reference_matches(native_id: str, record: PiSessionRecord) -> bool:
+    if native_id == record.session_id:
+        return True
+    try:
+        candidate = Path(native_id).expanduser()
+    except (TypeError, ValueError, OSError):
+        return False
+    if not candidate.is_absolute():
+        return False
+    try:
+        candidate_identity = _physical_file_identity(candidate)
+        record_identity = _physical_file_identity(record.path)
+    except (OSError, RuntimeError) as exc:
+        raise PiInventoryError(
+            "Unable to canonicalize a Cindy Pi reference path"
+        ) from exc
+    return _same_physical_storage(candidate_identity, record_identity)
+
+
+def _physical_file_identity(
+    path: Path,
+) -> tuple[str, tuple[int, int] | None]:
+    absolute = _absolute_path(path)
+    try:
+        canonical = absolute.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise PiInventoryError("Unable to canonicalize Pi session file") from exc
+    file_identity: tuple[int, int] | None = None
+    try:
+        status = absolute.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PiInventoryError("Unable to inspect physical Pi session file") from exc
+    else:
+        if not stat.S_ISREG(status.st_mode):
+            raise PiInventoryError("Pi session reference target is not a regular file")
+        file_identity = (status.st_dev, status.st_ino)
+    return _normalized_path(canonical), file_identity
+
+
+def _cindy_reference_key(reference: CindyNativeReference) -> tuple[object, ...]:
+    return (
+        _normalized_path(reference.database),
+        reference.cindy_session_id,
+        reference.backend,
+        reference.native_session_id,
+        reference.reference_kind,
+        reference.boundary_id,
+        reference.boundary_created_at_ms,
+        reference.boundary_rewind_at_ms,
     )
 
 
@@ -713,3 +1195,20 @@ def _normalized_path(path: Path) -> str:
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+__all__ = [
+    "PiInventoryError",
+    "PiInventoryFailure",
+    "PiMultiRootCatalog",
+    "PiPaths",
+    "PiSelectionError",
+    "PiSessionCatalog",
+    "PiSessionRecord",
+    "build_pi_multi_root_catalog",
+    "build_pi_root_qualified_catalog",
+    "build_pi_session_catalog",
+    "build_pi_session_inventory",
+    "resolve_pi_paths",
+    "select_pi_sessions",
+]

@@ -88,7 +88,10 @@ class SessionCatalogTests(unittest.TestCase):
             {"normal", "index-only", "rollout-only", "legacy-only", "gone-thread"},
         )
         self.assertEqual(len(by_id["normal"].frontend_sessions), 1)
-        self.assertTrue(by_id["normal"].deletable)
+        self.assertFalse(by_id["normal"].deletable)
+        self.assertTrue(
+            any("Cindy retains" in blocker for blocker in by_id["normal"].blockers)
+        )
         self.assertTrue(by_id["rollout-only"].deletable)
         self.assertTrue(by_id["index-only"].deletable)
         self.assertFalse(by_id["legacy-only"].artifact_present)

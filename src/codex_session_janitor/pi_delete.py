@@ -59,6 +59,10 @@ class PiDeleteAction:
     snapshot_fingerprint: str
     record: Any = field(repr=False, compare=False)
     risk: str = "high"
+    storage_kind: str = "standalone"
+    cindy_profile_root: Path | None = None
+    reference_classification: str = "unreferenced"
+    cindy_references: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def preserved_child_references(self) -> tuple[str, ...]:
@@ -98,6 +102,14 @@ class PiDeleteAction:
             },
             "sha256": self.sha256,
             "catalog_blocking_failures": list(self.catalog_blocking_failures),
+            "storage_kind": self.storage_kind,
+            "cindy_profile_root": (
+                _normal_path(self.cindy_profile_root)
+                if self.cindy_profile_root is not None
+                else None
+            ),
+            "reference_classification": self.reference_classification,
+            "cindy_references": list(self.cindy_references),
             "risk": self.risk,
         }
 
@@ -202,10 +214,11 @@ def build_pi_delete_plan(catalog: Any) -> PiDeletePlan:
     records, record_error = _sequence_attr(catalog, ("records", "sessions"))
     failures, failure_error = _sequence_attr(catalog, ("errors", "failures"))
     errors = [*record_error, *failure_error]
-    blocking = _blocking_failures(failures, errors)
+    global_blocking, scoped_blocking, failure_messages = _partition_blocking_failures(
+        failures, errors
+    )
     seen_paths: dict[str, str] = {}
     seen_ids: dict[str, str] = {}
-    seen_session_ids: dict[str, str] = {}
     valid: list[Any] = []
     for record in records:
         try:
@@ -223,23 +236,28 @@ def build_pi_delete_plan(catalog: Any) -> PiDeletePlan:
             errors.append(f"Pi inventory contains duplicate stable action_id {action_id!r}")
         else:
             seen_ids[action_id] = key
-        session_id = _string(record, "session_id")
-        if session_id in seen_session_ids and seen_session_ids[session_id] != key:
-            errors.append(f"Pi inventory contains duplicate session_id {session_id!r}")
-        else:
-            seen_session_ids[session_id] = key
+        _string(record, "session_id")
         valid.append(record)
     if errors:
-        blocking = (*blocking, "catalog structure is incomplete: " + "; ".join(dict.fromkeys(errors)))
+        structure_error = "catalog structure is incomplete: " + "; ".join(
+            dict.fromkeys(errors)
+        )
+        global_blocking = (*global_blocking, structure_error)
     duplicate_paths = {path for path, action_id in seen_paths.items()
                        if sum(1 for item in valid if _normal_path(_path(item, "path")) == path) > 1}
     duplicate_ids = {action_id for action_id in seen_ids
                      if sum(1 for item in valid if _string(item, "action_id") == action_id) > 1}
-    duplicate_session_ids = {session_id for session_id in seen_session_ids
-                             if sum(1 for item in valid if _string(item, "session_id") == session_id) > 1}
-    actions = tuple(_make_action(record, blocking, duplicate_paths, duplicate_ids, duplicate_session_ids)
+    actions = tuple(_make_action(
+                        record,
+                        _blocking_for_record(record, global_blocking, scoped_blocking),
+                        duplicate_paths,
+                        duplicate_ids,
+                    )
                     for record in sorted(valid, key=lambda item: _normal_path(_path(item, "path"))))
-    return PiDeletePlan(actions=actions, errors=tuple(dict.fromkeys(errors + list(blocking))))
+    return PiDeletePlan(
+        actions=actions,
+        errors=tuple(dict.fromkeys(errors + list(failure_messages))),
+    )
 
 
 def execute_pi_delete(
@@ -294,7 +312,7 @@ def execute_pi_delete(
     return PiDeleteResult(tuple(results))
 
 
-def _make_action(record: Any, blocking: tuple[str, ...], duplicate_paths: set[str], duplicate_ids: set[str], duplicate_session_ids: set[str]) -> PiDeleteAction:
+def _make_action(record: Any, blocking: tuple[str, ...], duplicate_paths: set[str], duplicate_ids: set[str]) -> PiDeleteAction:
     action_id = _string(record, "action_id")
     # ``agent_dir`` is Pi's public name.  ``pi_root`` remains accepted for
     # small third-party catalog shims produced before that name was settled.
@@ -325,6 +343,21 @@ def _make_action(record: Any, blocking: tuple[str, ...], duplicate_paths: set[st
     ctime = _stat_field(record, "stat_ctime_ns", stat_info.st_ctime_ns if stat_info else 0)
     attributes = _stat_field(record, "stat_file_attributes", getattr(stat_info, "st_file_attributes", 0) if stat_info else 0)
     sha256 = _string(record, "sha256")
+    storage_kind = getattr(record, "storage_kind", "standalone")
+    if not isinstance(storage_kind, str) or not storage_kind:
+        storage_kind = ""
+    profile_value = getattr(record, "cindy_profile_root", None)
+    cindy_profile_root = (
+        _path_value(profile_value, "cindy_profile_root")
+        if profile_value is not None
+        else None
+    )
+    reference_classification = getattr(record, "reference_classification", "unreferenced")
+    if not isinstance(reference_classification, str) or not reference_classification:
+        reference_classification = ""
+    reference_snapshots, reference_errors = _cindy_reference_snapshots(
+        getattr(record, "cindy_references", ())
+    )
     reasons: list[str] = []
     try:
         relative = _relative_path(path, session_root)
@@ -344,16 +377,25 @@ def _make_action(record: Any, blocking: tuple[str, ...], duplicate_paths: set[st
     reasons.extend(blocking)
     if _normal_path(path) in duplicate_paths: reasons.append("Pi inventory has duplicate transcript target")
     if action_id in duplicate_ids: reasons.append("Pi inventory has duplicate action_id")
-    if session_id in duplicate_session_ids: reasons.append("Pi inventory has duplicate session_id")
+    if not storage_kind: reasons.append("Pi inventory has invalid storage_kind")
+    if not reference_classification: reasons.append("Pi inventory has invalid reference_classification")
+    reasons.extend(reference_errors)
     payload = {"action_id": action_id, "pi_root": _normal_path(pi_root), "session_root": _normal_path(session_root),
                "path": _normal_path(path), "relative_path": relative, "session_id": session_id, "version": version,
                "timestamp": timestamp, "cwd": cwd, "parent_session": parent,
                "child_paths": [_normal_path(item) for item in child_paths], "active": active, "deletable": deletable,
                "blockers": list(blockers), "stat": {"dev": dev, "ino": ino, "mode": mode, "size": size, "mtime_ns": mtime, "ctime_ns": ctime, "file_attributes": attributes}, "sha256": sha256,
-               "catalog_blocking_failures": list(blocking), "risk": "high"}
+               "catalog_blocking_failures": list(blocking), "storage_kind": storage_kind,
+               "cindy_profile_root": _normal_path(cindy_profile_root) if cindy_profile_root else None,
+               "reference_classification": reference_classification,
+               "cindy_references": list(reference_snapshots), "risk": "high"}
     return PiDeleteAction(action_id, _absolute_path(pi_root), _absolute_path(session_root), _absolute_path(path),
                           relative, session_id, version, timestamp, cwd, parent, child_paths, active, deletable, blockers,
-                          size, mtime, dev, ino, mode, ctime, attributes, sha256, blocking, not reasons, tuple(dict.fromkeys(reasons)), _fingerprint(payload), record)
+                           size, mtime, dev, ino, mode, ctime, attributes, sha256, blocking, not reasons, tuple(dict.fromkeys(reasons)), _fingerprint(payload), record,
+                           storage_kind=storage_kind,
+                           cindy_profile_root=(_absolute_path(cindy_profile_root) if cindy_profile_root else None),
+                           reference_classification=reference_classification,
+                           cindy_references=reference_snapshots)
 
 
 def _verify_exact_file(action: PiDeleteAction, *, lstat_fn: Callable[[str | os.PathLike[str]], os.stat_result], read_bytes_fn: Callable[[Path], bytes]) -> None:
@@ -423,18 +465,130 @@ def _result(action: PiDeleteAction, status: str, error: str | None = None) -> Pi
     return PiDeleteItemResult(action.action_id, action.path, action.session_id, status, error, action.preserved_child_references)
 
 
-def _blocking_failures(failures: Sequence[Any], errors: Sequence[str]) -> tuple[str, ...]:
-    result = list(errors)
+def _partition_blocking_failures(
+    failures: Sequence[Any],
+    errors: Sequence[str],
+) -> tuple[
+    tuple[str, ...],
+    Mapping[tuple[str, str], tuple[str, ...]],
+    tuple[str, ...],
+]:
+    global_result = list(errors)
+    scoped_result: dict[tuple[str, str], list[str]] = {}
+    all_messages = list(errors)
     for failure in failures:
         blocks = getattr(failure, "blocks_delete", None)
+        if blocks is False:
+            continue
         if blocks is not True:
-            # A failure missing its explicit safety classification is unsafe too.
-            if blocks is None: result.append("catalog failure has no blocks_delete classification")
+            reason = "catalog failure has no valid blocks_delete classification"
+            global_result.append(reason)
+            all_messages.append(reason)
             continue
         message = getattr(failure, "message", None)
-        if not isinstance(message, str) or not message: message = repr(failure)
-        result.append("Blocking Pi inventory failure: " + message)
-    return tuple(dict.fromkeys(result))
+        if not isinstance(message, str) or not message:
+            message = "catalog failure has no valid message"
+        reason = "Blocking Pi inventory failure: " + message
+        all_messages.append(reason)
+        scope = _failure_scope_key(failure)
+        if scope is None:
+            global_result.append(reason)
+        else:
+            scoped_result.setdefault(scope, []).append(reason)
+    return (
+        tuple(dict.fromkeys(global_result)),
+        {
+            key: tuple(dict.fromkeys(value))
+            for key, value in scoped_result.items()
+        },
+        tuple(dict.fromkeys(all_messages)),
+    )
+
+
+def _blocking_for_record(
+    record: Any,
+    global_blocking: tuple[str, ...],
+    scoped_blocking: Mapping[tuple[str, str], tuple[str, ...]],
+) -> tuple[str, ...]:
+    try:
+        key = (
+            _normal_path(_path_any(record, ("agent_dir", "pi_root"))),
+            _normal_path(_path(record, "session_root")),
+        )
+    except PiDeletePlanError:
+        return (
+            *global_blocking,
+            "Pi record storage scope cannot be safely qualified",
+        )
+    return tuple(dict.fromkeys((*global_blocking, *scoped_blocking.get(key, ()))))
+
+
+def _failure_scope_key(failure: Any) -> tuple[str, str] | None:
+    agent_value = getattr(failure, "agent_dir", None)
+    if agent_value is None:
+        agent_value = getattr(failure, "pi_root", None)
+    session_value = getattr(failure, "session_root", None)
+    if not _nonempty_path_value(agent_value) or not _nonempty_path_value(session_value):
+        return None
+    try:
+        return (
+            _normal_path(_path_value(agent_value, "failure.agent_dir")),
+            _normal_path(_path_value(session_value, "failure.session_root")),
+        )
+    except PiDeletePlanError:
+        return None
+
+
+def _nonempty_path_value(value: Any) -> bool:
+    return isinstance(value, (str, os.PathLike)) and bool(os.fspath(value))
+
+
+def _cindy_reference_snapshots(
+    values: Any,
+) -> tuple[tuple[Mapping[str, Any], ...], list[str]]:
+    if isinstance(values, (str, bytes)):
+        return (), ["Pi inventory cindy_references is not a sequence"]
+    try:
+        references = tuple(values)
+    except TypeError:
+        return (), ["Pi inventory cindy_references is not iterable"]
+    snapshots: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    for reference in references:
+        try:
+            if isinstance(reference, Mapping):
+                payload = reference
+            else:
+                builder = getattr(reference, "approval_payload", None)
+                if not callable(builder):
+                    raise TypeError
+                payload = builder()
+            if not isinstance(payload, Mapping):
+                raise TypeError
+            normalized = _json_snapshot(payload)
+            if not isinstance(normalized, Mapping):
+                raise TypeError
+            snapshots.append(normalized)
+        except (TypeError, ValueError, OSError):
+            errors.append("Pi inventory contains an invalid Cindy reference snapshot")
+    snapshots.sort(
+        key=lambda value: json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+    )
+    return tuple(snapshots), errors
+
+
+def _json_snapshot(value: Any) -> Any:
+    if isinstance(value, Path):
+        return _normal_path(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_snapshot(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_snapshot(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError("reference snapshot contains a non-JSON value")
 
 
 def _sequence_attr(value: Any, names: Sequence[str]) -> tuple[tuple[Any, ...], list[str]]:

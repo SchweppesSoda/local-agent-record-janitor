@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-import sqlite3
 from collections import defaultdict
-from contextlib import closing
 from pathlib import Path
 
 from ..codex_state import iter_rollouts
+from ..cindy_references import (
+    CindyNativeReference,
+    build_cindy_reference_catalog,
+)
 from ..discovery import discover_cindy_codex
 from ..models import Finding, RolloutRecord
-from ..sqlite_utils import connect_readonly
 from .base import (
     AdapterScanError,
     FrontendAdapter,
-    optional_database_file_exists,
     read_codex_evidence,
-    require_table_columns,
-    table_columns,
 )
 
 
@@ -32,6 +30,7 @@ class CindyAdapter(FrontendAdapter):
     ) -> None:
         super().__init__(database=database, codex_home=codex_home)
         root = cindy_root or database.parent
+        self.cindy_root = root.expanduser()
         self.codex_bin_hint = codex_bin_hint or discover_cindy_codex(root)
 
     def list_sessions(self) -> list["FrontendSessionRecord"]:
@@ -39,161 +38,68 @@ class CindyAdapter(FrontendAdapter):
 
         from ..inventory import FrontendSessionRecord
 
-        if not optional_database_file_exists(self.database):
-            return []
-        try:
-            with closing(connect_readonly(self.database)) as connection:
-                require_table_columns(
-                    connection,
-                    table_name="sessions",
-                    required_columns={
-                        "id",
-                        "sdk_session_id",
-                        "status",
-                        "agent_kind",
-                    },
-                    database=self.database,
-                )
-                columns = table_columns(
-                    connection,
-                    table_name="sessions",
-                    database=self.database,
-                )
-                optional = (
-                    "source",
-                    "created_at",
-                    "updated_at",
-                    "parent_session_id",
-                    "title",
-                    "working_dir",
-                )
-                projections = [
-                    column if column in columns else f"NULL AS {column}"
-                    for column in optional
-                ]
-                rows = connection.execute(
-                    f"""
-                    SELECT id, sdk_session_id, status, agent_kind,
-                           {", ".join(projections)}
-                    FROM sessions
-                    WHERE LOWER(TRIM(agent_kind)) = 'codex'
-                    ORDER BY id
-                    """
-                ).fetchall()
-        except AdapterScanError:
-            raise
-        except sqlite3.Error as exc:
-            raise AdapterScanError(
-                f"Could not inspect Cindy database {self.database}: {exc}"
-            ) from exc
-
-        if any(not isinstance(row["id"], str) or not row["id"].strip() for row in rows):
-            raise AdapterScanError(
-                f"{self.database} is incompatible: sessions.id contains an invalid value"
-            )
+        references = self._codex_references()
         return [
             FrontendSessionRecord(
                 platform=self.name,
-                platform_session_id=row["id"],
-                thread_id=_display_thread_id(row["sdk_session_id"]),
+                platform_session_id=reference.cindy_session_id,
+                thread_id=reference.native_session_id,
                 database=self.database,
                 codex_home=self.codex_home,
                 backend="codex",
-                status=_display_string(row["status"]),
-                updated_at_ms=_as_int(row["updated_at"]),
-                title=_display_string(row["title"]),
-                is_live=_normalized_string(row["status"]) != "deleted",
+                status=reference.session_status,
+                updated_at_ms=reference.session_updated_at_ms,
+                title=_display_string((reference.session_details or {}).get("title")),
+                is_live=reference.is_live,
                 details={
-                    "agent_kind": row["agent_kind"],
-                    "source": row["source"],
-                    "created_at": row["created_at"],
-                    "parent_session_id": row["parent_session_id"],
-                    "working_dir": row["working_dir"],
+                    "agent_kind": reference.agent_kind,
+                    "source": (reference.session_details or {}).get("source"),
+                    "created_at": (reference.session_details or {}).get("created_at"),
+                    "parent_session_id": (reference.session_details or {}).get("parent_session_id"),
+                    "working_dir": reference.working_dir,
+                    "reference_kind": reference.reference_kind,
+                    "historical": reference.is_historical,
+                    "boundary_id": reference.boundary_id,
+                    "boundary_created_at_ms": reference.boundary_created_at_ms,
+                    "boundary_rewind_at_ms": reference.boundary_rewind_at_ms,
+                    "cindy_profile_root": str(reference.profile_root),
                 },
                 codex_bin_hint=self.codex_bin_hint,
             )
-            for row in rows
+            for reference in references
         ]
+
+    def _codex_references(self) -> tuple[CindyNativeReference, ...]:
+        catalog = build_cindy_reference_catalog(
+            self.database,
+            profile_root=self.cindy_root,
+        )
+        if catalog.failures:
+            raise AdapterScanError(catalog.failures[0].message)
+        return catalog.for_backend("codex")
 
     def scan(self) -> list[Finding]:
         self._replace_live_thread_ids(set())
         if not self.available:
             return []
-        try:
-            with closing(connect_readonly(self.database)) as connection:
-                require_table_columns(
-                    connection,
-                    table_name="sessions",
-                    required_columns={
-                        "id",
-                        "sdk_session_id",
-                        "status",
-                        "source",
-                        "created_at",
-                        "updated_at",
-                        "parent_session_id",
-                        "agent_kind",
-                    },
-                    database=self.database,
-                )
-                rows = connection.execute(
-                    """
-                    SELECT
-                        id,
-                        sdk_session_id,
-                        status,
-                        source,
-                        created_at,
-                        updated_at,
-                        parent_session_id,
-                        (
-                            SELECT COUNT(*)
-                            FROM sessions live
-                            WHERE live.sdk_session_id = deleted.sdk_session_id
-                              AND (
-                                  live.status IS NULL
-                                  OR live.status <> 'deleted'
-                              )
-                        ) AS live_reference_count
-                    FROM sessions deleted
-                    WHERE deleted.agent_kind = 'codex'
-                      AND deleted.status = 'deleted'
-                      AND deleted.sdk_session_id IS NOT NULL
-                      AND typeof(deleted.sdk_session_id) = 'text'
-                      AND TRIM(deleted.sdk_session_id) <> ''
-                    """
-                ).fetchall()
-                live_rows = connection.execute(
-                    """
-                    SELECT DISTINCT sdk_session_id
-                    FROM sessions
-                    WHERE agent_kind = 'codex'
-                      AND sdk_session_id IS NOT NULL
-                      AND typeof(sdk_session_id) = 'text'
-                      AND TRIM(sdk_session_id) <> ''
-                      AND (
-                          status IS NULL
-                          OR status <> 'deleted'
-                      )
-                    """
-                ).fetchall()
-        except AdapterScanError:
-            raise
-        except sqlite3.Error as exc:
-            raise AdapterScanError(
-                f"Could not inspect Cindy database {self.database}: {exc}"
-            ) from exc
+        references = self._codex_references()
+        live_references = [
+            reference
+            for reference in references
+            if reference.is_live and reference.native_session_id is not None
+        ]
         self._replace_live_thread_ids(
-            {
-                row["sdk_session_id"]
-                for row in live_rows
-                if isinstance(row["sdk_session_id"], str)
-            }
+            {reference.native_session_id for reference in live_references if reference.native_session_id}
         )
+        rows = [
+            reference
+            for reference in references
+            if not reference.is_live and reference.native_session_id is not None
+        ]
         if not rows:
             return []
 
-        thread_ids = [row["sdk_session_id"] for row in rows]
+        thread_ids = [reference.native_session_id for reference in rows if reference.native_session_id]
         try:
             rollout_groups = _rollouts_by_thread(self.codex_home, set(thread_ids))
         except OSError as exc:
@@ -203,8 +109,9 @@ class CindyAdapter(FrontendAdapter):
         evidence = read_codex_evidence(self.codex_home, thread_ids)
 
         findings: list[Finding] = []
-        for row in rows:
-            thread_id = row["sdk_session_id"]
+        for reference in rows:
+            thread_id = reference.native_session_id
+            assert thread_id is not None
             records = rollout_groups.get(thread_id, [])
             rollout = _preferred_rollout(records)
             state_row = evidence.indexed_threads.get(thread_id)
@@ -220,7 +127,9 @@ class CindyAdapter(FrontendAdapter):
             }
             foreign_originators = originators - {"cindy", "xdt-maker"}
             ownership_conflict = bool(foreign_originators)
-            live_reference_count = int(row["live_reference_count"] or 0)
+            live_reference_count = sum(
+                item.native_session_id == thread_id for item in live_references
+            )
             descendants = evidence.descendants_by_parent.get(thread_id, ())
             cascade_safe = evidence.spawn_edges_available and not descendants
             blocked_reasons = [
@@ -260,27 +169,32 @@ class CindyAdapter(FrontendAdapter):
             findings.append(
                 Finding(
                     platform=self.name,
-                    platform_session_id=row["id"],
+                    platform_session_id=reference.cindy_session_id,
                     thread_id=thread_id,
                     reason="Cindy session is soft-deleted but its Codex thread remains",
                     platform_db=self.database,
                     codex_home=self.codex_home,
-                    platform_updated_at_ms=_as_int(row["updated_at"]),
+                    platform_updated_at_ms=reference.session_updated_at_ms,
                     rollout=rollout,
                     codex_indexed=state_row is not None,
                     codex_archived=bool(state_row["archived"]) if state_row else None,
                     codex_bin_hint=self.codex_bin_hint,
                     details={
-                        "session_status": row["status"],
-                        "source": row["source"],
-                        "parent_session_id": row["parent_session_id"],
+                        "session_status": reference.session_status,
+                        "source": (reference.session_details or {}).get("source"),
+                        "parent_session_id": (reference.session_details or {}).get("parent_session_id"),
+                        "reference_kind": reference.reference_kind,
+                        "boundary_id": reference.boundary_id,
+                        "boundary_created_at_ms": reference.boundary_created_at_ms,
+                        "boundary_rewind_at_ms": reference.boundary_rewind_at_ms,
+                        "cindy_profile_root": str(reference.profile_root),
                         "rollout_originator": rollout.originator if rollout else None,
                         "rollout_originators": sorted(originators),
                         "ownership_status": (
                             "conflict" if ownership_conflict else "confirmed"
                         ),
                         "ownership_evidence": {
-                            "agent_kind": "codex",
+                            "agent_kind": reference.agent_kind,
                             "expected_originator": "cindy",
                             "expected_originators": ["cindy", "xdt-maker"],
                             "observed_originators": sorted(originators),
@@ -309,10 +223,6 @@ class CindyAdapter(FrontendAdapter):
                 )
             )
         return findings
-
-
-def _as_int(value: object) -> int | None:
-    return int(value) if isinstance(value, (int, float)) else None
 
 
 def _rollouts_by_thread(
@@ -347,7 +257,3 @@ def _display_string(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
-
-
-def _display_thread_id(value: object) -> str | None:
-    return _display_string(value)

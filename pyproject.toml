@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-session-janitor"
 version = "0.1.0"
-description = "Audit Codex and Pi agent session inventories and safely perform explicitly approved local cleanup."
+description = "Audit Codex, Pi Agent, and Claude Code session inventories and safely perform explicitly approved local cleanup."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Fang Jun" }
 ]
-keywords = ["codex", "pi", "pi-agent", "aionui", "cindy", "session", "consistency", "cleanup"]
+keywords = ["codex", "pi", "pi-agent", "claude", "claude-code", "aionui", "cindy", "session", "consistency", "cleanup"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
