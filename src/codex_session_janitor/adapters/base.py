@@ -51,11 +51,13 @@ class FrontendAdapter(ABC):
         self._live_thread_ids = set(thread_ids)
 
     def list_sessions(self) -> list[FrontendSessionRecord]:
-        """Return every Codex session row known to this frontend.
+        """Return every frontend reference or mapping to a Codex thread.
 
         This intentionally is not abstract.  Native and third-party adapters
         written against earlier Janitor releases therefore remain usable;
-        their Codex artifacts are still inventoried directly from the home.
+        their Codex artifacts are still inventoried directly from the native
+        store.  The method name is retained as a public compatibility surface;
+        returned rows are frontend evidence, not another native session.
         Implementations must be read-only and should raise
         :class:`AdapterScanError` when a present database cannot be read
         completely.

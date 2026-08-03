@@ -688,6 +688,19 @@ def _build_action(
         if sessions_error:
             reasons.append(f"{affected_id}: {sessions_error}")
         frontend_sessions.extend(sessions)
+        for session in sessions:
+            session_payload = _frontend_approval_payload(session)
+            if session_payload["is_live"] is True:
+                platform = session_payload["platform"]
+                label = (
+                    "live Cindy current or historical reference"
+                    if platform.casefold() == "cindy"
+                    else f"live {platform} frontend reference"
+                )
+                reasons.append(
+                    f"{affected_id}: {label} "
+                    "prevents approval of the complete thread/delete scope"
+                )
 
         hints, hints_error = _record_hints(affected)
         if hints_error:

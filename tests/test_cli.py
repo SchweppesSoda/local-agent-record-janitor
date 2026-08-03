@@ -24,6 +24,7 @@ from codex_session_janitor.cli import (
     EXIT_OK,
     NumberSelectionError,
     build_parser,
+    create_default_adapters,
     main,
     parse_action_selection,
     parse_number_selection,
@@ -39,7 +40,7 @@ from codex_session_janitor.cli import (
 )
 from codex_session_janitor.models import ConversationSummary, Finding
 from codex_session_janitor.planning import build_cleanup_plan
-from tests.support import create_thread_index, write_rollout
+from tests.support import create_cindy_database, create_thread_index, write_rollout
 
 
 class NumberSelectionTests(unittest.TestCase):
@@ -680,11 +681,11 @@ class ActionOutputTests(unittest.TestCase):
         self.assertIn("候选动作：永久删除整条对话", rendered)
         self.assertIn("问题：对话列表记录存在", rendered)
         self.assertIn("由该对话创建的关联任务对话 1 条", rendered)
-        self.assertIn("会话名称：Root conversation", rendered)
+        self.assertIn("Codex thread 名称：Root conversation", rendered)
         self.assertIn("项目：root-project", rendered)
-        self.assertIn("会话名称：Review child task", rendered)
+        self.assertIn("Codex thread 名称：Review child task", rendered)
         self.assertIn("子代理名称：Socrates", rendered)
-        self.assertIn("完整会话 ID：child-full-id", rendered)
+        self.assertIn("完整 Codex thread ID：child-full-id", rendered)
         self.assertNotIn("thread index remains", rendered)
 
     def test_catalog_limit_counts_targets_not_actions(self) -> None:
@@ -1016,6 +1017,19 @@ class _FakeTTY(StringIO):
         return True
 
 
+class _CallbackTTY(_FakeTTY):
+    def __init__(self, value: str, callback: object) -> None:
+        super().__init__(value)
+        self.callback = callback
+        self.called = False
+
+    def readline(self, *args: object, **kwargs: object) -> str:
+        if not self.called:
+            self.called = True
+            self.callback()
+        return super().readline(*args, **kwargs)
+
+
 class _EnterMutatingServer:
     def __init__(self, enter_callback: object) -> None:
         self.enter_callback = enter_callback
@@ -1033,6 +1047,147 @@ class _EnterMutatingServer:
 
 
 class MainFlowTests(unittest.TestCase):
+    def test_cindy_codex_home_override_keeps_all_sibling_namespace_adapters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            appdata = Path(temporary_directory) / "AppData"
+            root = appdata / "CindyGlobal"
+            root.mkdir(parents=True)
+            local = root / "cindy-local-v1.db"
+            owner = root / "cindy-owner-fixture.db"
+            local.touch()
+            owner.touch()
+            custom_home = Path(temporary_directory) / "custom-codex-home"
+            args = build_parser().parse_args(
+                (
+                    "records", "--platform", "cindy",
+                    "--appdata", str(appdata),
+                    "--cindy-codex-home", str(custom_home),
+                )
+            )
+
+            adapters = create_default_adapters(args)
+
+        self.assertEqual({item.database for item in adapters}, {local, owner})
+        self.assertTrue(all(item.codex_home == custom_home for item in adapters))
+
+    def test_local_clean_rediscovers_owner_namespace_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            appdata = base / "AppData"
+            cindy_root = appdata / "CustomCindy"
+            home = cindy_root / "codex-home"
+            empty_native = base / "empty-native"
+            empty_native.mkdir()
+            thread_id = "clean-namespace-drift"
+            rollout = write_rollout(home, thread_id, originator="cindy")
+            create_thread_index(
+                home,
+                [{"id": thread_id, "rollout_path": str(rollout)}],
+            )
+            local = cindy_root / "cindy-local-v1.db"
+            owner = cindy_root / "cindy-owner-added-after-preview.db"
+            deleted_row = {
+                "id": "local-deleted",
+                "sdk_session_id": thread_id,
+                "status": "deleted",
+                "source": "desktop",
+                "created_at": 1,
+                "updated_at": 2,
+                "parent_session_id": None,
+                "agent_kind": "codex",
+            }
+            create_cindy_database(local, [deleted_row])
+
+            def add_owner_namespace() -> None:
+                create_cindy_database(
+                    owner,
+                    [{**deleted_row, "id": "owner-live", "status": "active"}],
+                )
+
+            input_stream = _CallbackTTY("确认删除\n", add_owner_namespace)
+            output = _FakeTTY()
+            errors = StringIO()
+            server = _EnterMutatingServer(lambda: None)
+
+            result = main(
+                (
+                    "clean", "--platform", "cindy",
+                    "--thread-id", thread_id,
+                    "--appdata", str(appdata),
+                    "--codex-home", str(empty_native),
+                    "--cindy-root", str(cindy_root),
+                    "--cindy-db", str(local),
+                ),
+                stdin=input_stream,
+                stdout=output,
+                stderr=errors,
+                app_server_factory=lambda **_kwargs: server,
+                binary_resolver=lambda _hint: Path("codex"),
+            )
+
+        self.assertEqual(result, EXIT_ERROR)
+        self.assertTrue(input_stream.called)
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertIn("计划已变化", output.getvalue() + errors.getvalue())
+
+    def test_local_clean_rediscovers_owner_namespace_after_server_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            appdata = base / "AppData"
+            cindy_root = appdata / "CustomCindy"
+            home = cindy_root / "codex-home"
+            empty_native = base / "empty-native"
+            empty_native.mkdir()
+            thread_id = "clean-post-server-namespace-drift"
+            rollout = write_rollout(home, thread_id, originator="cindy")
+            create_thread_index(
+                home,
+                [{"id": thread_id, "rollout_path": str(rollout)}],
+            )
+            local = cindy_root / "cindy-local-v1.db"
+            owner = cindy_root / "cindy-owner-added-after-server-start.db"
+            deleted_row = {
+                "id": "local-deleted",
+                "sdk_session_id": thread_id,
+                "status": "deleted",
+                "source": "desktop",
+                "created_at": 1,
+                "updated_at": 2,
+                "parent_session_id": None,
+                "agent_kind": "codex",
+            }
+            create_cindy_database(local, [deleted_row])
+
+            def add_owner_namespace() -> None:
+                create_cindy_database(
+                    owner,
+                    [{**deleted_row, "id": "owner-live", "status": "active"}],
+                )
+
+            server = _EnterMutatingServer(add_owner_namespace)
+            output = _FakeTTY()
+            errors = StringIO()
+
+            result = main(
+                (
+                    "clean", "--platform", "cindy",
+                    "--thread-id", thread_id,
+                    "--appdata", str(appdata),
+                    "--codex-home", str(empty_native),
+                    "--cindy-root", str(cindy_root),
+                    "--cindy-db", str(local),
+                ),
+                stdin=_FakeTTY("确认删除\n"),
+                stdout=output,
+                stderr=errors,
+                app_server_factory=lambda **_kwargs: server,
+                binary_resolver=lambda _hint: Path("codex"),
+            )
+
+        self.assertEqual(result, EXIT_ERROR)
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertIn("未成功 1 条", output.getvalue() + errors.getvalue())
+
     def test_scan_command_remains_read_only_and_compatible(self) -> None:
         output = StringIO()
         result = main(

@@ -25,12 +25,39 @@ from codex_session_janitor.inventory import (
 )
 from codex_session_janitor.models import ConversationSummary, Finding
 
-from tests.support import create_thread_index, write_rollout
+from tests.support import create_cindy_database, create_thread_index, write_rollout
 
 
 class TTYStringIO(StringIO):
     def isatty(self) -> bool:
         return True
+
+
+class CallbackTTYStringIO(TTYStringIO):
+    def __init__(self, value: str, callback) -> None:
+        super().__init__(value)
+        self.callback = callback
+        self.called = False
+
+    def readline(self, *args, **kwargs):
+        if not self.called:
+            self.called = True
+            self.callback()
+        return super().readline(*args, **kwargs)
+
+
+class RecordingAppServer:
+    def __init__(self) -> None:
+        self.deleted_thread_ids: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.deleted_thread_ids.append(thread_id)
 
 
 class FakeAction:
@@ -347,6 +374,69 @@ class DeleteCliTests(unittest.TestCase):
                     )
                 self.assertEqual(status, EXIT_ERROR)
                 execute_mock.assert_not_called()
+
+    def test_local_cli_rediscovers_owner_namespace_added_after_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            appdata = base / "AppData"
+            cindy_root = appdata / "CustomCindy"
+            home = cindy_root / "codex-home"
+            empty_native = base / "empty-native"
+            empty_native.mkdir()
+            thread_id = "namespace-drift-thread"
+            rollout = write_rollout(home, thread_id, originator="cindy")
+            create_thread_index(
+                home,
+                [{"id": thread_id, "rollout_path": str(rollout)}],
+            )
+            local = cindy_root / "cindy-local-v1.db"
+            owner = cindy_root / "cindy-owner-added-after-preview.db"
+            deleted_row = {
+                "id": "local-deleted",
+                "sdk_session_id": thread_id,
+                "status": "deleted",
+                "source": "desktop",
+                "created_at": 1,
+                "updated_at": 2,
+                "parent_session_id": None,
+                "agent_kind": "codex",
+            }
+            create_cindy_database(local, [deleted_row])
+
+            def add_live_owner_namespace() -> None:
+                create_cindy_database(
+                    owner,
+                    [{**deleted_row, "id": "owner-live", "status": "active"}],
+                )
+
+            input_stream = CallbackTTYStringIO(
+                MANUAL_DELETE_CONFIRMATION + "\n",
+                add_live_owner_namespace,
+            )
+            output = TTYStringIO()
+            errors = StringIO()
+            server = RecordingAppServer()
+
+            status = main(
+                [
+                    "delete", "--platform", "cindy",
+                    "--thread-id", thread_id,
+                    "--appdata", str(appdata),
+                    "--codex-home", str(empty_native),
+                    "--cindy-root", str(cindy_root),
+                    "--cindy-db", str(local),
+                ],
+                stdin=input_stream,
+                stdout=output,
+                stderr=errors,
+                app_server_factory=lambda **_kwargs: server,
+                binary_resolver=lambda _hint: Path("codex"),
+            )
+
+        self.assertEqual(status, EXIT_ERROR)
+        self.assertTrue(input_stream.called)
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertIn("unavailable", errors.getvalue() + output.getvalue())
 
     def test_non_tty_preview_is_one_json_document_and_exit_two(self) -> None:
         output = StringIO()

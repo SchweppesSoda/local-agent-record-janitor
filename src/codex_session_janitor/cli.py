@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -33,7 +33,7 @@ from .discovery import (
     default_appdata,
     default_codex_home,
     discover_aionui_databases,
-    discover_cindy_profiles,
+    resolve_cindy_profiles,
 )
 from .models import Finding
 from .rendering import safe_single_line
@@ -459,7 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _ChineseArgumentParser(
         prog="codex-session-janitor",
         description=(
-            "检查前端残留，只读盘点 Codex、Pi Agent 与 Claude Code 本地会话，"
+            "检查前端残留，只读盘点本地 Agent 记录（Codex thread、"
+            "Pi Agent/Claude Code session），"
             "并保守清理明确选择且重验证通过的目标。"
         ),
     )
@@ -478,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     records = subparsers.add_parser(
         "records",
-        help="只读列出 Codex、Pi Agent 及 Claude Code 本地会话",
+        help="只读列出本地 Agent 记录（Codex thread、Pi/Claude session）",
         description=(
             "只读聚合 Codex 本地记录、Cindy/AionUI 引用以及 "
             "Pi Agent/Claude Code 会话；"
@@ -489,9 +490,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     delete = subparsers.add_parser(
         "delete",
-        help="逐项永久删除 Codex、Pi 或 Claude Code 会话",
+        help="逐项永久删除 Codex thread 或 Pi/Claude Code session",
         description=(
-            "列出正常和异常对话，逐项选择保存位置明确的会话，"
+            "列出正常和异常的本地 Agent 记录，逐项选择存储身份明确的目标，"
             "经客户端关闭确认和执行前精确重验证后调用官方删除接口；"
             "仅 --platform pi 时删除精确批准的 Pi 会话文件；"
             "仅 --platform claude 时删除精确批准的 Claude 会话文件清单。"
@@ -531,7 +532,10 @@ def build_parser() -> argparse.ArgumentParser:
     delete.add_argument(
         "--clients-closed",
         action="store_true",
-        help="确认使用所选 Codex、Pi 或 Claude Code 会话的相关客户端均已关闭",
+        help=(
+            "确认使用所选 Codex thread 或 Pi/Claude Code session 的"
+            "相关客户端均已关闭"
+        ),
     )
     delete.add_argument(
         "--timeout",
@@ -728,36 +732,25 @@ def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
             )
 
     if "cindy" in selected:
-        explicit_cindy = any(
-            value is not None
-            for value in (
-                args.cindy_root,
-                args.cindy_db,
-                args.cindy_codex_home,
-            )
+        cindy_profiles = resolve_cindy_profiles(
+            appdata,
+            root=args.cindy_root,
+            database=args.cindy_db,
+            codex_home=args.cindy_codex_home,
         )
-        if explicit_cindy:
-            cindy_root = args.cindy_root or (appdata / "CindyGlobal")
-            cindy_db = args.cindy_db or (cindy_root / "cindy-local-v1.db")
-            cindy_home = args.cindy_codex_home or (cindy_root / "codex-home")
-            cindy_profiles = ((cindy_root, cindy_db, cindy_home),)
-        else:
-            discovered = discover_cindy_profiles(appdata)
-            cindy_profiles = tuple(
-                (profile.root, profile.database, profile.codex_home)
-                for profile in discovered
+        if not cindy_profiles:
+            root = appdata / "CindyGlobal"
+            cindy_profiles = resolve_cindy_profiles(
+                appdata,
+                root=root,
+                codex_home=root / "codex-home",
             )
-            if not cindy_profiles:
-                root = appdata / "CindyGlobal"
-                cindy_profiles = (
-                    (root, root / "cindy-local-v1.db", root / "codex-home"),
-                )
-        for cindy_root, cindy_db, cindy_home in cindy_profiles:
+        for profile in cindy_profiles:
             adapters.append(
                 CindyAdapter(
-                    database=cindy_db,
-                    codex_home=cindy_home,
-                    cindy_root=cindy_root,
+                    database=profile.database,
+                    codex_home=profile.codex_home,
+                    cindy_root=profile.root,
                     codex_bin_hint=codex_bin,
                 )
             )
@@ -886,6 +879,7 @@ def main(
                 stderr=error_output,
             )
 
+    adapter_builder: Callable[[], list[FrontendAdapter]] | None = None
     try:
         if args.command in {"clean", "delete"}:
             if adapters is not None:
@@ -895,7 +889,8 @@ def main(
             else:
                 guard_args = argparse.Namespace(**vars(args))
                 guard_args.platform = ["all"]
-                active_adapters = create_default_adapters(guard_args)
+                adapter_builder = lambda: create_default_adapters(guard_args)
+                active_adapters = adapter_builder()
         else:
             active_adapters = (
                 _filter_supplied_adapters(adapters, args.platform)
@@ -949,6 +944,7 @@ def main(
             stderr=error_output,
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            adapter_builder=adapter_builder,
         )
 
     scan_report = scan_adapters(active_adapters)
@@ -963,6 +959,7 @@ def main(
             stderr=error_output,
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            adapter_builder=adapter_builder,
         )
 
     try:
@@ -1110,19 +1107,12 @@ def _build_pi_catalog(args: argparse.Namespace, builder: Any | None = None) -> A
     )
 
     appdata = (args.appdata or default_appdata()).expanduser()
-    if args.cindy_root is not None or args.cindy_db is not None:
-        from .discovery import CindyProfile
-
-        cindy_root = (args.cindy_root or appdata / "CindyGlobal").expanduser()
-        cindy_profiles = (
-            CindyProfile(
-                root=cindy_root,
-                database=(args.cindy_db or cindy_root / "cindy-local-v1.db").expanduser(),
-                codex_home=cindy_root / "codex-home",
-            ),
-        )
-    else:
-        cindy_profiles = discover_cindy_profiles(appdata)
+    cindy_profiles = resolve_cindy_profiles(
+        appdata,
+        root=args.cindy_root,
+        database=args.cindy_db,
+        codex_home=args.cindy_codex_home,
+    )
 
     if args.pi_agent_dir is not None or args.pi_session_dir is not None:
         # Explicit path options deliberately limit the view to one user-chosen
@@ -1172,18 +1162,19 @@ def _build_claude_catalog(args: argparse.Namespace, builder: Any | None = None) 
     roots: list[Path] = [effective.config_dir]
     explicit_root = args.claude_config_dir is not None
     appdata = (args.appdata or default_appdata()).expanduser()
-    profiles: list[Any]
-    if args.cindy_root is not None or args.cindy_db is not None:
-        root = (args.cindy_root or appdata / "CindyGlobal").expanduser()
-        profiles = [
-            CindyProfile(
-                root=root,
-                database=(args.cindy_db or root / "cindy-local-v1.db").expanduser(),
-                codex_home=(args.cindy_codex_home or root / "codex-home").expanduser(),
-            )
-        ]
-    else:
-        profiles = list(discover_cindy_profiles(appdata))
+    profiles: list[Any] = list(
+        resolve_cindy_profiles(
+            appdata,
+            root=args.cindy_root,
+            database=args.cindy_db,
+            codex_home=args.cindy_codex_home,
+        )
+    )
+    if (
+        args.cindy_root is None
+        and args.cindy_db is None
+        and args.cindy_codex_home is None
+    ):
         known_profile_roots = {
             _path_identity(profile.root) for profile in profiles
         }
@@ -2099,6 +2090,7 @@ def _run_manual_delete(
     stderr: TextIO,
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
+    adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
 ) -> int:
     """Preview and execute explicit, fingerprint-bound manual deletions."""
 
@@ -2298,7 +2290,12 @@ def _run_manual_delete(
                 )
 
     def rebuild_catalog() -> Any:
-        return build_session_catalog(active_adapters)
+        latest_adapters = (
+            list(adapter_builder())
+            if adapter_builder is not None
+            else active_adapters
+        )
+        return build_session_catalog(latest_adapters)
 
     try:
         report = execute_manual_delete(
@@ -2897,6 +2894,7 @@ def _run_planned_cleanup(
     stderr: TextIO,
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
+    adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
 ) -> int:
     from .planning import build_cleanup_plan, normalize_storage_path
 
@@ -3218,7 +3216,12 @@ def _run_planned_cleanup(
 
     # Rebuild the structured plan immediately before mutation. Action IDs
     # identify targets; snapshot fingerprints prove their reviewed scope.
-    revalidated_report = scan_adapters(active_adapters)
+    revalidated_adapters = (
+        list(adapter_builder())
+        if adapter_builder is not None
+        else active_adapters
+    )
+    revalidated_report = scan_adapters(revalidated_adapters)
     revalidated_report = _filter_candidate_platforms(
         revalidated_report,
         args.platform,
@@ -3392,7 +3395,12 @@ def _run_planned_cleanup(
     }
 
     def validate_live_references_before_delete(finding: Finding) -> None:
-        latest_report = scan_adapters(active_adapters)
+        latest_adapters = (
+            list(adapter_builder())
+            if adapter_builder is not None
+            else active_adapters
+        )
+        latest_report = scan_adapters(latest_adapters)
         latest_report = _filter_candidate_platforms(
             latest_report,
             args.platform,
@@ -3922,7 +3930,7 @@ def _write_conversation_summary(
     is_subagent = getattr(summary, "is_subagent", None)
 
     stdout.write(
-        f"{indent}会话名称：{_display_value(display_name)}"
+        f"{indent}Codex thread 名称：{_display_value(display_name)}"
         f"（来源：{_display_value(display_source)}）\n"
     )
     stdout.write(
@@ -3933,7 +3941,7 @@ def _write_conversation_summary(
         f"{indent}Git 来源：{_display_value(git_origin, max_width=220)}\n"
     )
     stdout.write(
-        f"{indent}完整会话 ID："
+        f"{indent}完整 Codex thread ID："
         f"{_display_value(thread_id, max_width=None)}\n"
     )
     stdout.write(
@@ -3947,7 +3955,7 @@ def _write_conversation_summary(
         f"路径：{_display_value(getattr(summary, 'agent_path', None), max_width=220)}\n"
     )
     stdout.write(
-        f"{indent}父会话 ID："
+        f"{indent}父 thread ID："
         f"{_display_value(', '.join(str(value) for value in parent_ids), max_width=220)}\n"
     )
     stdout.write(
@@ -4098,7 +4106,7 @@ def _write_action_catalog(
                     stdout=stdout,
                     summary=summaries.get(target_key),
                     thread_id=thread_id,
-                    relationship="删除候选根会话",
+                    relationship="删除候选根 thread",
                     indent="    ",
                 )
 
@@ -4174,9 +4182,9 @@ def _write_action_catalog(
                             summary=summaries.get(descendant_key),
                             thread_id=descendant_id,
                             relationship=(
-                                "由根会话 "
+                                "由根 thread "
                                 f"{_display_value(thread_id, max_width=None)} "
-                                "创建、将一同删除的关联任务会话"
+                                "创建、将一同删除的关联任务 thread"
                             ),
                             indent="            ",
                         )
@@ -4284,7 +4292,7 @@ def _write_selected_action_plan(
             stdout=stdout,
             summary=summary_by_target.get(root_key),
             thread_id=str(action.target.thread_id),
-            relationship="最终计划根会话",
+            relationship="最终计划根 thread",
             indent="  ",
         )
         related = tuple(str(value) for value in impact.descendant_thread_ids)
@@ -4309,7 +4317,7 @@ def _write_selected_action_plan(
         ]
         if cross_project:
             stdout.write(
-                "  警告：级联范围跨项目；请逐项核对以下关联任务会话："
+                "  警告：级联范围跨项目；请逐项核对以下关联任务 thread："
                 + ", ".join(
                     _display_value(value, max_width=None)
                     for value in cross_project
@@ -4338,9 +4346,9 @@ def _write_selected_action_plan(
                 ),
                 thread_id=descendant_id,
                 relationship=(
-                    "由根会话 "
+                    "由根 thread "
                     f"{_display_value(action.target.thread_id, max_width=None)} "
-                    "创建、将一同删除的关联任务会话"
+                    "创建、将一同删除的关联任务 thread"
                 ),
                 indent="    ",
             )
@@ -4728,7 +4736,7 @@ def _emit_planned_cleanup_result(
                 stdout=stdout,
                 summary=summary_lookup.get((storage_id, root_id)),
                 thread_id=root_id,
-                relationship="清理结果根会话",
+                relationship="清理结果根 thread",
                 indent="          ",
             )
             for descendant_id in getattr(
@@ -4744,9 +4752,9 @@ def _emit_planned_cleanup_result(
                     ),
                     thread_id=descendant_id,
                     relationship=(
-                        "由根会话 "
+                        "由根 thread "
                         f"{_display_value(root_id, max_width=None)} "
-                        "创建、受本次清理影响的关联任务会话"
+                        "创建、受本次清理影响的关联任务 thread"
                     ),
                     indent="            ",
                 )

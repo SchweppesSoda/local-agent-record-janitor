@@ -12,9 +12,17 @@ from codex_session_janitor.adapters import AionUIAdapter, CindyAdapter, NativeIn
 from codex_session_janitor.discovery import (
     discover_aionui_databases,
     discover_cindy_profiles,
+    resolve_cindy_profiles,
 )
 from codex_session_janitor.inventory import (
+    CodexThreadCatalog,
+    CodexThreadRecord,
+    FrontendReferenceRecord,
+    FrontendSessionRecord,
     InventorySelectionError,
+    ManagedConversation,
+    SessionCatalog,
+    build_codex_thread_catalog,
     build_session_catalog,
     select_managed_conversations,
 )
@@ -103,6 +111,27 @@ class SessionCatalogTests(unittest.TestCase):
         )
         self.assertEqual(catalog.errors, ())
 
+    def test_canonical_aliases_preserve_legacy_types_json_and_action_identity(self) -> None:
+        home = self.root / "codex-home"
+        home.mkdir()
+        rollout = write_rollout(home, "alias-thread", originator="codex_cli_rs")
+        create_thread_index(
+            home,
+            [{"id": "alias-thread", "rollout_path": str(rollout)}],
+        )
+        adapters = [NativeIntegrityAdapter(codex_home=home)]
+
+        legacy = build_session_catalog(adapters)
+        canonical = build_codex_thread_catalog(adapters)
+
+        self.assertIs(CodexThreadCatalog, SessionCatalog)
+        self.assertIs(CodexThreadRecord, ManagedConversation)
+        self.assertIs(FrontendReferenceRecord, FrontendSessionRecord)
+        self.assertEqual(legacy.records[0].action_id, canonical.threads[0].action_id)
+        self.assertEqual(legacy.to_dict(), canonical.to_dict())
+        self.assertIn("records", canonical.to_dict())
+        self.assertNotIn("threads", canonical.to_dict())
+
     def test_same_thread_id_in_different_homes_is_not_merged(self) -> None:
         adapters = []
         for name in ("one", "two"):
@@ -124,6 +153,52 @@ class SessionCatalogTests(unittest.TestCase):
             select_managed_conversations(catalog, [catalog.records[0].action_id]),
             (catalog.records[0],),
         )
+
+    def test_same_root_owner_live_reference_blocks_local_tombstone(self) -> None:
+        cindy_root = self.root / "CindyGlobal"
+        home = cindy_root / "codex-home"
+        home.mkdir(parents=True)
+        rollout = write_rollout(home, "shared-thread", originator="cindy")
+        create_thread_index(
+            home,
+            [{"id": "shared-thread", "rollout_path": str(rollout)}],
+        )
+        local = cindy_root / "cindy-local-v1.db"
+        owner = cindy_root / "cindy-owner-fixture.db"
+        create_cindy_database(
+            local,
+            [self._cindy_row("local-deleted", "shared-thread", status="deleted")],
+        )
+        create_cindy_database(
+            owner,
+            [self._cindy_row("owner-live", "shared-thread", status="active")],
+        )
+        profiles = resolve_cindy_profiles(self.root, root=cindy_root)
+        frontend_adapters = [
+            CindyAdapter(
+                database=profile.database,
+                codex_home=profile.codex_home,
+                cindy_root=profile.root,
+            )
+            for profile in profiles
+        ]
+
+        catalog = build_session_catalog(
+            [NativeIntegrityAdapter(codex_home=home), *frontend_adapters]
+        )
+        reversed_catalog = build_session_catalog(
+            [NativeIntegrityAdapter(codex_home=home), *reversed(frontend_adapters)]
+        )
+        record = next(item for item in catalog.records if item.thread_id == "shared-thread")
+
+        self.assertEqual(len(record.frontend_sessions), 2)
+        self.assertEqual(
+            {item.database for item in record.frontend_sessions},
+            {local.resolve(), owner.resolve()},
+        )
+        self.assertFalse(record.deletable)
+        self.assertTrue(any("live current" in item for item in record.blockers))
+        self.assertEqual(record.action_id, reversed_catalog.records[0].action_id)
 
     def test_malformed_rollout_and_missing_cascade_schema_fail_closed(self) -> None:
         home = self.root / "codex-home"

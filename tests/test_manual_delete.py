@@ -108,7 +108,7 @@ class ManualDeleteTests(unittest.TestCase):
     def execution_catalog(
         self,
         *,
-        frontend_status: str = "active",
+        frontend_status: str = "deleted",
     ) -> SessionCatalog:
         root_id = "root-thread"
         child_id = "child-thread"
@@ -226,7 +226,13 @@ class ManualDeleteTests(unittest.TestCase):
     def test_action_id_is_stable_and_title_is_not_approval_identity(self) -> None:
         first = self.record(
             "stable-thread",
-            frontends=(self.frontend("stable-thread", title="first"),),
+            frontends=(
+                self.frontend(
+                    "stable-thread",
+                    status="deleted",
+                    title="first",
+                ),
+            ),
         )
         second_frontend = replace(first.frontend_sessions[0], title="second")
         second = replace(first, frontend_sessions=(second_frontend,))
@@ -341,6 +347,28 @@ class ManualDeleteTests(unittest.TestCase):
         self.assertEqual(plan.executable_actions, ())
         with self.assertRaises(ManualDeleteSelectionError):
             plan.with_selected_actions((plan.actions[0].action_id,))
+
+    def test_inconsistent_catalog_cannot_hide_live_cindy_descendant(self) -> None:
+        root = self.record("root", descendants=("child",), deletable=True)
+        child = self.record(
+            "child",
+            frontends=(self.frontend("child", status="active"),),
+            deletable=True,
+            blockers=(),
+        )
+
+        plan = build_manual_delete_plan(SessionCatalog(records=(root, child)))
+        action = next(item for item in plan.actions if item.thread_id == "root")
+
+        self.assertFalse(action.available)
+        self.assertTrue(
+            any(
+                "live Cindy current or historical reference" in reason
+                for reason in action.unavailable_reasons
+            )
+        )
+        with self.assertRaises(ManualDeleteSelectionError):
+            plan.with_selected_actions((action.action_id,))
 
     def test_overlapping_selected_roots_are_rejected(self) -> None:
         parent = self.record("parent", descendants=("child",))

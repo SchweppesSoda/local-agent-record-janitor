@@ -346,6 +346,21 @@ def scan_adapters(
     findings: list[Finding] = []
     errors: list[ScanFailure] = []
     scanned_adapters = list(adapters)
+    binary_hints_by_home: dict[str, set[str]] = defaultdict(set)
+    for adapter in scanned_adapters:
+        raw_codex_home = getattr(adapter, "codex_home", None)
+        raw_binary_hint = getattr(adapter, "codex_bin_hint", None)
+        if not isinstance(raw_codex_home, (str, os.PathLike)) or not isinstance(
+            raw_binary_hint,
+            (str, os.PathLike),
+        ):
+            continue
+        if not os.fspath(raw_binary_hint):
+            continue
+        home = os.path.normcase(os.path.abspath(os.fspath(raw_codex_home)))
+        binary_hints_by_home[home].add(
+            _normalize_binary_hint(raw_binary_hint)
+        )
     for adapter in scanned_adapters:
         platform = getattr(adapter, "name", type(adapter).__name__)
         try:
@@ -394,7 +409,20 @@ def scan_adapters(
         scanned_adapters,
     )
     errors.extend(protection_errors)
-    return ScanReport(findings=deduplicate_findings(findings), errors=errors)
+    findings_with_store_hints: list[Finding] = []
+    for finding in findings:
+        details = dict(finding.details)
+        candidates = (
+            _finding_binary_hint_candidates(finding)
+            | binary_hints_by_home.get(finding_key(finding)[0], set())
+        )
+        if candidates:
+            details["codex_bin_hint_candidates"] = sorted(candidates)
+        findings_with_store_hints.append(replace(finding, details=details))
+    return ScanReport(
+        findings=deduplicate_findings(findings_with_store_hints),
+        errors=errors,
+    )
 
 
 def select_findings(

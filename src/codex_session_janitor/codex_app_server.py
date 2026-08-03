@@ -153,7 +153,7 @@ class CodexAppServer:
                 {
                     "clientInfo": {
                         "name": "codex-session-janitor",
-                        "title": "Codex Session Janitor",
+                        "title": "Local Agent Record Janitor",
                         "version": self.client_version,
                     },
                     "capabilities": {},

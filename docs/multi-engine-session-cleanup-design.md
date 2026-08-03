@@ -1,19 +1,50 @@
-# 多引擎会话清理设计
+# 多引擎本地 Agent 记录清理设计
 
 状态：实施基线
 
 ## 1. 目标
 
-在现有 Codex 清单、选择性删除和通用 Pi 文件删除能力上，补齐：
+在现有 Codex 清单、选择性删除和通用 Pi 文件删除能力上，补齐多引擎 local agent
+record 管理：
 
 - 独立 Pi 与 Cindy 管理的 Pi 会话区分；
-- Cindy 当前、停放及仍可用于历史 fork 的原生会话引用保护；
+- Cindy 当前、停放及仍可用于历史 fork 的 native record frontend reference 保护；
 - 独立 Claude Code 与 Cindy 管理的 Claude Code 会话清单和选择性删除；
 - Codex thread、Pi JSONL、Claude Code JSONL 三种目标使用不同执行器，禁止按一个
   `session_id` 模型混删。
 
 本阶段不直接删除或改写 Cindy 会话行。Cindy SQLite 只作为归属、生命周期和删除
 保护证据。
+
+### 1.1 规范术语
+
+- 跨引擎对象称为 **local agent record / 原生记录**，不统称 session；
+- Codex 对象称为 **thread**，其协议和稳定 ID 是 `thread/*` 与 `thread_id`；
+- Pi Agent 与 Claude Code 对象称为 **session**；
+- Cindy/AionUI 数据库行称为 **frontend reference/mapping**，它们只描述前端对象到
+  原生记录的引用，不是原生记录副本；
+- `sessions/`、`session_meta`、`sdk_session_id` 等既有文件、协议或外部 schema 名称
+  按原名引用，不从其名称推导统一领域模型。
+
+### 1.2 分层模型
+
+每条记录的发现、展示和删除必须保持以下四层，不得把登录账号、前端 ID、harness
+或存储目录折叠成一个 session 概念：
+
+```text
+Frontend namespace -- frontend reference/mapping --> Native record
+Harness runtime -- operates on --> Native store -- contains --> Native record
+
+Frontend namespace: Cindy/AionUI owner + database + frontend conversation/session ID
+Harness runtime:    engine + executable path + version
+Native store:       CODEX_HOME | Pi session_root | Claude config root
+Native record:      Codex thread | Pi session JSONL | Claude session manifest
+```
+
+认证来源、登录状态、OAuth/API 凭据归属和前端 owner 可以作为诊断信息展示，用于解释
+为什么某个 harness 能运行或获得授权；它们不进入 record identity、删除身份、
+action ID 或审批 fingerprint，也不能
+代替 native store 与 native record 的精确限定。
 
 ## 2. 后端限定身份
 
@@ -25,19 +56,21 @@ Pi:         (session_root, canonical_jsonl_path, header_session_id)
 Claude Code:(claude_config_dir, session_id, transcript_paths[])
 ```
 
-展示层可以同时显示 native、Cindy、AionUI 等来源，但不得用来源名称代替后端身份。
+展示层可以同时显示 native、Cindy、AionUI 等来源，但不得用 frontend namespace 或
+来源名称代替后端身份。
 同一个 Claude Code session ID 在多个 project 目录出现时合并为一个目标，计划中保留
 每个精确文件路径；不同 `CLAUDE_CONFIG_DIR` 中的同 ID 永不合并。
 
 ## 3. Cindy 引用提取
 
-新增统一、只读的 Cindy 原生引用层，读取：
+新增统一、只读的 Cindy frontend reference 提取层，读取：
 
 1. `sessions.agent_kind/sdk_session_id` 当前绑定；
 2. `messages.role='agent_switch'` 中的
    `fromAgentKind/fromSdkSessionId` 历史绑定。
 
-DB kind 映射为：`codex -> codex`、`pi -> pi`、`cc -> claude`。引用记录至少带：
+DB kind 映射为：`codex -> codex`、`pi -> pi`、`cc -> claude`。frontend reference
+至少带：
 
 - Cindy 数据库、profile 根和 Cindy session ID；
 - session 状态、工作目录和更新时间；
@@ -72,15 +105,15 @@ schema 不兼容或 switch JSON 隐藏了无法判定的引用时，相关 stora
 
 ## 5. 删除分类
 
-每个 Pi、Claude 和 Codex 目标统一显示以下结论之一：
+每个 Pi session、Claude Code session 和 Codex thread 统一显示以下结论之一：
 
 | 分类 | 是否可选物理删除 | 含义 |
 |---|---:|---|
 | `deleted_frontend_reference` | 是 | 仅被已删除 Cindy 会话引用 |
-| `unreferenced` | 是，高风险提示 | 没有任何 Cindy 引用的本地会话 |
+| `unreferenced` | 是，高风险提示 | 没有任何 Cindy frontend reference 的原生记录 |
 | `live_current_reference` | 否 | 未删除 Cindy 会话当前正在使用 |
 | `live_historical_reference` | 否 | 未删除 Cindy 会话仍保留切回或历史 fork 引用 |
-| `frontend_only` | 无物理目标 | DB 有引用但原生文件/thread 已不存在 |
+| `frontend_only` | 无物理目标 | DB 有 frontend reference，但原生文件/thread 已不存在 |
 | `inventory_incomplete` | 否 | DB、路径、schema 或文件无法完整验证 |
 
 可选只表示计划允许用户逐项批准，不表示自动删除。继续禁止 `all` 和隐式批量选择。
@@ -122,11 +155,12 @@ Claude 配置。
 - Codex 仅调用官方 app-server `thread/delete`；
 - Pi 仅精确删除获批 JSONL；
 - Claude Code 仅删除获批 session manifest；
-- 三种后端的 action ID、计划 fingerprint 和确认文案不同，删除命令不得混选；
+- 三种后端的 action ID、计划 fingerprint 和确认文案不同，删除命令不得混选；认证或
+  登录状态的变化不得改变记录身份规则；
 - 非 TTY 必须同时提供明确 selector、刚预览得到的 fingerprint、
   `--clients-closed` 和 `--yes`；TTY 默认要求后端专用永久删除确认句，只有操作者
   同时显式提供 `--yes`、明确 selector 和 `--clients-closed` 时才跳过该提示；
-- 首个 mutation 前以及每个 action 前重读 Cindy 引用。任何目标新增未删除 Cindy
+- 首个 mutation 前以及每个 action 前重读 Cindy frontend reference。任何目标新增未删除 Cindy
   引用、文件写入、路径变化或 catalog failure 都停止；
 - 删除失败后逐项报告 `deleted`、`not_deleted` 或 `unknown`，不得继续猜测。
 
@@ -135,7 +169,8 @@ Claude 配置。
 - 保留现有 `records/delete --platform pi`；catalog 同时显示 standalone 与 Cindy
   Pi，并明确 storage/profile/引用；
 - 新增 `records/delete --platform claude`、`--session-id` 和 Claude 专用计划输出；
-- 默认/all records 聚合 Codex、Pi、Claude，JSON 使用独立顶层字段，避免类型混淆；
+- 默认/all records 聚合 Codex thread、Pi session、Claude Code session，JSON 使用
+  独立顶层字段，避免类型混淆；
 - `scan/clean` 暂不扩展 Pi/Claude 完整性修复语义；显式指定时清晰拒绝；
 - `--platform cindy` 的 Codex 视图补齐 parked/historical Codex 引用；Pi/Claude
   仍通过各自后端视图删除。

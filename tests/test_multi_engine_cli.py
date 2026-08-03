@@ -113,8 +113,8 @@ class MultiEngineCliTests(unittest.TestCase):
         self.assertIn("Claude Code", records_help)
         self.assertIn("--platform", delete_help)
         self.assertIn("--session-id ID", delete_help)
-        self.assertIn("Codex、Pi 或 Claude Code 会话", delete_help)
-        self.assertIn("逐项选择保存位置明确的会话", delete_help)
+        self.assertIn("Codex thread 或 Pi/Claude Code session", delete_help)
+        self.assertIn("逐项选择存储身份明确的目标", delete_help)
 
     def test_claude_records_json_and_human_are_metadata_only_and_all_totals_are_separate(self) -> None:
         output = StringIO()
@@ -309,6 +309,38 @@ class MultiEngineCliTests(unittest.TestCase):
         self.assertNotIn("live body", output.getvalue())
         self.assertNotIn("deleted body", output.getvalue())
 
+    def test_explicit_cindy_claude_db_keeps_live_sibling_namespace_guard(self) -> None:
+        appdata = self.root / "SiblingClaudeAppData"
+        cindy_root = appdata / "CustomCindy"
+        config = cindy_root / "claude-home"
+        write_claude_session(config, ONE, "sibling guarded body")
+        local = cindy_root / "cindy-local-v1.db"
+        owner = cindy_root / "cindy-owner-fixture.db"
+        create_cindy_database(local, [("local-deleted", ONE, "deleted", "cc")])
+        create_cindy_database(owner, [("owner-live", ONE, "active", "cc")])
+        output = StringIO()
+
+        status = main(
+            [
+                "records", "--platform", "claude", "--json",
+                "--appdata", str(appdata),
+                "--claude-config-dir", str(config),
+                "--cindy-root", str(cindy_root),
+                "--cindy-db", str(local),
+            ],
+            stdout=output,
+            stderr=StringIO(),
+            stdin=StringIO(),
+        )
+        payload = json.loads(output.getvalue())
+        record = next(item for item in payload["claude_sessions"] if item["session_id"] == ONE)
+
+        self.assertEqual(status, EXIT_OK)
+        self.assertEqual(record["classification"], "live_current_reference")
+        self.assertFalse(record["deletable"])
+        self.assertEqual(len(record["frontend_reference_snapshot"]), 2)
+        self.assertNotIn("sibling guarded body", output.getvalue())
+
     def test_production_cindy_refs_follow_effective_environment_config_root(self) -> None:
         home = self.root / "env-home"
         env_config = self.root / "env-claude"
@@ -404,6 +436,43 @@ class MultiEngineCliTests(unittest.TestCase):
         self.assertFalse(by_id["cindy-live"]["deletable"])
         self.assertNotIn("standalone secret", output.getvalue())
         self.assertNotIn("cindy secret", output.getvalue())
+
+    def test_explicit_cindy_pi_db_keeps_live_sibling_namespace_guard(self) -> None:
+        appdata = self.root / "SiblingPiAppData"
+        cindy_root = appdata / "CustomCindy"
+        sessions = cindy_root / "pi-agent-home" / "sessions"
+        write_pi_session(sessions, "shared-pi", "sibling guarded pi body")
+        local = cindy_root / "cindy-local-v1.db"
+        owner = cindy_root / "cindy-owner-fixture.db"
+        create_cindy_database(
+            local,
+            [("local-deleted", "shared-pi", "deleted", "pi")],
+        )
+        create_cindy_database(
+            owner,
+            [("owner-live", "shared-pi", "active", "pi")],
+        )
+        output = StringIO()
+
+        status = main(
+            [
+                "records", "--platform", "pi", "--json",
+                "--appdata", str(appdata),
+                "--cindy-root", str(cindy_root),
+                "--cindy-db", str(local),
+            ],
+            stdout=output,
+            stderr=StringIO(),
+            stdin=StringIO(),
+        )
+        payload = json.loads(output.getvalue())
+        record = next(item for item in payload["pi_sessions"] if item["session_id"] == "shared-pi")
+
+        self.assertEqual(status, EXIT_OK)
+        self.assertEqual(record["reference_classification"], "live_current_reference")
+        self.assertFalse(record["deletable"])
+        self.assertEqual(len(record["cindy_references"]), 2)
+        self.assertNotIn("sibling guarded pi body", output.getvalue())
 
     def test_surviving_known_cindy_pi_store_without_database_is_listed_once(self) -> None:
         home = self.root / "orphan-pi-home"

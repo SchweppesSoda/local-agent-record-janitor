@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Callable
 
+from codex_session_janitor.adapters import CindyAdapter
 from codex_session_janitor.adapters.native import NativeIntegrityAdapter
 from codex_session_janitor.cleaner import (
     ExpectedDeletionScope,
@@ -22,11 +23,11 @@ from codex_session_janitor.codex_state import (
     find_thread_rollouts,
     rollout_state_fingerprint,
 )
-from codex_session_janitor.discovery import choose_codex_binary
+from codex_session_janitor.discovery import choose_codex_binary, resolve_cindy_profiles
 from codex_session_janitor.models import Finding, RolloutRecord
 from codex_session_janitor.planning import ActionKind, build_cleanup_plan
 
-from tests.support import create_thread_index, write_rollout
+from tests.support import create_cindy_database, create_thread_index, write_rollout
 
 
 class FakeAppServer:
@@ -61,6 +62,64 @@ class CleanupExecutionTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.codex_home = self.root / "codex-home"
         self.codex_home.mkdir()
+
+    def test_cross_database_live_owner_reference_guards_local_tombstone(self) -> None:
+        cindy_root = self.root / "CindyGlobal"
+        home = cindy_root / "codex-home"
+        home.mkdir(parents=True)
+        thread_id = "shared-cross-db-thread"
+        rollout = write_rollout(home, thread_id, originator="cindy")
+        create_thread_index(home, [{"id": thread_id, "rollout_path": str(rollout)}])
+        base_row = {
+            "sdk_session_id": thread_id,
+            "source": "desktop",
+            "created_at": 1,
+            "updated_at": 2,
+            "parent_session_id": None,
+            "agent_kind": "codex",
+        }
+        local = cindy_root / "cindy-local-v1.db"
+        owner = cindy_root / "cindy-owner-fixture.db"
+        create_cindy_database(
+            local,
+            [{**base_row, "id": "local-deleted", "status": "deleted"}],
+        )
+        create_cindy_database(
+            owner,
+            [{**base_row, "id": "owner-live", "status": "active"}],
+        )
+        adapters = [
+            CindyAdapter(
+                database=profile.database,
+                codex_home=profile.codex_home,
+                cindy_root=profile.root,
+            )
+            for profile in resolve_cindy_profiles(self.root, root=cindy_root)
+        ]
+
+        scan = scan_adapters(adapters)
+        finding = scan.findings[0]
+        plan = build_cleanup_plan(scan)
+        action = next(
+            item for item in plan.actions if item.kind is ActionKind.DELETE_CONVERSATION
+        )
+        server = FakeAppServer()
+        report = clean_findings(
+            (finding,),
+            explicit_selection=True,
+            app_server_factory=lambda **_kwargs: server,
+            binary_resolver=lambda _hint: Path("codex"),
+            verification_attempts=1,
+            verification_interval=0,
+        )
+
+        self.assertEqual(len(scan.findings), 1)
+        self.assertTrue(finding.details["live_reference_guard"])
+        self.assertTrue(finding.details["live_reference_self"])
+        self.assertFalse(finding.details["cleanable"])
+        self.assertFalse(action.available)
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertEqual(report.succeeded, 0)
 
     def finding(
         self,

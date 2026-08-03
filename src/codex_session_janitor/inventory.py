@@ -179,8 +179,20 @@ class SessionCatalog:
         return self.records
 
     @property
+    def threads(self) -> tuple[ManagedConversation, ...]:
+        """Canonical Codex terminology for the compatibility ``records`` field."""
+
+        return self.records
+
+    @property
     def failures(self) -> tuple[InventoryFailure, ...]:
         return self.errors
+
+    @property
+    def unmapped_frontend_references(self) -> tuple[FrontendSessionRecord, ...]:
+        """Canonical alias for frontend references without a native thread ID."""
+
+        return self.unmapped_frontend_sessions
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -367,10 +379,26 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             artifact_present = indexed or bool(records)
             descendants = tuple(sorted(_transitive_descendants(graph, thread_id)))
             blockers = list(blocking_messages)
+            live_references = [
+                reference for reference in references if reference.is_live
+            ]
+            if live_references:
+                platforms = ", ".join(
+                    sorted(
+                        {
+                            reference.platform.casefold()
+                            for reference in live_references
+                        }
+                    )
+                )
+                blockers.append(
+                    "A live frontend reference prevents native-record "
+                    f"deletion ({platforms})"
+                )
             live_cindy = [
                 reference
-                for reference in references
-                if reference.platform == "cindy" and reference.is_live
+                for reference in live_references
+                if reference.platform.casefold() == "cindy"
             ]
             if live_cindy:
                 kinds = {
@@ -384,6 +412,54 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 )
                 blockers.append(
                     f"Cindy retains a {label} native-session reference"
+                )
+            live_descendant_references = {
+                descendant_id: tuple(
+                    reference
+                    for reference in frontend_by_thread.get(descendant_id, ())
+                    if reference.is_live
+                )
+                for descendant_id in descendants
+            }
+            live_descendant_references = {
+                descendant_id: descendant_references
+                for descendant_id, descendant_references
+                in live_descendant_references.items()
+                if descendant_references
+            }
+            if live_descendant_references:
+                affected = ", ".join(
+                    f"{descendant_id} ("
+                    + "/".join(
+                        sorted(
+                            {
+                                reference.platform.casefold()
+                                for reference in descendant_references
+                            }
+                        )
+                    )
+                    + ")"
+                    for descendant_id, descendant_references
+                    in sorted(live_descendant_references.items())
+                )
+                blockers.append(
+                    "Codex thread/delete would cascade into descendant threads "
+                    "retained by live frontend references: " + affected
+                )
+            live_cindy_descendants = {
+                descendant_id
+                for descendant_id, descendant_references
+                in live_descendant_references.items()
+                if any(
+                    reference.platform.casefold() == "cindy"
+                    for reference in descendant_references
+                )
+            }
+            if live_cindy_descendants:
+                blockers.append(
+                    "Live Cindy current or historical references retain "
+                    "descendant threads: "
+                    + ", ".join(sorted(live_cindy_descendants))
                 )
             if not artifact_present:
                 blockers.append("No SQLite thread row or verifiable rollout remains")
@@ -826,12 +902,29 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+# Canonical Codex vocabulary.  The original names remain the compatibility
+# surface for the package and CLI; these aliases do not alter serialization,
+# action identity, or approval fingerprints.
+CodexThreadRecord = ManagedConversation
+CodexThreadCatalog = SessionCatalog
+FrontendReferenceRecord = FrontendSessionRecord
+
+
+build_codex_thread_catalog = build_session_catalog
+select_codex_threads = select_managed_conversations
+
+
 __all__ = [
+    "CodexThreadCatalog",
+    "CodexThreadRecord",
     "FrontendSessionRecord",
+    "FrontendReferenceRecord",
     "InventoryFailure",
     "InventorySelectionError",
     "ManagedConversation",
     "SessionCatalog",
+    "build_codex_thread_catalog",
     "build_session_catalog",
+    "select_codex_threads",
     "select_managed_conversations",
 ]

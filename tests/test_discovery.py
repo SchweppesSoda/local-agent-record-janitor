@@ -8,6 +8,7 @@ from unittest.mock import patch
 from codex_session_janitor.discovery import (
     choose_codex_binary,
     discover_cindy_profiles,
+    resolve_cindy_profiles,
 )
 
 
@@ -72,6 +73,93 @@ class ChooseCodexBinaryTests(unittest.TestCase):
 
 
 class CindyDedicatedStoreDiscoveryTests(unittest.TestCase):
+    def test_explicit_empty_root_keeps_missing_local_namespace_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            appdata = Path(temporary_directory)
+            root = appdata / "EmptyCindy"
+
+            profiles = resolve_cindy_profiles(appdata, root=root)
+
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0].root, root)
+        self.assertEqual(profiles[0].database, root / "cindy-local-v1.db")
+        self.assertEqual(profiles[0].codex_home, root / "codex-home")
+
+    def test_explicit_root_unions_local_and_owner_namespaces_for_one_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            appdata = Path(temporary_directory)
+            root = appdata / "CustomCindy"
+            root.mkdir()
+            local = root / "cindy-local-v1.db"
+            owner = root / "cindy-owner-fixture.db"
+            local.touch()
+            owner.touch()
+            (root / "cindy-owner-fixture-backup.db").touch()
+            home = root / "custom-codex-home"
+
+            profiles = resolve_cindy_profiles(
+                appdata,
+                root=root,
+                database=local,
+                codex_home=home,
+            )
+
+        self.assertEqual({item.database for item in profiles}, {local, owner})
+        self.assertTrue(all(item.root == root for item in profiles))
+        self.assertTrue(all(item.codex_home == home for item in profiles))
+
+    def test_explicit_database_alone_infers_root_and_discovers_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "ArbitraryCindy"
+            root.mkdir()
+            selected = root / "cindy-owner-selected.db"
+            sibling = root / "cindy-local-v1.db"
+            selected.touch()
+            sibling.touch()
+
+            profiles = resolve_cindy_profiles(database=selected)
+
+        self.assertEqual({item.database for item in profiles}, {selected, sibling})
+        self.assertTrue(all(item.root == root for item in profiles))
+        self.assertTrue(
+            all(item.codex_home == root / "codex-home" for item in profiles)
+        )
+
+    def test_explicit_root_remains_authoritative_but_external_database_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            base = Path(temporary_directory)
+            root = base / "Root"
+            external_root = base / "External"
+            root.mkdir()
+            external_root.mkdir()
+            sibling = root / "cindy-owner-sibling.db"
+            selected = external_root / "cindy-selected.db"
+            sibling.touch()
+            selected.touch()
+
+            profiles = resolve_cindy_profiles(root=root, database=selected)
+
+        self.assertEqual({item.database for item in profiles}, {selected, sibling})
+        self.assertTrue(all(item.root == root for item in profiles))
+
+    def test_explicit_sidecar_or_backup_database_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            backup = root / "cindy-owner-backup.db"
+            backup.touch()
+
+            with self.assertRaises(RuntimeError):
+                resolve_cindy_profiles(root=root, database=backup)
+
+    def test_explicit_non_file_database_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            invalid = root / "external" / "cindy-owner.db"
+            invalid.mkdir(parents=True)
+
+            with self.assertRaises(RuntimeError):
+                resolve_cindy_profiles(root=root, database=invalid)
+
     def test_surviving_pi_store_creates_one_known_brand_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             appdata = Path(temporary_directory)
