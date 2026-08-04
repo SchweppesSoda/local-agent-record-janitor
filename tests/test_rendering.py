@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from codex_session_janitor.rendering import (
+from local_agent_record_janitor.rendering import (
     DEFAULT_MAX_WIDTH,
     escape_terminal_controls,
     safe_single_line,

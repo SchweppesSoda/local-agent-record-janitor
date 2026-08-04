@@ -8,13 +8,13 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_session_janitor.adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter
-from codex_session_janitor.discovery import (
+from local_agent_record_janitor.adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter
+from local_agent_record_janitor.discovery import (
     discover_aionui_databases,
     discover_cindy_profiles,
     resolve_cindy_profiles,
 )
-from codex_session_janitor.inventory import (
+from local_agent_record_janitor.inventory import (
     CodexThreadCatalog,
     CodexThreadRecord,
     FrontendReferenceRecord,
@@ -283,7 +283,7 @@ class SessionCatalogTests(unittest.TestCase):
             onerror(PermissionError(13, "denied", str(Path(root) / "private")))
             return iter(())
 
-        with patch("codex_session_janitor.inventory.os.walk", side_effect=failed_walk):
+        with patch("local_agent_record_janitor.inventory.os.walk", side_effect=failed_walk):
             catalog = build_session_catalog([NativeIntegrityAdapter(codex_home=home)])
 
         self.assertTrue(any(error.source == "codex-rollouts" for error in catalog.errors))

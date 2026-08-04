@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_session_janitor.discovery import (
+from local_agent_record_janitor.discovery import (
     choose_codex_binary,
     discover_cindy_profiles,
     resolve_cindy_profiles,
@@ -14,7 +14,7 @@ from codex_session_janitor.discovery import (
 
 class ChooseCodexBinaryTests(unittest.TestCase):
     @patch(
-        "codex_session_janitor.discovery.discover_path_codex",
+        "local_agent_record_janitor.discovery.discover_path_codex",
         return_value=Path("path-codex"),
     )
     def test_missing_explicit_hint_never_falls_back_to_path(self, discover) -> None:
@@ -25,7 +25,7 @@ class ChooseCodexBinaryTests(unittest.TestCase):
         discover.assert_not_called()
 
     @patch(
-        "codex_session_janitor.discovery.discover_path_codex",
+        "local_agent_record_janitor.discovery.discover_path_codex",
         return_value=Path("path-codex"),
     )
     def test_non_file_explicit_hint_never_falls_back_to_path(self, discover) -> None:
@@ -38,7 +38,7 @@ class ChooseCodexBinaryTests(unittest.TestCase):
         discover.assert_not_called()
 
     @patch(
-        "codex_session_janitor.discovery.discover_path_codex",
+        "local_agent_record_janitor.discovery.discover_path_codex",
         return_value=Path("path-codex"),
     )
     def test_no_hint_uses_path_discovery(self, discover) -> None:
@@ -48,7 +48,7 @@ class ChooseCodexBinaryTests(unittest.TestCase):
         discover.assert_called_once_with()
 
     @patch(
-        "codex_session_janitor.discovery.discover_path_codex",
+        "local_agent_record_janitor.discovery.discover_path_codex",
         return_value=Path("path-codex"),
     )
     def test_valid_explicit_hint_returns_itself(self, discover) -> None:
@@ -61,7 +61,7 @@ class ChooseCodexBinaryTests(unittest.TestCase):
         discover.assert_not_called()
 
     @patch(
-        "codex_session_janitor.discovery.discover_path_codex",
+        "local_agent_record_janitor.discovery.discover_path_codex",
         return_value=Path("path-codex"),
     )
     def test_explicit_hint_inspection_error_fails_closed(self, discover) -> None:

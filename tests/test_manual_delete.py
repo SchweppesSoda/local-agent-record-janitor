@@ -5,22 +5,22 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from codex_session_janitor.cleaner import VerificationResult
-from codex_session_janitor.codex_state import find_thread_rollouts, read_thread_index
-from codex_session_janitor.conversation_metadata import read_conversation_summaries
-from codex_session_janitor.inventory import (
+from local_agent_record_janitor.cleaner import VerificationResult
+from local_agent_record_janitor.codex_state import find_thread_rollouts, read_thread_index
+from local_agent_record_janitor.conversation_metadata import read_conversation_summaries
+from local_agent_record_janitor.inventory import (
     FrontendSessionRecord,
     InventoryFailure,
     ManagedConversation,
     SessionCatalog,
 )
-from codex_session_janitor.manual_delete import (
+from local_agent_record_janitor.manual_delete import (
     ManualDeletePlanError,
     ManualDeleteSelectionError,
     build_manual_delete_plan,
     execute_manual_delete,
 )
-from codex_session_janitor.models import ConversationSummary
+from local_agent_record_janitor.models import ConversationSummary
 
 from tests.support import create_thread_index, write_rollout
 

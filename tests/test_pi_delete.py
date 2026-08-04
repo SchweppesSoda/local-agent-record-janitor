@@ -9,13 +9,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from codex_session_janitor.pi_delete import (
+from local_agent_record_janitor.pi_delete import (
     PiDeletePlanError,
     PiDeleteSelectionError,
     build_pi_delete_plan,
     execute_pi_delete,
 )
-from codex_session_janitor.pi_sessions import build_pi_session_catalog
+from local_agent_record_janitor.pi_sessions import build_pi_session_catalog
 
 
 @dataclass(frozen=True)

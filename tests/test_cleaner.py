@@ -9,9 +9,9 @@ from contextlib import closing
 from pathlib import Path
 from typing import Callable
 
-from codex_session_janitor.adapters import CindyAdapter
-from codex_session_janitor.adapters.native import NativeIntegrityAdapter
-from codex_session_janitor.cleaner import (
+from local_agent_record_janitor.adapters import CindyAdapter
+from local_agent_record_janitor.adapters.native import NativeIntegrityAdapter
+from local_agent_record_janitor.cleaner import (
     ExpectedDeletionScope,
     VerificationResult,
     clean_findings,
@@ -19,13 +19,13 @@ from codex_session_janitor.cleaner import (
     finding_key,
     scan_adapters,
 )
-from codex_session_janitor.codex_state import (
+from local_agent_record_janitor.codex_state import (
     find_thread_rollouts,
     rollout_state_fingerprint,
 )
-from codex_session_janitor.discovery import choose_codex_binary, resolve_cindy_profiles
-from codex_session_janitor.models import Finding, RolloutRecord
-from codex_session_janitor.planning import ActionKind, build_cleanup_plan
+from local_agent_record_janitor.discovery import choose_codex_binary, resolve_cindy_profiles
+from local_agent_record_janitor.models import Finding, RolloutRecord
+from local_agent_record_janitor.planning import ActionKind, build_cleanup_plan
 
 from tests.support import create_cindy_database, create_thread_index, write_rollout
 

@@ -9,13 +9,13 @@ from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
 
-from codex_session_janitor.cli import (
+from local_agent_record_janitor.cli import (
     EXIT_CONFIRMATION_REQUIRED,
     EXIT_ERROR,
     EXIT_OK,
     main,
 )
-from codex_session_janitor.pi_sessions import build_pi_session_catalog
+from local_agent_record_janitor.pi_sessions import build_pi_session_catalog
 
 
 @dataclass(frozen=True)

@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_session_janitor.adapters import (
+from local_agent_record_janitor.adapters import (
     NativeIntegrityAdapter,
     NativeIntegrityError,
 )
-from codex_session_janitor.cleaner import scan_adapters
+from local_agent_record_janitor.cleaner import scan_adapters
 
 from tests.support import create_thread_index, write_rollout
 

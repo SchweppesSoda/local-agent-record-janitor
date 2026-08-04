@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_session_janitor.discovery import CindyProfile
-from codex_session_janitor.pi_sessions import (
+from local_agent_record_janitor.discovery import CindyProfile
+from local_agent_record_janitor.pi_sessions import (
     PiInventoryError,
     PiSelectionError,
     build_pi_root_qualified_catalog,
@@ -165,7 +165,7 @@ class PiSessionCatalogTests(unittest.TestCase):
         )
 
         with patch(
-            "codex_session_janitor.pi_sessions._physical_storage_identity",
+            "local_agent_record_janitor.pi_sessions._physical_storage_identity",
             side_effect=PiInventoryError("denied"),
         ):
             catalog = build_pi_root_qualified_catalog(

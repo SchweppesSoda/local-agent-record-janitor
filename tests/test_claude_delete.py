@@ -7,13 +7,13 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from codex_session_janitor.claude_delete import (
+from local_agent_record_janitor.claude_delete import (
     ClaudeDeletePlanError,
     ClaudeDeleteSelectionError,
     build_claude_delete_plan,
     execute_claude_delete,
 )
-from codex_session_janitor.claude_sessions import build_claude_session_catalog
+from local_agent_record_janitor.claude_sessions import build_claude_session_catalog
 
 
 ONE = "11111111-1111-4111-8111-111111111111"

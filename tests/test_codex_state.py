@@ -6,7 +6,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from codex_session_janitor.codex_state import (
+from local_agent_record_janitor.codex_state import (
     CodexStateReadError,
     find_thread_rollouts,
     read_spawn_descendants,

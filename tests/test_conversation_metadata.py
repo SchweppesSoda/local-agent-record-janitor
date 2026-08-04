@@ -8,13 +8,13 @@ from contextlib import closing
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from codex_session_janitor.conversation_metadata import (
+from local_agent_record_janitor.conversation_metadata import (
     parse_thread_source,
     project_label_from_cwd,
     read_conversation_summaries,
     read_legacy_thread_names,
 )
-from codex_session_janitor.models import ConversationSummary, RolloutRecord
+from local_agent_record_janitor.models import ConversationSummary, RolloutRecord
 
 
 class ThreadSourceParsingTests(unittest.TestCase):

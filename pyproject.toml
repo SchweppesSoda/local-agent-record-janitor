@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex-session-janitor"
+name = "local-agent-record-janitor"
 version = "0.1.0"
 description = "Audit storage-qualified Codex threads, Pi Agent and Claude Code sessions, and frontend references; safely clean explicitly approved local agent records."
 readme = "README.md"
@@ -28,11 +28,11 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-codex-session-janitor = "codex_session_janitor.cli:main"
+local-agent-record-janitor = "local_agent_record_janitor.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/SchweppesSoda/codex-session-janitor"
-Issues = "https://github.com/SchweppesSoda/codex-session-janitor/issues"
+Homepage = "https://github.com/SchweppesSoda/local-agent-record-janitor"
+Issues = "https://github.com/SchweppesSoda/local-agent-record-janitor/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

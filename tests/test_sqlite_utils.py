@@ -6,7 +6,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from codex_session_janitor.sqlite_utils import connect_readonly, table_exists
+from local_agent_record_janitor.sqlite_utils import connect_readonly, table_exists
 
 
 class ReadOnlySQLiteTests(unittest.TestCase):

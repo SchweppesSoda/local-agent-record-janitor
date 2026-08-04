@@ -6,8 +6,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from codex_session_janitor.cleaner import VerificationResult, scan_adapters
-from codex_session_janitor.inventory import (
+from local_agent_record_janitor.cleaner import VerificationResult, scan_adapters
+from local_agent_record_janitor.inventory import (
     FrontendSessionRecord,
     SessionCatalog,
     build_codex_thread_catalog,
@@ -15,13 +15,13 @@ from codex_session_janitor.inventory import (
     select_codex_threads,
     select_managed_conversations,
 )
-from codex_session_janitor.manual_delete import (
+from local_agent_record_janitor.manual_delete import (
     ManualDeleteSelectionError,
     build_manual_delete_plan,
     execute_manual_delete,
 )
-from codex_session_janitor.models import Finding
-from codex_session_janitor.planning import (
+from local_agent_record_janitor.models import Finding
+from local_agent_record_janitor.planning import (
     ActionKind,
     build_cleanup_plan,
 )

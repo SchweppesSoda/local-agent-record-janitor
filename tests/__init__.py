@@ -1,1 +1,1 @@
-"""Test suite for codex-session-janitor."""
+"""Test suite for local-agent-record-janitor."""

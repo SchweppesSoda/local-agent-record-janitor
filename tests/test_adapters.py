@@ -6,12 +6,12 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from codex_session_janitor.adapters import (
+from local_agent_record_janitor.adapters import (
     AdapterScanError,
     AionUIAdapter,
     CindyAdapter,
 )
-from codex_session_janitor.cleaner import scan_adapters
+from local_agent_record_janitor.cleaner import scan_adapters
 
 from tests.support import (
     create_aionui_database,

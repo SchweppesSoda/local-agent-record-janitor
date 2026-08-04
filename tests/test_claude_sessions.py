@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from codex_session_janitor.claude_sessions import (
+from local_agent_record_janitor.claude_sessions import (
     _MAX_JSONL_LINE,
     ClaudeSelectionError,
     build_claude_multi_root_catalog,

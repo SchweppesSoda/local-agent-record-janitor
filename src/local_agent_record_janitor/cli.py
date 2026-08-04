@@ -457,7 +457,7 @@ def _conflicting_action_decision(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = _ChineseArgumentParser(
-        prog="codex-session-janitor",
+        prog="local-agent-record-janitor",
         description=(
             "检查前端残留，只读盘点本地 Agent 记录（Codex thread、"
             "Pi Agent/Claude Code session），"

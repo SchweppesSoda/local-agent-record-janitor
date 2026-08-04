@@ -1,9 +1,16 @@
 # Local Agent Record Janitor / 本地 Agent 记录清理器
 
-`codex-session-janitor` 是这个项目为向后兼容而保留的包名、Python 模块名和 CLI
-命令。产品定位已经扩展为一个本地、保守的多引擎 Agent 记录检查和清理工具：它处理
-Codex thread、Pi Agent session 和 Claude Code session，并把 Cindy/AionUI 数据库中的
-行作为只读 frontend reference，而不是另一份 native record。
+`local-agent-record-janitor` 是本项目统一使用的仓库名、发行包名和 CLI 命令；Python
+模块名统一为 `local_agent_record_janitor`。它是一个本地、保守的多引擎 Agent 记录检查
+和清理工具：处理 Codex thread、Pi Agent session 和 Claude Code session，并把
+Cindy/AionUI 数据库中的行作为只读 frontend reference，而不是另一份 native record。
+
+### 命名迁移
+
+这次统一命名是一次破坏性迁移：现有可编辑安装需要先卸载先前发行包，再安装
+`local-agent-record-janitor`；脚本和集成应改用 `local-agent-record-janitor` 命令以及
+`local_agent_record_janitor` Python 模块。改名前版本生成的旧版聚合索引备份，应继续
+使用生成该备份的对应版本执行还原。
 
 它主要处理两类问题：
 
@@ -103,51 +110,51 @@ frontend reference 等动作仍只结构化显示，并附带不可用原因。
 - Pi Agent 在 Windows、macOS 和 Linux 均使用其公开的本地会话布局；默认目录为 `~/.pi/agent`，会话目录为 `~/.pi/agent/sessions`。会话目录的优先级为 `--pi-session-dir`、`PI_CODING_AGENT_SESSION_DIR`、合并后的项目/全局 `settings.json` 的 `sessionDir`、再到 `<agentDir>/sessions`；agent 目录本身按 `--pi-agent-dir`、`PI_CODING_AGENT_DIR`、`~/.pi/agent` 解析。`--pi-agent-dir` 不会覆盖明确的 session directory。
 - Claude Code 的普通 `~/.claude`/`CLAUDE_CONFIG_DIR` 清单和逐项删除可在 Windows、macOS 和 Linux 使用；Cindy profile 的自动发现仍受上一条 Windows 边界约束。
 
-安装后通常使用 `codex-session-janitor` 命令。如果 pip 安装的 console script 尚未进入 `PATH`，所有示例都可以改用 `python -m codex_session_janitor`（macOS/Linux 常用 `python3 -m codex_session_janitor`）。
+安装后通常使用 `local-agent-record-janitor` 命令。如果 pip 安装的 console script 尚未进入 `PATH`，所有示例都可以改用 `python -m local_agent_record_janitor`（macOS/Linux 常用 `python3 -m local_agent_record_janitor`）。
 
 ### Windows PowerShell
 
 ```powershell
-git clone https://github.com/SchweppesSoda/codex-session-janitor.git
-Set-Location codex-session-janitor
+git clone https://github.com/SchweppesSoda/local-agent-record-janitor.git
+Set-Location local-agent-record-janitor
 python -m pip install -e .
 
-codex-session-janitor scan --platform native
-codex-session-janitor clean --platform native --thread-id 0198abcd
-codex-session-janitor clean --platform native --thread-id 0198abcd --yes
+local-agent-record-janitor scan --platform native
+local-agent-record-janitor clean --platform native --thread-id 0198abcd
+local-agent-record-janitor clean --platform native --thread-id 0198abcd --yes
 
 # PATH fallback
-python -m codex_session_janitor scan --platform native
+python -m local_agent_record_janitor scan --platform native
 ```
 
 ### Windows cmd.exe
 
 ```bat
-git clone https://github.com/SchweppesSoda/codex-session-janitor.git
-cd /d codex-session-janitor
+git clone https://github.com/SchweppesSoda/local-agent-record-janitor.git
+cd /d local-agent-record-janitor
 python -m pip install -e .
 
-codex-session-janitor scan --platform native
-codex-session-janitor clean --platform native --thread-id 0198abcd
-codex-session-janitor clean --platform native --thread-id 0198abcd --yes
+local-agent-record-janitor scan --platform native
+local-agent-record-janitor clean --platform native --thread-id 0198abcd
+local-agent-record-janitor clean --platform native --thread-id 0198abcd --yes
 
 rem PATH fallback
-python -m codex_session_janitor scan --platform native
+python -m local_agent_record_janitor scan --platform native
 ```
 
 ### macOS / Linux sh
 
 ```sh
-git clone https://github.com/SchweppesSoda/codex-session-janitor.git
-cd codex-session-janitor
+git clone https://github.com/SchweppesSoda/local-agent-record-janitor.git
+cd local-agent-record-janitor
 python3 -m pip install -e .
 
-codex-session-janitor scan --platform native
-codex-session-janitor clean --platform native --thread-id 0198abcd
-codex-session-janitor clean --platform native --thread-id 0198abcd --yes
+local-agent-record-janitor scan --platform native
+local-agent-record-janitor clean --platform native --thread-id 0198abcd
+local-agent-record-janitor clean --platform native --thread-id 0198abcd --yes
 
 # PATH fallback
-python3 -m codex_session_janitor scan --platform native
+python3 -m local_agent_record_janitor scan --platform native
 ```
 
 ## 快速开始
@@ -155,16 +162,16 @@ python3 -m codex_session_janitor scan --platform native
 先关闭 AionUI、Cindy 和正在使用同一 `CODEX_HOME` 的 Codex 客户端，再扫描：
 
 ```powershell
-codex-session-janitor scan
+local-agent-record-janitor scan
 ```
 
 列出全部正常/异常 Codex thread 及 Cindy/AionUI frontend reference：
 
 ```powershell
-codex-session-janitor records
-codex-session-janitor records --platform cindy --limit 50
-codex-session-janitor records --thread-id 0198abcd
-codex-session-janitor records --json
+local-agent-record-janitor records
+local-agent-record-janitor records --platform cindy --limit 50
+local-agent-record-janitor records --thread-id 0198abcd
+local-agent-record-janitor records --json
 ```
 
 `records` 只读聚合 `state_5.sqlite`、活动/归档 rollout、旧索引和 frontend
@@ -175,9 +182,9 @@ Codex thread ID 的前端记录也会显示，但不能删除；已知 Cindy pro
 Pi session 使用独立清单，不会伪装成 Codex native store。只查看 Pi：
 
 ```powershell
-codex-session-janitor records --platform pi
-codex-session-janitor records --platform pi --pi-agent-dir "$HOME/.pi/agent"
-codex-session-janitor records --platform pi --pi-session-dir 'D:\PiSessions' --json
+local-agent-record-janitor records --platform pi
+local-agent-record-janitor records --platform pi --pi-agent-dir "$HOME/.pi/agent"
+local-agent-record-janitor records --platform pi --pi-session-dir 'D:\PiSessions' --json
 ```
 
 默认或 `--platform all` 的 `records --json` 保留既有 Codex `records`、`errors` 和 `count` 字段，并另外包含 `pi_sessions`、`pi_failures`、`pi_count` 与 `total_count`。Pi 只提取结构/展示所需元数据：会话 ID、精确文件路径与状态、版本、时间、cwd、父/子会话关系、会话名称、provider/model 以及是否使用 OpenAI Codex；不保留或输出 message、thinking、tool 参数或聊天正文。默认布局只扫描 `root/<project>/*.jsonl`，自定义 sessionDir 扫描 `root/*.jsonl`；兼容模式最多检查两层，绝不无界递归。
@@ -185,9 +192,9 @@ codex-session-janitor records --platform pi --pi-session-dir 'D:\PiSessions' --j
 Claude Code session 使用独立清单：
 
 ```powershell
-codex-session-janitor records --platform claude
-codex-session-janitor records --platform claude --claude-config-dir "$HOME/.claude" --json
-codex-session-janitor delete --platform claude --session-id 完整UUID --json
+local-agent-record-janitor records --platform claude
+local-agent-record-janitor records --platform claude --claude-config-dir "$HOME/.claude" --json
+local-agent-record-janitor delete --platform claude --session-id 完整UUID --json
 ```
 
 Claude config root 按 `--claude-config-dir`、`CLAUDE_CONFIG_DIR`、`~/.claude` 解析。默认/all JSON 另含 `claude_sessions`、`claude_failures`、`claude_count`，`total_count = count + pi_count + claude_count`。Claude Code 当前没有本地逐 session 官方删除命令；官方 `claude project purge` 是项目级 purge，不能用于本工具的逐项选择。因此本工具执行精确文件 manifest 删除：除 transcript 和旧式 `<root>/<session-id>` 路径外，还支持当前的 `debug/<session-id>.txt` 与严格匹配的 `todos/<session-id>-agent-<safe-token>.json` 普通文件。相似前缀、其他 session、credentials、settings、plugins、skills、agents、commands、project memory、`CLAUDE.md`、stats cache 和共享 history/index 均保留；这不等于清空整个 Claude 配置。
@@ -203,7 +210,7 @@ reference guard，不会因为显示过滤而放宽删除检查。
 TTY 中逐项选择任意记录永久删除：
 
 ```powershell
-codex-session-janitor delete
+local-agent-record-janitor delete
 ```
 
 输入编号或范围（例如 `1,3-4`）；`delete` 不接受 `all`。Codex 最终计划会展示完整
@@ -214,9 +221,9 @@ Cindy/AionUI frontend reference。输入专用确认句 `客户端已关闭并�
 非 TTY/自动化必须先明确目标做一次预览；预览退出码为 `2`，JSON 中包含所选范围的 `plan_fingerprint`：
 
 ```powershell
-codex-session-janitor delete --thread-id 0198abcd --json
+local-agent-record-janitor delete --thread-id 0198abcd --json
 
-codex-session-janitor delete --action-id 完整动作ID `
+local-agent-record-janitor delete --action-id 完整动作ID `
   --plan-fingerprint 完整所选计划指纹 `
   --clients-closed --yes --json
 ```
@@ -229,10 +236,10 @@ Pi 删除使用 Pi 的公开语义：永久删除一份精确批准的本地 `.j
 
 ```powershell
 # 先生成只读 JSON 预览，获得 session_id/action_id 和 plan_fingerprint
-codex-session-janitor delete --platform pi --session-id 完整Pi会话ID --json
+local-agent-record-janitor delete --platform pi --session-id 完整Pi会话ID --json
 
 # 非 TTY 执行：必须绑定预览指纹并声明 Pi 客户端已关闭
-codex-session-janitor delete --platform pi --session-id 完整Pi会话ID `
+local-agent-record-janitor delete --platform pi --session-id 完整Pi会话ID `
   --plan-fingerprint 完整所选计划指纹 --clients-closed --yes --json
 ```
 
@@ -241,21 +248,21 @@ TTY 可在 Pi 清单显示后输入一个临时编号；不支持 `all`。默认
 仅扫描一个来源：
 
 ```powershell
-codex-session-janitor scan --platform aionui
-codex-session-janitor scan --platform cindy
-codex-session-janitor scan --platform native
+local-agent-record-janitor scan --platform aionui
+local-agent-record-janitor scan --platform cindy
+local-agent-record-janitor scan --platform native
 ```
 
 输出机器可读 JSON：
 
 ```powershell
-codex-session-janitor scan --platform all --json
+local-agent-record-janitor scan --platform all --json
 ```
 
 按完整 Codex thread ID（`thread_id`）或唯一前缀缩小范围：
 
 ```powershell
-codex-session-janitor scan --thread-id 0198abcd
+local-agent-record-janitor scan --thread-id 0198abcd
 ```
 
 交互查看所有问题。输出按保存位置列出候选目标；每个目标展示 thread 名称、项目与
@@ -263,7 +270,7 @@ codex-session-janitor scan --thread-id 0198abcd
 索引/归档/originator、元数据来源与冲突。每个候选动作都有临时编号：
 
 ```powershell
-codex-session-janitor clean
+local-agent-record-janitor clean
 ```
 
 可输入 `1,3-5` 明确选择动作；输入 `all` 只会选择允许批量纳入的 `low` 风险动作。标记为“必须逐项选择”的动作即使是 `low` 风险，也不会被 `all` 纳入。临时编号只在本次扫描和当前进程有效，不能保存给自动化使用。
@@ -276,27 +283,27 @@ TTY 交互会在同一进程中完整展示最终计划。Codex thread 硬删除
 按完整 Codex thread ID（`thread_id`）或唯一前缀选择单个目标；TTY 仍会展示最终计划并要求确认：
 
 ```powershell
-codex-session-janitor clean --thread-id 0198abcd
+local-agent-record-janitor clean --thread-id 0198abcd
 ```
 
 自动化应先读取计划 JSON，再使用其中的完整稳定 action ID：
 
 ```powershell
-codex-session-janitor clean --json
-codex-session-janitor clean --action-id delete_conversation-完整动作ID
+local-agent-record-janitor clean --json
+local-agent-record-janitor clean --action-id delete_conversation-完整动作ID
 ```
 
 确认备份、目标和影响范围无误后才执行：
 
 ```powershell
-codex-session-janitor clean --thread-id 0198abcd --yes
-codex-session-janitor clean --action-id delete_conversation-完整动作ID --yes
+local-agent-record-janitor clean --thread-id 0198abcd --yes
+local-agent-record-janitor clean --action-id delete_conversation-完整动作ID --yes
 ```
 
 非 TTY 执行 `review` 或 `high` 风险动作时，还必须把刚才计划 JSON 的完整 `plan_fingerprint` 原样传回；执行前的全局计划或所选动作范围发生变化都会停止：
 
 ```powershell
-codex-session-janitor clean --action-id delete_conversation-完整动作ID `
+local-agent-record-janitor clean --action-id delete_conversation-完整动作ID `
   --plan-fingerprint 完整计划指纹 --yes
 ```
 
@@ -305,11 +312,11 @@ codex-session-janitor clean --action-id delete_conversation-完整动作ID `
 AionUI 和 Cindy 后，可用计划中的修复 action ID 执行；结果会返回 backup ID：
 
 ```powershell
-codex-session-janitor clean --platform native --json
-codex-session-janitor clean --action-id repair_legacy_index-完整动作ID `
+local-agent-record-janitor clean --platform native --json
+local-agent-record-janitor clean --action-id repair_legacy_index-完整动作ID `
   --plan-fingerprint 完整计划指纹 --clients-closed --yes
 
-codex-session-janitor restore-legacy-index --codex-home 'D:\CodexData' `
+local-agent-record-janitor restore-legacy-index --codex-home 'D:\CodexData' `
   --backup-id 完整备份ID --clients-closed --yes
 ```
 
@@ -321,10 +328,10 @@ codex-session-janitor restore-legacy-index --codex-home 'D:\CodexData' `
 
 ```powershell
 $env:CODEX_HOME = 'D:\CodexData'
-codex-session-janitor scan --platform native
+local-agent-record-janitor scan --platform native
 
-codex-session-janitor scan --platform native --codex-home 'D:\CodexData'
-codex-session-janitor clean --platform native --codex-home 'D:\CodexData' `
+local-agent-record-janitor scan --platform native --codex-home 'D:\CodexData'
+local-agent-record-janitor clean --platform native --codex-home 'D:\CodexData' `
   --codex-bin 'C:\path\to\codex.exe' --thread-id 0198abcd
 ```
 
@@ -432,7 +439,7 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 - [给上游项目的修复建议](docs/upstream-fixes.md)
 - [全量记录与选择性删除设计及 review](docs/selective-record-management-design.md)
 - [Pi Agent 支持设计](docs/pi-agent-support-design.md)
-- [多引擎本地 Agent 记录清理设计](docs/multi-engine-session-cleanup-design.md)
+- [多引擎本地 Agent 记录清理设计](docs/multi-engine-record-cleanup-design.md)
 - [安全政策与操作清单](SECURITY.md)
 
 ## 开发

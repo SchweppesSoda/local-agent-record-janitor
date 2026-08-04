@@ -3,7 +3,8 @@
 Local Agent Record Janitor / 本地 Agent 记录清理器处理本地聊天记录、数据库和不可
 恢复的删除操作。跨引擎对象称为原生记录：Codex 使用 thread，Pi Agent 与 Claude Code
 使用 session；Cindy/AionUI 数据库行是只读 frontend reference。安全目标首先是
-**避免误删**，其次才是回收残留数据。历史包名和命令 `codex-session-janitor` 保持不变。
+**避免误删**，其次才是回收残留数据。仓库、发行包和命令统一使用
+`local-agent-record-janitor`，Python 模块统一使用 `local_agent_record_janitor`。
 
 ## 支持状态
 
@@ -193,7 +194,7 @@ Claude 直接文件删除只允许 `delete --platform claude`，并绑定 `(conf
 
 不要在 SQLite 仍有写入进程时只复制主 `.db` 文件。恢复时也应先关闭所有使用这些目录的进程，并恢复为一个一致的完整快照。
 
-旧索引修复器生成的局部备份位于对应 `CODEX_HOME/.codex-session-janitor/legacy-index-backups/<backup-id>/`。它用于精确撤销该次旧索引替换，不能代替执行会话硬删除前对完整 `CODEX_HOME` 的外部备份。
+旧索引修复器生成的局部备份位于对应 `CODEX_HOME/.local-agent-record-janitor/legacy-index-backups/<backup-id>/`。它用于精确撤销该次旧索引替换，不能代替执行会话硬删除前对完整 `CODEX_HOME` 的外部备份。
 
 ## 报告漏洞
 

@@ -111,8 +111,8 @@ AionUI conversation
 增加两个独立子命令：
 
 ~~~text
-codex-session-janitor records [通用来源/路径参数]
-codex-session-janitor delete  [通用来源/路径参数] [选择与确认参数]
+local-agent-record-janitor records [通用来源/路径参数]
+local-agent-record-janitor delete  [通用来源/路径参数] [选择与确认参数]
 ~~~
 
 records 始终只读：

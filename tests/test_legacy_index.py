@@ -10,7 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
-from codex_session_janitor.legacy_index import (
+from local_agent_record_janitor.legacy_index import (
     LegacyIndexInventoryError,
     LegacyIndexManifestError,
     LegacyIndexOperationError,
@@ -189,7 +189,7 @@ class LegacyIndexTests(unittest.TestCase):
         self.assertEqual(index.read_bytes(), original)
         backup_root = (
             self.codex_home
-            / ".codex-session-janitor"
+            / ".local-agent-record-janitor"
             / "legacy-index-backups"
         )
         self.assertEqual(list(backup_root.iterdir()), [])
@@ -271,7 +271,7 @@ class LegacyIndexTests(unittest.TestCase):
         sessions = self.codex_home / "sessions"
         sessions.mkdir()
         with mock.patch(
-            "codex_session_janitor.legacy_index.os.scandir",
+            "local_agent_record_janitor.legacy_index.os.scandir",
             side_effect=PermissionError("denied"),
         ):
             with self.assertRaises(LegacyIndexInventoryError):
@@ -279,7 +279,7 @@ class LegacyIndexTests(unittest.TestCase):
 
         self._write_rollout("live-rollout")
         with mock.patch(
-            "codex_session_janitor.legacy_index._read_stable_first_line",
+            "local_agent_record_janitor.legacy_index._read_stable_first_line",
             side_effect=PermissionError("denied"),
         ):
             with self.assertRaises(PermissionError):
@@ -330,7 +330,7 @@ class LegacyIndexTests(unittest.TestCase):
         approved = inventory_legacy_index(self.codex_home)
 
         with mock.patch(
-            "codex_session_janitor.legacy_index.os.replace",
+            "local_agent_record_janitor.legacy_index.os.replace",
             side_effect=OSError("replace failed"),
         ):
             with self.assertRaises(LegacyIndexOperationError) as captured:
@@ -345,7 +345,7 @@ class LegacyIndexTests(unittest.TestCase):
         self.assertEqual(index.read_bytes(), original)
         backup = (
             self.codex_home
-            / ".codex-session-janitor"
+            / ".local-agent-record-janitor"
             / "legacy-index-backups"
             / str(error.backup_id)
             / "session_index.jsonl.before"
@@ -358,7 +358,7 @@ class LegacyIndexTests(unittest.TestCase):
         approved = inventory_legacy_index(self.codex_home)
         expected = b""
 
-        from codex_session_janitor import legacy_index as implementation
+        from local_agent_record_janitor import legacy_index as implementation
 
         real_fsync_directory = implementation._fsync_directory
 

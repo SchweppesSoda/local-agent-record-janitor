@@ -9,15 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codex_session_janitor.adapters.native import NativeIntegrityAdapter
-from codex_session_janitor.cleaner import (
+from local_agent_record_janitor.adapters.native import NativeIntegrityAdapter
+from local_agent_record_janitor.cleaner import (
     CleanupReport,
     CleanupResult,
     ExpectedDeletionScope,
     finding_key,
     scan_adapters,
 )
-from codex_session_janitor.cli import (
+from local_agent_record_janitor.cli import (
     ActionSelectionError,
     EXIT_CONFIRMATION_REQUIRED,
     EXIT_ERROR,
@@ -38,8 +38,8 @@ from codex_session_janitor.cli import (
     _write_action_catalog,
     _write_selected_action_plan,
 )
-from codex_session_janitor.models import ConversationSummary, Finding
-from codex_session_janitor.planning import build_cleanup_plan
+from local_agent_record_janitor.models import ConversationSummary, Finding
+from local_agent_record_janitor.planning import build_cleanup_plan
 from tests.support import create_cindy_database, create_thread_index, write_rollout
 
 
@@ -63,6 +63,8 @@ class NumberSelectionTests(unittest.TestCase):
     def test_codex_location_arguments_are_public_and_explained(self) -> None:
         parser = build_parser()
         root_help = parser.format_help()
+        self.assertEqual(parser.prog, "local-agent-record-janitor")
+        self.assertIn("local-agent-record-janitor", root_help)
         self.assertIn("检查前端残留", root_help)
         self.assertIn("用法：", root_help)
         self.assertIn("命令", root_help)
@@ -99,7 +101,7 @@ class NumberSelectionTests(unittest.TestCase):
                         errors = StringIO()
                         with (
                             patch(
-                                "codex_session_janitor.cli.scan_adapters"
+                                "local_agent_record_janitor.cli.scan_adapters"
                             ) as scan,
                             redirect_stderr(errors),
                             self.assertRaises(SystemExit) as raised,
@@ -1259,7 +1261,7 @@ class MainFlowTests(unittest.TestCase):
         plan.actions[0].requires_explicit_selection = True
         output = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=plan,
         ):
             result = main(
@@ -1277,7 +1279,7 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         errors = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=_display_plan(),
         ):
             result = main(
@@ -1296,7 +1298,7 @@ class MainFlowTests(unittest.TestCase):
         plan.plan_fingerprint = "approved-plan"
         output = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=plan,
         ):
             result = main(
@@ -1410,7 +1412,7 @@ class MainFlowTests(unittest.TestCase):
     def test_json_yes_without_selector_is_one_complete_document(self) -> None:
         output = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=_display_plan(),
         ):
             result = main(
@@ -1439,15 +1441,15 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 side_effect=(plan, plan),
             ),
             patch(
-                "codex_session_janitor.cli._findings_for_actions",
+                "local_agent_record_janitor.cli._findings_for_actions",
                 return_value=[finding],
             ),
             patch(
-                "codex_session_janitor.cli.clean_findings",
+                "local_agent_record_janitor.cli.clean_findings",
                 return_value=cleanup_report,
             ) as clean,
         ):
@@ -1589,15 +1591,15 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 side_effect=(plan, plan),
             ),
             patch(
-                "codex_session_janitor.cli._findings_for_actions",
+                "local_agent_record_janitor.cli._findings_for_actions",
                 return_value=[finding],
             ),
             patch(
-                "codex_session_janitor.cli.clean_findings",
+                "local_agent_record_janitor.cli.clean_findings",
                 return_value=cleanup_report,
             ) as clean,
         ):
@@ -1645,15 +1647,15 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 side_effect=(plan, plan),
             ),
             patch(
-                "codex_session_janitor.cli._findings_for_actions",
+                "local_agent_record_janitor.cli._findings_for_actions",
                 return_value=[finding],
             ),
             patch(
-                "codex_session_janitor.cli.clean_findings",
+                "local_agent_record_janitor.cli.clean_findings",
                 return_value=CleanupReport(planned=[finding]),
             ) as clean,
         ):
@@ -1687,7 +1689,7 @@ class MainFlowTests(unittest.TestCase):
         plan = _display_plan()
         output = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=plan,
         ):
             result = main(
@@ -1724,15 +1726,15 @@ class MainFlowTests(unittest.TestCase):
         output = _FakeTTY()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 side_effect=(plan, plan),
             ),
             patch(
-                "codex_session_janitor.cli._findings_for_actions",
+                "local_agent_record_janitor.cli._findings_for_actions",
                 return_value=[finding],
             ),
             patch(
-                "codex_session_janitor.cli.clean_findings",
+                "local_agent_record_janitor.cli.clean_findings",
                 return_value=report,
             ) as clean,
         ):
@@ -1752,10 +1754,10 @@ class MainFlowTests(unittest.TestCase):
         output = _FakeTTY()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 return_value=plan,
             ),
-            patch("codex_session_janitor.cli.clean_findings") as clean,
+            patch("local_agent_record_janitor.cli.clean_findings") as clean,
         ):
             result = main(
                 ("clean",),
@@ -1773,10 +1775,10 @@ class MainFlowTests(unittest.TestCase):
         output = _FakeTTY()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 return_value=plan,
             ),
-            patch("codex_session_janitor.cli.clean_findings") as clean,
+            patch("local_agent_record_janitor.cli.clean_findings") as clean,
         ):
             result = main(
                 ("clean",),
@@ -1796,10 +1798,10 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         with (
             patch(
-                "codex_session_janitor.planning.build_cleanup_plan",
+                "local_agent_record_janitor.planning.build_cleanup_plan",
                 return_value=plan,
             ),
-            patch("codex_session_janitor.cli.clean_findings") as clean,
+            patch("local_agent_record_janitor.cli.clean_findings") as clean,
         ):
             result = main(
                 ("clean",),
@@ -1819,7 +1821,7 @@ class MainFlowTests(unittest.TestCase):
         plan.actions[0].action_id = "keep:storage-one:conversation"
         output = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             return_value=plan,
         ):
             result = main(
@@ -1843,7 +1845,7 @@ class MainFlowTests(unittest.TestCase):
         output = StringIO()
         errors = StringIO()
         with patch(
-            "codex_session_janitor.planning.build_cleanup_plan",
+            "local_agent_record_janitor.planning.build_cleanup_plan",
             side_effect=(initial, changed),
         ):
             result = main(

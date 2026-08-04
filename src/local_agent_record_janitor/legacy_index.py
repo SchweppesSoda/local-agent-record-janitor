@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping
 
 
-_CONTROL_DIRECTORY = ".codex-session-janitor"
+_CONTROL_DIRECTORY = ".local-agent-record-janitor"
 _BACKUP_DIRECTORY = "legacy-index-backups"
 _LOCK_FILE = "legacy-index.lock"
 _INDEX_FILE = "session_index.jsonl"

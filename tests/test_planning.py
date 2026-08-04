@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codex_session_janitor.cleaner import ExpectedDeletionScope
-from codex_session_janitor.codex_state import rollout_state_fingerprint
-from codex_session_janitor.models import Finding, RolloutRecord
-from codex_session_janitor.planning import (
+from local_agent_record_janitor.cleaner import ExpectedDeletionScope
+from local_agent_record_janitor.codex_state import rollout_state_fingerprint
+from local_agent_record_janitor.models import Finding, RolloutRecord
+from local_agent_record_janitor.planning import (
     ActionKind,
     RiskLevel,
     ScanStatus,
@@ -185,7 +185,7 @@ class CleanupPlanningTests(unittest.TestCase):
                 "index_missing_rollout",
             )
             with patch(
-                "codex_session_janitor.planning.rollout_state_fingerprint",
+                "local_agent_record_janitor.planning.rollout_state_fingerprint",
                 side_effect=OSError("stat access denied"),
             ):
                 plan = build_cleanup_plan(
