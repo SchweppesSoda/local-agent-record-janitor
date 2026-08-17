@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -69,6 +70,7 @@ _ACTION_LABELS = {
     "repair_legacy_index": "修复旧版聚合索引",
     "quarantine_artifacts": "隔离对话数据",
     "remove_frontend_reference": "清除前端残留引用",
+    "remove_desktop_state": "清除 Codex Desktop 宿主残留状态",
     "keep": "保留，不做更改",
 }
 _PROBLEM_LABELS = {
@@ -81,6 +83,9 @@ _PROBLEM_LABELS = {
     "residual_spawn_edge": "对话关联记录指向不存在的对话",
     "legacy_index_only": "旧版对话列表记录缺少内容文件",
     "frontend_deleted_reference": "前端对话已删除，但 Codex 对话引用仍存在",
+    "desktop_state_orphan": (
+        "原生 thread 已删除，但 Codex Desktop 目录/UI 状态仍残留"
+    ),
 }
 _UNIMPLEMENTED_ACTION_REASONS = {
     "remove_broken_relation": (
@@ -547,10 +552,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     clean = subparsers.add_parser(
         "clean",
-        help="生成动作计划，并通过官方 Codex app-server 清理明确选择的对话",
+        help="生成动作计划，清理原生 thread 或经验证的 Desktop 宿主残留",
         description=(
             "生成保守的动作计划，并通过官方 Codex app-server "
-            "清理明确选择且重验证通过的对话。"
+            "清理明确选择且重验证通过的对话；原生记录已消失但 "
+            "Desktop 宿主目录仍残留时，使用独立的高风险精确清理动作。"
         ),
     )
     _add_common_arguments(clean)
@@ -3017,6 +3023,7 @@ def _run_planned_cleanup(
         not in {
             "delete_conversation",
             "repair_legacy_index",
+            "remove_desktop_state",
             "keep",
         }
     ]
@@ -3096,7 +3103,11 @@ def _run_planned_cleanup(
         action
         for action in selected_actions
         if _enum_value(action.kind)
-        in {"delete_conversation", "repair_legacy_index"}
+        in {
+            "delete_conversation",
+            "repair_legacy_index",
+            "remove_desktop_state",
+        }
     ]
     mutation_kinds = {
         _enum_value(action.kind)
@@ -3105,7 +3116,8 @@ def _run_planned_cleanup(
     if len(mutation_kinds) > 1:
         return _emit_action_selection_error(
             ActionSelectionError(
-                "旧版聚合索引修复不能与不可恢复的会话删除混在同一执行中；"
+                "原生 thread 删除、旧版聚合索引修复和 Desktop 宿主残留"
+                "清理不能混在同一执行中；"
                 "请分别复核和执行。",
                 kind="mixed_mutation_kinds",
                 matches=[
@@ -3123,6 +3135,11 @@ def _run_planned_cleanup(
         for action in mutation_actions
         if _enum_value(action.kind) == "repair_legacy_index"
     ]
+    desktop_actions = [
+        action
+        for action in mutation_actions
+        if _enum_value(action.kind) == "remove_desktop_state"
+    ]
     if len(legacy_actions) > 1:
         return _emit_action_selection_error(
             ActionSelectionError(
@@ -3132,6 +3149,21 @@ def _run_planned_cleanup(
                     str(action.action_id)
                     for action in legacy_actions
                 ],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    if desktop_actions and len(
+        {str(action.target.storage_id) for action in desktop_actions}
+    ) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "一次 Desktop 宿主残留清理只能处理一个 Codex 数据目录；"
+                "请按数据目录分别执行。",
+                kind="multiple_desktop_storages",
+                matches=[str(action.action_id) for action in desktop_actions],
             ),
             plan=plan,
             json_output=args.json,
@@ -3163,13 +3195,18 @@ def _run_planned_cleanup(
             else:
                 stdout.write("没有动作进入执行计划；未做任何更改。\n")
         return EXIT_OK
-    if legacy_actions and args.yes and not args.clients_closed:
+    if (legacy_actions or desktop_actions) and args.yes and not args.clients_closed:
+        mutation_label = (
+            "清理 Codex Desktop 宿主残留"
+            if desktop_actions
+            else "修复旧版聚合索引"
+        )
         return _emit_action_selection_error(
             ActionSelectionError(
-                "使用 --yes 修复旧版聚合索引前，必须先关闭使用同一数据目录的 "
+                f"使用 --yes {mutation_label}前，必须先关闭使用同一数据目录的 "
                 "Codex、AionUI 和 Cindy 客户端，并显式提供 --clients-closed。",
                 kind="clients_closed_ack_required",
-                matches=[str(legacy_actions[0].action_id)],
+                matches=[str(action.action_id) for action in (legacy_actions or desktop_actions)],
             ),
             plan=plan,
             json_output=args.json,
@@ -3185,6 +3222,13 @@ def _run_planned_cleanup(
                     "输入其他内容取消："
                 )
                 required_confirmation = "客户端已关闭并确认修复"
+            elif desktop_actions:
+                stdout.write(
+                    "\n请先关闭使用同一数据目录的 Codex/ChatGPT Desktop、"
+                    "AionUI 和 Cindy。清理会创建可验证备份。请输入"
+                    "“客户端已关闭并确认清理桌面残留”继续，输入其他内容取消："
+                )
+                required_confirmation = "客户端已关闭并确认清理桌面残留"
             else:
                 stdout.write(
                     "\n删除不可恢复。请输入“确认删除”继续，"
@@ -3206,6 +3250,12 @@ def _run_planned_cleanup(
                         "未做任何更改。确认文件、严格清单和输出哈希后，"
                         "关闭相关客户端，再使用同一 action ID、计划指纹、"
                         "--clients-closed 与 --yes 执行。\n"
+                    )
+                elif desktop_actions:
+                    stdout.write(
+                        "未做任何更改。复核 Desktop 宿主目录行、全局状态引用"
+                        "和计划指纹后，关闭相关客户端，再使用同一 action ID、"
+                        "计划指纹、--clients-closed 与 --yes 执行。\n"
                     )
                 else:
                     stdout.write(
@@ -3341,6 +3391,87 @@ def _run_planned_cleanup(
         )
         return EXIT_OK
 
+    fresh_desktop_actions = [
+        action
+        for action in fresh_actions
+        if _enum_value(action.kind) == "remove_desktop_state"
+    ]
+    if fresh_desktop_actions:
+        from .codex_desktop_state import (
+            DesktopStateError,
+            execute_desktop_state_cleanup,
+        )
+
+        storage_id = str(fresh_desktop_actions[0].target.storage_id)
+        storage = next(
+            (
+                current
+                for current in revalidated_plan.storages
+                if str(current.storage_id) == storage_id
+            ),
+            None,
+        )
+        if storage is None:
+            return _emit_action_selection_error(
+                ActionSelectionError(
+                    "无法把 Desktop 宿主残留动作映射回其数据目录，已停止执行。",
+                    kind="evidence_changed",
+                    matches=[
+                        str(action.action_id)
+                        for action in fresh_desktop_actions
+                    ],
+                ),
+                plan=revalidated_plan,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        try:
+            approved_desktop_snapshots = {
+                str(action.target.thread_id): (
+                    _desktop_state_snapshot_fingerprint(
+                        action,
+                        revalidated_plan,
+                    )
+                )
+                for action in fresh_desktop_actions
+            }
+            desktop_result = execute_desktop_state_cleanup(
+                Path(storage.path),
+                approved_desktop_snapshots,
+            )
+        except (ActionSelectionError, DesktopStateError) as exc:
+            return _emit_fatal_error(
+                "clean",
+                exc,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if args.json:
+            _write_json(
+                {
+                    "command": "clean",
+                    "mutation_kind": "remove_desktop_state",
+                    "selected_action_ids": [
+                        str(action.action_id)
+                        for action in fresh_desktop_actions
+                    ],
+                    "result": desktop_result.to_dict(),
+                    "plan_fingerprint": revalidated_plan.plan_fingerprint,
+                },
+                stdout,
+            )
+        else:
+            stdout.write(
+                "Codex Desktop 宿主残留已清理："
+                f"{len(desktop_result.thread_ids)} 个 task，"
+                f"{desktop_result.deleted_catalog_rows} 条目录记录，"
+                f"{desktop_result.removed_global_state_references} 条精确 UI 引用。\n"
+                f"可验证备份：{desktop_result.backup_directory}\n"
+            )
+        return EXIT_OK
+
     selected_findings = _findings_for_actions(
         fresh_actions,
         revalidated_plan,
@@ -3462,6 +3593,38 @@ def _run_planned_cleanup(
         stderr=stderr,
     )
     return EXIT_OK if cleanup_report.ok else EXIT_ERROR
+
+
+def _desktop_state_snapshot_fingerprint(action: Any, plan: Any) -> str:
+    observation_ids = {
+        str(value) for value in getattr(action, "observation_ids", ())
+    }
+    matches = [
+        observation
+        for observation in getattr(plan, "observations", ())
+        if str(getattr(observation, "observation_id", ""))
+        in observation_ids
+        and str(getattr(observation, "finding_type", ""))
+        == "desktop_state_orphan"
+        and str(getattr(observation.target, "thread_id", ""))
+        == str(action.target.thread_id)
+    ]
+    if len(matches) != 1:
+        raise ActionSelectionError(
+            "Desktop 宿主残留动作没有唯一的已批准状态快照。",
+            kind="evidence_changed",
+            matches=[str(action.action_id)],
+        )
+    fingerprint = matches[0].details.get(
+        "desktop_state_snapshot_fingerprint"
+    )
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ActionSelectionError(
+            "Desktop 宿主残留动作缺少完整状态指纹。",
+            kind="evidence_changed",
+            matches=[str(action.action_id)],
+        )
+    return fingerprint
 
 
 def _integrity_delete_approvals(
@@ -3701,6 +3864,10 @@ def _filter_candidate_platforms(
             finding
             for finding in report.findings
             if finding.platform.lower() in selected
+            or (
+                finding.platform.lower() == "codex-desktop"
+                and "native" in selected
+            )
         ],
         # Guard/scanner failures remain global cleanup blockers even when the
         # corresponding platform is not a requested candidate source.
@@ -3788,6 +3955,42 @@ def _scan_conversation_summaries(
             )
         except Exception:
             current = {}
+        for thread_id, summary in tuple(current.items()):
+            if summary.display_name is not None:
+                continue
+            desktop_title = next(
+                (
+                    title
+                    for finding in findings
+                    if normalize_storage_path(finding.codex_home) == home
+                    and finding.thread_id == thread_id
+                    and finding.details.get("finding_type")
+                    == "desktop_state_orphan"
+                    for title in finding.details.get(
+                        "desktop_catalog_titles", ()
+                    )
+                    if isinstance(title, str) and title
+                ),
+                None,
+            )
+            if desktop_title is None:
+                continue
+            current[thread_id] = replace(
+                summary,
+                title=desktop_title,
+                display_name=desktop_title,
+                display_name_source=(
+                    "codex-desktop.local_thread_catalog"
+                ),
+                metadata_sources=tuple(
+                    dict.fromkeys(
+                        (
+                            *summary.metadata_sources,
+                            "codex-desktop.local_thread_catalog",
+                        )
+                    )
+                ),
+            )
         summaries.update(
             ((home, thread_id), summary)
             for thread_id, summary in current.items()

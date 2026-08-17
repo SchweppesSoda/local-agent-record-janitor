@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from ..codex_desktop_state import DesktopStateError, read_desktop_state
 from ..codex_state import _read_rollout_meta
 from ..discovery import discover_path_codex
 from ..models import Finding, RolloutRecord
@@ -74,6 +75,13 @@ class NativeIntegrityAdapter(FrontendAdapter):
             )
         )
 
+        try:
+            findings.extend(self._scan_desktop_state(threads, rollouts))
+        except DesktopStateError as exc:
+            raise NativeIntegrityError(
+                f"Could not read Codex Desktop host state: {exc}"
+            ) from exc
+
         legacy_finding = self._scan_legacy_session_index(threads, rollouts)
         if legacy_finding is not None:
             findings.append(legacy_finding)
@@ -86,6 +94,125 @@ class NativeIntegrityAdapter(FrontendAdapter):
                 finding.platform_session_id,
             ),
         )
+
+    def list_sessions(self) -> list[Any]:
+        """Expose Codex Desktop catalog rows to the unified read-only catalog."""
+
+        try:
+            snapshot = read_desktop_state(self.codex_home)
+        except DesktopStateError as exc:
+            raise NativeIntegrityError(
+                f"Could not read Codex Desktop host state: {exc}"
+            ) from exc
+        if snapshot.database is None:
+            return []
+
+        # Import lazily to keep the adapter/inventory compatibility boundary
+        # free of a module-level cycle.
+        from ..inventory import FrontendSessionRecord
+
+        sessions: list[FrontendSessionRecord] = []
+        for thread_id, state in sorted(snapshot.threads.items()):
+            for record in state.catalog_records:
+                sessions.append(
+                    FrontendSessionRecord(
+                        platform="codex-desktop",
+                        platform_session_id=(
+                            f"{record.host_id}:{record.thread_id}"
+                        ),
+                        thread_id=thread_id,
+                        database=record.database,
+                        codex_home=self.codex_home,
+                        backend="codex",
+                        status="cataloged",
+                        title=record.title,
+                        # This is a host catalog/cache reference, not an
+                        # independent live-session ownership guard.
+                        is_live=False,
+                        details={
+                            "reference_kind": "desktop_host_catalog",
+                            "host_id": record.host_id,
+                            "snapshot_fingerprint": (
+                                state.snapshot_fingerprint
+                            ),
+                            "global_state_reference_count": (
+                                state.exact_reference_count
+                            ),
+                        },
+                        codex_bin_hint=self.codex_bin_hint,
+                    )
+                )
+        return sessions
+
+    def _scan_desktop_state(
+        self,
+        threads: dict[str, dict[str, Any]],
+        rollouts: dict[str, list[RolloutRecord]],
+    ) -> list[Finding]:
+        snapshot = read_desktop_state(self.codex_home)
+        if snapshot.database is None:
+            return []
+
+        findings: list[Finding] = []
+        native_ids = set(threads) | set(rollouts)
+        for thread_id, state in sorted(snapshot.threads.items()):
+            if thread_id in native_ids or not state.catalog_records:
+                continue
+            local_records = tuple(
+                record
+                for record in state.catalog_records
+                if record.host_id == "local"
+            )
+            if not local_records:
+                continue
+            titles = sorted(
+                {
+                    record.title
+                    for record in local_records
+                    if isinstance(record.title, str) and record.title
+                }
+            )
+            findings.append(
+                Finding(
+                    platform="codex-desktop",
+                    platform_session_id=f"local:{thread_id}",
+                    thread_id=thread_id,
+                    reason=(
+                        "Codex Desktop host catalog remains after the native "
+                        "thread row and rollout were deleted"
+                    ),
+                    platform_db=snapshot.database,
+                    codex_home=self.codex_home,
+                    rollout=None,
+                    codex_indexed=False,
+                    codex_archived=None,
+                    codex_bin_hint=self.codex_bin_hint,
+                    details={
+                        "finding_type": "desktop_state_orphan",
+                        "desktop_database": str(snapshot.database),
+                        "desktop_host_id": "local",
+                        "desktop_catalog_record_count": len(local_records),
+                        "desktop_catalog_titles": titles,
+                        "desktop_global_state_paths": sorted(
+                            state.global_state_references
+                        ),
+                        "desktop_global_state_reference_count": (
+                            state.exact_reference_count
+                        ),
+                        "desktop_state_snapshot_fingerprint": (
+                            state.snapshot_fingerprint
+                        ),
+                        "thread_delete_supported": False,
+                        "cleanable": True,
+                        "requires_explicit_selection": True,
+                        "needs_quarantine": False,
+                        "manual_review_required": True,
+                        "diagnostic_artifact_present": True,
+                        "private_host_schema": True,
+                    },
+                )
+            )
+        return findings
 
     def _read_state_snapshot(
         self,

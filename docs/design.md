@@ -36,6 +36,7 @@ Native store:       CODEX_HOME
 Native record:      Codex thread (thread_id)
                     ├── state_5.sqlite：thread 列表记录和关联记录
                     └── sessions|archived_sessions：rollout 内容文件
+Optional host state: Codex Desktop local catalog + structured global UI state
 ```
 
 扫描只读取前端 SQLite 的最小必要字段、rollout 首行 `session_meta`、必要的 Codex
@@ -67,7 +68,10 @@ thread 元数据指纹绑定规范化展示字段以及实际数据库行、roll
 时间戳、活动/归档状态、规范化路径、大小和纳秒修改时间。任何范围或身份无法精确生成
 都会阻止删除。当前可执行的是 `delete_conversation`（为 JSON v1 保留的 action kind，
 语义是删除整个 Codex thread）和独立的 `repair_legacy_index`；修复列表路径、清除无效
-关系、隔离文件、清除 frontend reference 等动作不会降级成直接 SQLite 或任意文件操作。
+关系、隔离文件、清除第三方 frontend reference 等动作不会降级成直接 SQLite 或任意
+文件操作。唯一额外可执行动作是 `remove_desktop_state`：它只处理原生证据已经为空的
+Codex Desktop local 宿主残留，属于独立 `high` 风险修复器，并绑定 catalog 行、完整
+JSON 哈希、结构化精确引用、客户端关闭声明和一致备份。
 
 风险定义：
 
@@ -98,7 +102,7 @@ thread 元数据指纹绑定规范化展示字段以及实际数据库行、roll
   → 与每个 root 的已批准精确范围完全比较
   → 每次请求前再次扫描所有活动前端并验证动作快照
   → thread/delete
-  → 无论请求成功、错误或超时都执行磁盘与列表验证
+  → 无论请求成功、错误或超时都执行磁盘、列表和可探测 Desktop 宿主状态验证
 ```
 
 只有 stdin 和 stdout 同时为 TTY 时才进入编号及最终确认流程。最终删除计划显示 action
@@ -110,6 +114,11 @@ ID，并完整展开每个根 thread 和将被级联删除的关联任务 thread
 静默扩大范围。
 
 `repair_legacy_index` 使用独立确认词 `客户端已关闭并确认修复`，非交互模式同时要求 `--clients-closed` 和计划指纹。它只能单独执行；`restore-legacy-index` 也要求客户端关闭，并仅在当前文件哈希仍等于该备份对应的修复结果时恢复。修复和还原都会先为将被覆盖的当前版本再创建一份可验证备份。
+
+`remove_desktop_state` 也只能单独执行。它在每次写入前重新证明目标没有原生 index 或
+有效 rollout，且恰好存在一条 `host_id='local'` 的已批准 catalog 行；发现多个 catalog、
+schema 变化、全局状态哈希漂移或客户端仍运行都会停止。SQLite 和 JSON 修改共用一次
+备份清单；写入后只要任一精确引用仍存在，就尝试自动还原全部宿主状态。
 
 身份和文件范围均可验证的重复文件或路径错位允许作为 `high` 风险整个 thread 删除逐项
 选择。残留关联记录只有在其指向的同 target 子 thread 仍有身份精确可验证的本地数据、
@@ -134,8 +143,9 @@ thread 创建的关联任务 thread 的一致删除。API 语义见
 
 ## 关键不变量
 
-- 前端数据库只读；不直接修改 Codex SQLite，不直接删除 rollout 内容文件。唯一文件
-  写入例外是经独立审批、备份和锁保护的旧聚合索引整体替换。
+- 第三方前端数据库只读；不直接修改原生 `state_5.sqlite`，不直接删除 rollout 内容
+  文件。写入例外只有经独立审批和备份保护的旧聚合索引整体替换，以及原生证据为空时
+  精确限定的 Codex Desktop 私有宿主状态修复。
 - 所有问题都显示候选动作；不可执行不等于不显示。
 - 活跃引用、身份冲突、范围不明和不完整读取都会阻止相关删除动作。
 - 不跨 Codex 数据目录合并目标；技术路径和完整 ID 在 JSON 中保真。
@@ -144,6 +154,8 @@ thread 创建的关联任务 thread 的一致删除。API 语义见
 - 删除计划、thread 名称/项目/子代理元数据、关联任务范围或活动 frontend reference
   漂移时停止执行；每个 API 请求前都重新检查。
 - 删除请求的返回值不能替代删除后验证。
+- Desktop catalog/UI 精确引用仍存在时，原生删除结果为 `partial`，不得用 app-server
+  成功响应覆盖宿主残留证据。
 - 不以“回收空间”为理由降低证据门槛。
 
 ## 已知设计风险

@@ -19,6 +19,10 @@ from .codex_state import (
     read_thread_index,
     rollout_state_fingerprint,
 )
+from .codex_desktop_state import (
+    DesktopStateError,
+    remaining_desktop_state_markers,
+)
 from .conversation_metadata import (
     read_conversation_summaries,
     read_legacy_thread_names,
@@ -517,6 +521,21 @@ def verify_finding_deleted(finding: Finding) -> VerificationResult:
                 {parent, child} & set(checked_thread_ids)
             )
 
+        # The documented app-server contract removes rollout files and
+        # associated native metadata. Codex Desktop also maintains a private
+        # host catalog/UI cache outside that contract. Verify it separately so
+        # a sidebar ghost cannot be reported as a complete deletion.
+        for thread_id in checked_thread_ids:
+            desktop_markers = remaining_desktop_state_markers(
+                finding.codex_home,
+                (thread_id,),
+            )
+            if desktop_markers:
+                remaining_thread_ids.add(thread_id)
+                for marker in desktop_markers:
+                    if marker not in remaining:
+                        remaining.append(marker)
+
         # Native integrity findings may point at additional on-disk evidence.
         # These paths are verified if supplied, but are never removed directly.
         for raw_path in _detail_paths(finding.details):
@@ -525,7 +544,7 @@ def verify_finding_deleted(finding: Finding) -> VerificationResult:
                 if rendered not in remaining:
                     remaining.append(rendered)
                 remaining_thread_ids.add(finding.thread_id)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, DesktopStateError) as exc:
         return VerificationResult(
             deleted=False,
             remaining_artifacts=tuple(remaining),

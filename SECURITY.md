@@ -45,6 +45,20 @@ action ID 或 fingerprint。
 - 缺失 rollout 被视为已删除；
 - 成功后不能由本工具恢复。
 
+OpenAI 官方 App Server 文档所称的删除范围是 persisted thread、spawned descendants、
+rollout 和关联原生 metadata。Codex Desktop 私有宿主目录/UI 状态不是公开协议字段。
+如果原生证据已消失而 `host_id='local'` 的宿主目录行仍存在，Janitor 将其作为独立
+`desktop_state_orphan` 处理，不重复调用 `thread/delete`，也不把原生删除误报为完整
+成功。
+
+`remove_desktop_state` 是高风险私有宿主状态修复例外。它只允许处理一个明确的
+`CODEX_HOME`，只删除精确批准的 local catalog 行，以及 JSON 树中值恰好等于目标
+thread ID、列表项恰好等于目标 ID 或 key 结构化包含目标 ID 的引用；普通正文中仅
+包含该 ID 的字符串不会删除。执行要求相关客户端关闭、计划和每个目标的完整快照
+指纹匹配、原生 thread/rollout 仍为空、catalog schema 兼容、每个目标恰好一条 local
+行，并在写入前创建 SQLite 一致备份、JSON 原文件和 manifest。任何写入或验证失败
+都会尝试自动还原。
+
 因此，一个根 thread 目标不等于磁盘上只删除一个 JSONL。计划必须列出完整影响范围；
 执行前应备份整个相关 `CODEX_HOME`，而不只是计划中显示的单个文件。
 
@@ -86,6 +100,10 @@ Claude Code 删除也是独立路径。Claude Code 当前没有本地逐 session
 独立确认词。严格清单、审批指纹、每个原始行的哈希、预期输出哈希、独占锁、持久
 备份/清单和原子替换缺一不可。
 
+Codex Desktop 宿主状态清理同样是独立 mutation kind，不能与原生 thread 删除或旧
+索引修复混跑，不能由 `all` 选择，非交互执行必须同时提供完整 action ID、当前计划
+指纹、`--clients-closed` 和 `--yes`。
+
 `keep` 是有效的 no-op 决定。不可用或尚未实现的修复动作可以查看，但不会进入 mutation plan。
 
 ## 隐私
@@ -112,7 +130,7 @@ Claude Code 删除也是独立路径。Claude Code 当前没有本地逐 session
 本项目坚持以下约束：
 
 - 扫描前端 SQLite 时使用只读连接；
-- 不直接修改 Codex `state_5.sqlite` 或日志表；旧版 `session_index.jsonl` 仅允许通过下述严格、可恢复的专用修复器替换；
+- 不直接修改 Codex 原生 `state_5.sqlite` 或日志表；旧版 `session_index.jsonl` 以及可探测的 Codex Desktop 私有宿主状态，只允许通过下述各自严格、可恢复的专用修复器修改；
 - 不直接删除 rollout JSONL；
 - 不把损坏或不兼容数据库等同于“没有残留”后继续自动删除；
 - 不把仅凭文件名、目录日期或 thread ID 形状得到的猜测作为删除依据；
@@ -120,11 +138,15 @@ Claude Code 删除也是独立路径。Claude Code 当前没有本地逐 session
 - 身份可验证的重复文件和路径错位可以提供 `high` 风险整个 Codex thread 删除，但只能逐项明确选择；隔离和路径修复动作仍不可执行；
 - 残留关联记录只有在其指向的同 target 子 thread 仍有身份精确可验证的本地数据、无来源冲突且精确范围获批时，才能提供 `high` 风险整个 thread 删除；这不是单独关系修复，`remove_broken_relation` 仍不可执行；
 - 按 `(storage_id, full_thread_id, action_kind)` 识别动作，避免跨保存位置混淆；
-- 修复列表路径、清除关系、隔离文件和清除 frontend reference 等动作当前只显示，不会执行。
+- 修复列表路径、清除关系、隔离文件和第三方 frontend reference 等动作当前只显示，不会执行；唯一宿主引用例外是精确的 `remove_desktop_state`。
 
 旧索引专用修复器只删除同时不在严格只读 SQLite 快照、活动 rollout 和归档 rollout 中出现的有效 ID 整行。遍历、首行 metadata、SQLite/schema、UTF-8、路径边界或稳定文件状态有任何歧义即停止。它拒绝 symlink/junction/reparse point、非普通文件、hard link 和越界路径；替换前写入私有 backup ID 目录、原文件、prepared manifest 并同步落盘。还原必须指定 backup ID，且当前文件哈希仍是该备份记录的修复后哈希；还原前也会备份当前版本。
 
 如果官方 `thread/delete` 无法安全处理某个状态，应报告并保留数据，而不是降级为直接文件/SQLite 删除。
+
+Desktop 私有状态例外不用于替代可用的官方删除：任何原生列表行或有效 rollout 重新
+出现都会阻止它。发现多个 catalog、非 local host、未知 schema、目标行数量异常、
+状态文件哈希变化、客户端仍运行或执行后仍有精确引用也必须 fail closed。
 
 Pi 的直接文件删除是经上游公开会话格式确认的专用例外：只允许 `delete --platform pi`，只针对已解析 header、位于批准 session root 内、无 symlink/reparse-point 风险且删除前 `stat`/哈希仍匹配的普通 JSONL。任何活动会话、路径边界、文件身份或 TOCTOU 证据不完整都必须 fail closed。发布前应在 Windows 与 POSIX 合成 fixture 中覆盖：拒绝 `all`、拒绝 Pi 与其他平台混合、拒绝 auth/settings、拒绝文件替换/重写，并证明删除后仅指定 JSONL 消失。
 
@@ -152,6 +174,8 @@ Claude 直接文件删除只允许 `delete --platform claude`，并绑定 `(conf
   source/identity 冲突、子 thread 无现存本地数据或仅请求单独关系修复时不得授权；
 - app-server 启动后若 rollout 的 metadata thread ID、originator、source、工作目录、时间戳、活动/归档状态、规范化路径、大小或纳秒修改时间变化，指纹比较会阻止整组删除；
 - 删除后同时验证索引和所有已知 active/archived rollout，不因重复 ID 覆盖而漏检；
+- 删除后还验证可探测的 Codex Desktop local catalog 和结构化精确 UI 引用；仍存在时报告 `partial`，并证明单独的 Desktop 清理动作不会删除提示正文中的包含匹配；
+- Desktop 清理在原生证据存在、非 local/重复目标、多个 catalog、schema 不兼容、快照漂移、客户端运行或备份失败时发送零个写入；写入后验证失败必须自动还原或明确报告还原失败和备份位置；
 - 删除结果区分 `deleted`、`not_deleted`、`partial`、`unknown`，请求错误不能跳过验证；
 - 损坏、被锁或 schema 不兼容的数据库产生显式扫描错误，而不是“零发现”。
 
@@ -195,6 +219,11 @@ Claude 直接文件删除只允许 `delete --platform claude`，并绑定 `(conf
 不要在 SQLite 仍有写入进程时只复制主 `.db` 文件。恢复时也应先关闭所有使用这些目录的进程，并恢复为一个一致的完整快照。
 
 旧索引修复器生成的局部备份位于对应 `CODEX_HOME/.local-agent-record-janitor/legacy-index-backups/<backup-id>/`。它用于精确撤销该次旧索引替换，不能代替执行会话硬删除前对完整 `CODEX_HOME` 的外部备份。
+
+Desktop 宿主状态修复器生成的局部备份位于
+`CODEX_HOME/.local-agent-record-janitor/desktop-state-backups/<backup-id>/`，包含一致的
+catalog SQLite、发现到的全局状态 JSON 和 manifest。它只用于该次私有宿主状态修复，
+也不能代替完整 `CODEX_HOME` 外部备份。
 
 ## 报告漏洞
 

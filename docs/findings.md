@@ -2,7 +2,9 @@
 
 Finding 是 adapter 的兼容证据格式，描述一个不一致状态，不等同于“可以自动删除”。计划生成器会把同一保存位置和完整对话 ID 的 Finding 聚合成 Observation，再根据当前列表记录、全部内容文件、关联任务范围、活跃引用和扫描状态生成 CandidateAction。
 
-所有问题都会显示候选动作。当前可执行的是 `delete_conversation`（删除整条对话）和作为独立文件资源处理的 `repair_legacy_index`；其他动作会保留在结构化输出中，并明确标为不可用。
+所有问题都会显示候选动作。当前可执行的是 `delete_conversation`（删除整条对话）、
+作为独立文件资源处理的 `repair_legacy_index`，以及严格受保护的
+`remove_desktop_state`；其他动作会保留在结构化输出中，并明确标为不可用。
 
 ## 前端残留
 
@@ -71,11 +73,23 @@ Codex `0.144.6` 隔离验收已确认官方接口能够删除合成的有效 rol
 
 该索引是文件级资源，不是会话 ID 集合：不能使用 `--thread-id` 选择，不会进入 `all`，也不能与会话删除混合执行。修复会重新清点并核对审批快照，在 Codex home 级独占锁下先创建带清单和哈希的持久备份，再原子替换；还原只接受有效备份 ID，并拒绝覆盖备份后发生的其他修改。
 
+### `desktop_state_orphan`
+
+Codex Desktop 的 `host_id='local'` 宿主目录行仍存在，但同一 ID 在原生
+`state_5.sqlite` 与活动/归档 rollout 中均不存在。该 Finding 解释了原生删除已完成，
+侧栏任务却仍显示的情况。
+
+OpenAI 公开的 app-server 协议没有承诺 Desktop 私有 SQLite/JSON schema，因此此
+Finding 来自版本探测，不是稳定官方字段。存在多个 catalog、schema 不兼容、非 local
+host、原生证据重新出现或快照漂移都会阻止修改。可执行动作
+`remove_desktop_state` 为 `high` 风险，必须逐项选择、确认客户端关闭、绑定完整计划
+指纹并创建一致备份；只删除精确目录行和结构化精确 ID 引用，不做正文子串清理。
+
 ## 常用字段
 
 | 字段 | 含义 |
 |---|---|
-| `platform` | `aionui`、`cindy` 或 `native` |
+| `platform` | `aionui`、`cindy`、`native` 或 `codex-desktop` |
 | `platform_session_id` | 前端会话 ID；原生 Finding 可能使用对话自身标识 |
 | `thread_id` | 完整 Codex 对话 ID |
 | `reason` | 面向人的判断理由 |
@@ -102,5 +116,6 @@ Codex `0.144.6` 隔离验收已确认官方接口能够删除合成的有效 rol
 | 列表路径错位 | `repair_index_path`、`delete_conversation`、`keep` | 修复未实现；身份和范围可验证时可逐项选择 `high` 删除 |
 | 无效关联记录 | `remove_broken_relation`、可选 `delete_conversation`、`keep` | 单独关系修复未实现；记录指向的子对话身份、来源与精确范围均可验证时，可逐项选择 `high` 风险整条删除 |
 | 旧聚合索引 | `repair_legacy_index`、`keep` | 文件级 `high` 风险动作；严格清点、重新审批、客户端关闭、备份和锁均满足时可执行 |
+| Desktop 宿主状态孤儿 | `remove_desktop_state`、`keep` | `high` 风险；仅 local 精确行、客户端关闭、完整快照、备份和原生证据为空时可执行 |
 
 CandidateAction 的稳定 action ID、风险、可用性、不可用原因、ActionImpact 和快照指纹都进入 JSON。自动化应使用完整 action ID，不应持久化交互编号。

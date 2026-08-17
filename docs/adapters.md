@@ -1,6 +1,6 @@
 # Adapter 贡献指南
 
-Adapter 用于把一个外部 Agent 平台的删除状态转换为保守的 Codex `Finding`。它不能直接删除前端或 Codex 数据。
+Adapter 用于把一个外部 Agent 平台的删除状态转换为保守的 Codex `Finding`。它不能直接删除前端或 Codex 数据。Codex Desktop 宿主状态是核心 native adapter 的内建、可选版本探测层，不是第三方 adapter 可仿照后直接写库的通用授权。
 
 ## 最低要求
 
@@ -48,7 +48,7 @@ details = {
 
 这些字段描述的是“当前这条 Finding”而不是平台的永久能力。它们是计划生成器的证据输入，不会直接成为 CLI 删除目标。存在活跃引用、冲突证据或不完整关系时，应将 `cleanable` 设为 `False` 并给出阻断理由。
 
-Adapter 不负责决定最终风险或动作。核心层会按 `(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整关联任务范围，并生成 `delete_conversation`、修复、隔离、清除引用或 `keep` 等 CandidateAction。当前可执行整条对话删除；旧聚合索引还可通过独立的文件级修复器处理，其他修复和隔离动作仍只展示。
+Adapter 不负责决定最终风险或动作。核心层会按 `(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整关联任务范围，并生成 `delete_conversation`、修复、隔离、清除引用或 `keep` 等 CandidateAction。当前可执行整条对话删除；旧聚合索引可通过独立文件级修复器处理；核心还提供唯一、严格限定的 Codex Desktop 宿主状态修复器。第三方 frontend reference、其他修复和隔离动作仍只展示。
 
 ## 判定模板
 

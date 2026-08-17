@@ -145,6 +145,13 @@ class ManagedConversation:
         return self.artifact_present
 
     @property
+    def desktop_state_present(self) -> bool:
+        return any(
+            reference.platform.casefold() == "codex-desktop"
+            for reference in self.frontend_sessions
+        )
+
+    @property
     def delete_supported(self) -> bool:
         return self.deletable
 
@@ -161,6 +168,7 @@ class ManagedConversation:
             "indexed": self.indexed,
             "legacy_indexed": self.legacy_indexed,
             "artifact_present": self.artifact_present,
+            "desktop_state_present": self.desktop_state_present,
             "deletable": self.deletable,
             "cascade_unknown": self.cascade_unknown,
             "blockers": list(self.blockers),
@@ -462,14 +470,53 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                     + ", ".join(sorted(live_cindy_descendants))
                 )
             if not artifact_present:
-                blockers.append("No SQLite thread row or verifiable rollout remains")
+                if any(
+                    reference.platform.casefold() == "codex-desktop"
+                    for reference in references
+                ):
+                    blockers.append(
+                        "Only Codex Desktop host catalog/UI state remains; "
+                        "use the explicit clean remove_desktop_state action"
+                    )
+                else:
+                    blockers.append(
+                        "No SQLite thread row or verifiable rollout remains"
+                    )
             if cascade_unknown:
                 blockers.append("Cascade inventory is incomplete")
+            summary = summaries[thread_id]
+            desktop_title = next(
+                (
+                    reference.title
+                    for reference in references
+                    if reference.platform.casefold() == "codex-desktop"
+                    and isinstance(reference.title, str)
+                    and reference.title
+                ),
+                None,
+            )
+            if desktop_title is not None and summary.display_name is None:
+                summary = replace(
+                    summary,
+                    title=desktop_title,
+                    display_name=desktop_title,
+                    display_name_source=(
+                        "codex-desktop.local_thread_catalog"
+                    ),
+                    metadata_sources=tuple(
+                        dict.fromkeys(
+                            (
+                                *summary.metadata_sources,
+                                "codex-desktop.local_thread_catalog",
+                            )
+                        )
+                    ),
+                )
             all_records.append(
                 ManagedConversation(
                     codex_home=home,
                     thread_id=thread_id,
-                    summary=summaries[thread_id],
+                    summary=summary,
                     rollouts=records,
                     frontend_sessions=references,
                     descendant_thread_ids=descendants,

@@ -34,6 +34,7 @@ class ActionKind(str, Enum):
     REPAIR_INDEX_PATH = "repair_index_path"
     QUARANTINE_ARTIFACTS = "quarantine_artifacts"
     REMOVE_FRONTEND_REFERENCE = "remove_frontend_reference"
+    REMOVE_DESKTOP_STATE = "remove_desktop_state"
     REPAIR_LEGACY_INDEX = "repair_legacy_index"
     KEEP = "keep"
 
@@ -150,6 +151,10 @@ class ActionImpact:
     legacy_original_sha256: str | None = None
     legacy_expected_sha256: str | None = None
     fingerprint_error: str | None = None
+    desktop_catalog_record_count: int = 0
+    desktop_global_state_reference_count: int = 0
+    desktop_database_paths: tuple[str, ...] = ()
+    desktop_global_state_paths: tuple[str, ...] = ()
 
     @property
     def descendant_count(self) -> int:
@@ -175,6 +180,12 @@ class ActionImpact:
             "legacy_original_sha256": self.legacy_original_sha256,
             "legacy_expected_sha256": self.legacy_expected_sha256,
             "fingerprint_error": self.fingerprint_error,
+            "desktop_catalog_record_count": self.desktop_catalog_record_count,
+            "desktop_global_state_reference_count": (
+                self.desktop_global_state_reference_count
+            ),
+            "desktop_database_paths": list(self.desktop_database_paths),
+            "desktop_global_state_paths": list(self.desktop_global_state_paths),
             "descendant_thread_count": self.descendant_count,
             "descendant_thread_ids": list(self.descendant_thread_ids),
             "affected_thread_ids": list(self.affected_thread_ids),
@@ -651,6 +662,45 @@ def build_cleanup_plan(
             evidence.errors.append(
                 "Could not inspect conversation display metadata: "
                 f"{_error_text(exc)}"
+            )
+
+        # A Desktop-only ghost no longer has native metadata to name it. Use
+        # the exact local host-catalog title strictly as display/approval
+        # evidence; it does not make the ID a native thread/delete target.
+        for target in targets:
+            summary = evidence.conversation_summaries.get(target.thread_id)
+            if summary is None or summary.display_name is not None:
+                continue
+            desktop_title = next(
+                (
+                    title
+                    for finding in findings_by_target.get(target, ())
+                    if finding.details.get("finding_type")
+                    == "desktop_state_orphan"
+                    for title in finding.details.get(
+                        "desktop_catalog_titles", ()
+                    )
+                    if isinstance(title, str) and title
+                ),
+                None,
+            )
+            if desktop_title is None:
+                continue
+            evidence.conversation_summaries[target.thread_id] = replace(
+                summary,
+                title=desktop_title,
+                display_name=desktop_title,
+                display_name_source=(
+                    "codex-desktop.local_thread_catalog"
+                ),
+                metadata_sources=tuple(
+                    dict.fromkeys(
+                        (
+                            *summary.metadata_sources,
+                            "codex-desktop.local_thread_catalog",
+                        )
+                    )
+                ),
             )
 
     # Adapter paths remain in Observation identity even after disappearing,
@@ -1130,6 +1180,43 @@ def _candidate_actions(
             conversation_metadata_fingerprints
         ),
         fingerprint_error=fingerprint_error,
+        desktop_catalog_record_count=sum(
+            _as_nonnegative_int(
+                obs.details.get("desktop_catalog_record_count")
+            )
+            for obs in affected_observations
+            if obs.finding_type == "desktop_state_orphan"
+        ),
+        desktop_global_state_reference_count=sum(
+            _as_nonnegative_int(
+                obs.details.get("desktop_global_state_reference_count")
+            )
+            for obs in affected_observations
+            if obs.finding_type == "desktop_state_orphan"
+        ),
+        desktop_database_paths=tuple(
+            sorted(
+                {
+                    str(path)
+                    for obs in affected_observations
+                    if obs.finding_type == "desktop_state_orphan"
+                    if (path := obs.details.get("desktop_database"))
+                }
+            )
+        ),
+        desktop_global_state_paths=tuple(
+            sorted(
+                {
+                    str(path)
+                    for obs in affected_observations
+                    if obs.finding_type == "desktop_state_orphan"
+                    for path in obs.details.get(
+                        "desktop_global_state_paths", ()
+                    )
+                    if isinstance(path, (str, os.PathLike))
+                }
+            )
+        ),
     )
     if is_legacy_resource:
         inventory = evidence.legacy_inventory
@@ -1252,7 +1339,11 @@ def _candidate_actions(
         action_impact = replace(
             impact,
             frontend_references_preserved=(
-                kind is not ActionKind.REMOVE_FRONTEND_REFERENCE
+                kind
+                not in {
+                    ActionKind.REMOVE_FRONTEND_REFERENCE,
+                    ActionKind.REMOVE_DESKTOP_STATE,
+                }
             ),
         )
         actions.append(
@@ -1286,6 +1377,7 @@ def _candidate_actions(
                         for obs in affected_observations
                     )
                     or kind is ActionKind.REPAIR_LEGACY_INDEX
+                    or kind is ActionKind.REMOVE_DESKTOP_STATE
                 ),
                 legacy_inventory=(
                     evidence.legacy_inventory
@@ -1343,6 +1435,8 @@ def _action_kinds_for_observation(
         return {ActionKind.REMOVE_BROKEN_RELATION}
     if finding_type == "legacy_index_only":
         return {ActionKind.REPAIR_LEGACY_INDEX}
+    if finding_type == "desktop_state_orphan":
+        return {ActionKind.REMOVE_DESKTOP_STATE}
 
     result: set[ActionKind] = set()
     if (
@@ -1407,6 +1501,31 @@ def _unavailable_reason(
             return "No strict legacy aggregate index inventory is available."
         if not inventory.needs_repair:
             return "The legacy aggregate index no longer has residual entries."
+        return None
+    if kind is ActionKind.REMOVE_DESKTOP_STATE:
+        matching = [
+            observation
+            for observation in observations
+            if observation.finding_type == "desktop_state_orphan"
+        ]
+        if len(matching) != 1:
+            return (
+                "Codex Desktop cleanup requires exactly one current orphan "
+                "host-state observation per target."
+            )
+        details = matching[0].details
+        if details.get("cleanable") is not True:
+            return "The Codex Desktop host-state observation is not cleanable."
+        if details.get("desktop_host_id") != "local":
+            return "Only host_id='local' Codex Desktop state can be cleaned."
+        if not isinstance(
+            details.get("desktop_state_snapshot_fingerprint"), str
+        ):
+            return "No exact Codex Desktop state snapshot is available."
+        if _as_nonnegative_int(
+            details.get("desktop_catalog_record_count")
+        ) != 1:
+            return "The target does not map to exactly one local Desktop row."
         return None
     if kind in _UNIMPLEMENTED_REASONS:
         return _UNIMPLEMENTED_REASONS[kind]
@@ -2198,6 +2317,7 @@ def _risk_level(
         ActionKind.QUARANTINE_ARTIFACTS,
         ActionKind.REPAIR_LEGACY_INDEX,
         ActionKind.REMOVE_BROKEN_RELATION,
+        ActionKind.REMOVE_DESKTOP_STATE,
     }:
         return RiskLevel.HIGH
     if kind is ActionKind.REMOVE_FRONTEND_REFERENCE:
