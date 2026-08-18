@@ -219,6 +219,72 @@ class ConversationSummaryTests(unittest.TestCase):
         self.assertIsNone(summaries["unknown"].display_name)
         self.assertFalse(summaries["unknown"].indexed)
 
+    def test_windows_extended_cwd_prefix_is_not_a_metadata_conflict(self) -> None:
+        self._create_rich_state()
+        record = RolloutRecord(
+            thread_id="child-id",
+            path=self.codex_home / "sessions" / "child.jsonl",
+            originator="Codex Desktop",
+            source={
+                "subagent": {
+                    "thread_spawn": {"parent_thread_id": "parent-id"}
+                }
+            },
+            cwd=r"\\?\D:\GitRepo\VPS-Toolkit",
+            timestamp="2026-08-18T00:00:00Z",
+            archived=False,
+        )
+
+        summary = read_conversation_summaries(
+            self.codex_home,
+            ["child-id"],
+            rollout_records_by_thread={"child-id": [record]},
+        )["child-id"]
+
+        self.assertEqual(summary.cwd, r"D:\GitRepo\VPS-Toolkit")
+        self.assertFalse(
+            any(
+                conflict.startswith("cwd ")
+                for conflict in summary.metadata_conflicts
+            ),
+            summary.metadata_conflicts,
+        )
+
+    def test_equivalent_windows_cwds_without_database_are_order_stable(self) -> None:
+        plain = RolloutRecord(
+            thread_id="cwd-only",
+            path=self.root / "plain.jsonl",
+            originator=None,
+            source=None,
+            cwd=r"D:\Repo\Project",
+            timestamp=None,
+            archived=False,
+        )
+        extended = RolloutRecord(
+            thread_id="cwd-only",
+            path=self.root / "extended.jsonl",
+            originator=None,
+            source=None,
+            cwd=r"\\?\d:\repo\project",
+            timestamp=None,
+            archived=False,
+        )
+
+        forward = read_conversation_summaries(
+            self.codex_home,
+            ["cwd-only"],
+            rollout_records_by_thread={"cwd-only": [plain, extended]},
+        )["cwd-only"]
+        reverse = read_conversation_summaries(
+            self.codex_home,
+            ["cwd-only"],
+            rollout_records_by_thread={"cwd-only": [extended, plain]},
+        )["cwd-only"]
+
+        self.assertEqual(forward.cwd, r"D:\Repo\Project")
+        self.assertEqual(forward.approval_payload(), reverse.approval_payload())
+        self.assertFalse(forward.metadata_conflicts)
+
     def test_conflicts_are_explicit_and_fingerprint_is_order_stable(self) -> None:
         first = RolloutRecord(
             thread_id="conflict",

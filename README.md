@@ -25,7 +25,9 @@ Cindy/AionUI 数据库中的行作为只读 frontend reference，而不是另一
 以及仍被 Cindy/AionUI 引用的 Codex thread；`delete` 允许用户逐项选择其中任意仍有
 本地 Codex 数据、且根或级联子 thread 均没有 live frontend reference 的 thread 永久
 删除；live reference 会 fail closed 并使动作不可选。`clean` 继续只处理扫描发现的异常，
-不会把正常记录混入保守批量清理路径。所有修改命令都要求明确目标并在执行前重验证。
+不会把正常记录混入保守批量清理路径。逐项修改命令要求明确目标；专用 `purge` 命令
+则以 `--yes --clients-closed` 作为整批授权，只纳入当前完整扫描中可执行的 Codex 异常
+动作。两条路径都会在每次修改前重新扫描和重验证。
 
 Codex `delete` 的目标是 `(CODEX_HOME, thread_id)`，原生 thread 删除只调用官方
 Codex `thread/delete`。Cindy/AionUI 数据库在该路径中始终只读：输出会明确列出仍
@@ -34,9 +36,10 @@ Codex `thread/delete`。Cindy/AionUI 数据库在该路径中始终只读：输�
 Codex Desktop 还可能维护一层宿主目录/UI 状态。它不是公开 app-server 数据契约；
 本工具只通过结构探测读取，并把“原生 thread 已不存在、但 `host_id='local'` 的宿主
 目录行仍存在”报告为 `desktop_state_orphan`。这类记录不能再次发送给
-`thread/delete`。只有单独选择 `remove_desktop_state` 高风险动作、关闭相关客户端、
-通过完整状态指纹重验证并创建一致备份后，工具才精确删除该目录行及 JSON 中的
-结构化精确 ID 引用；提示历史正文中仅仅包含该 ID 的普通字符串会保留。
+`thread/delete`。只有单独选择 `remove_desktop_state` 高风险动作，或通过专用 `purge`
+整批授权，并在关闭相关客户端、通过完整状态指纹重验证、创建一致备份后，工具才
+精确删除该目录行及 JSON 中的结构化精确 ID 引用；提示历史正文中仅仅包含该 ID 的
+普通字符串会保留。
 
 ### 术语与身份边界
 
@@ -179,6 +182,20 @@ python3 -m local_agent_record_janitor scan --platform native
 ```powershell
 local-agent-record-janitor scan
 ```
+
+如果目标是一次清理原生 Codex、Cindy 和 AionUI 中当前所有**可执行异常残留**，在
+完全退出 Codex/ChatGPT Desktop、Cindy 和 AionUI 后，从外部 PowerShell 运行：
+
+```powershell
+local-agent-record-janitor purge --yes --clients-closed
+```
+
+`purge` 不会删除正常对话，也不会触碰 Pi 或 Claude Code 会话。它按 mutation kind 和
+Codex 数据目录拆批，顺序处理 thread 删除、旧索引修复和 Desktop 宿主残留；每批绑定
+当次完整计划指纹，执行前重扫，执行后再次扫描。旧索引和 Desktop 状态仍创建可验证
+备份。任何完整扫描失败、计划漂移或执行错误都会立即停止后续批次；确实受阻或尚未
+实现的动作保留并计数。可用 `--platform native|cindy|aionui` 把候选范围缩小到单一
+来源，但所有已发现前端仍参与 live-reference 安全检查。
 
 列出全部正常/异常 Codex thread 及 Cindy/AionUI frontend reference：
 

@@ -86,6 +86,9 @@ class NumberSelectionTests(unittest.TestCase):
         clean_help = command_action.choices["clean"].format_help()
         self.assertIn("跳过 TTY 最终确认提示", clean_help)
         self.assertIn("完整稳定 action ID", clean_help)
+        purge_help = command_action.choices["purge"].format_help()
+        self.assertIn("原生 Codex、Cindy 和 AionUI", purge_help)
+        self.assertIn("--clients-closed", purge_help)
 
     def test_invalid_explicit_codex_binary_is_rejected_before_scan(
         self,
@@ -1049,6 +1052,78 @@ class _EnterMutatingServer:
 
 
 class MainFlowTests(unittest.TestCase):
+    def test_purge_requires_yes_and_clients_closed_before_scanning(self) -> None:
+        for argv in (("purge",), ("purge", "--yes")):
+            with self.subTest(argv=argv), patch(
+                "local_agent_record_janitor.cli.scan_adapters"
+            ) as scan:
+                output = StringIO()
+                errors = StringIO()
+                result = main(
+                    argv,
+                    adapters=(_EmptyAdapter(),),
+                    stdin=StringIO(),
+                    stdout=output,
+                    stderr=errors,
+                )
+                self.assertEqual(result, EXIT_ERROR)
+                self.assertIn(
+                    "--yes 和 --clients-closed",
+                    output.getvalue() + errors.getvalue(),
+                )
+                scan.assert_not_called()
+
+    def test_purge_json_noop_is_one_valid_document(self) -> None:
+        output = StringIO()
+        errors = StringIO()
+
+        result = main(
+            ("purge", "--yes", "--clients-closed", "--json"),
+            adapters=(_EmptyAdapter(),),
+            stdin=StringIO(),
+            stdout=output,
+            stderr=errors,
+        )
+
+        self.assertEqual(result, EXIT_OK, errors.getvalue())
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["command"], "purge")
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["batch_count"], 0)
+        self.assertEqual(payload["executed_action_count"], 0)
+
+    def test_purge_repairs_all_available_codex_residuals_without_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            codex_home = Path(root) / "codex-home"
+            create_thread_index(codex_home, [])
+            legacy_path = codex_home / "session_index.jsonl"
+            legacy_path.write_text(
+                json.dumps({"id": "residual-id", "thread_name": "Old title"})
+                + "\n",
+                encoding="utf-8",
+            )
+            adapter = NativeIntegrityAdapter(codex_home=codex_home)
+            output = StringIO()
+            errors = StringIO()
+
+            result = main(
+                ("purge", "--yes", "--clients-closed"),
+                adapters=(adapter,),
+                stdin=StringIO(),
+                stdout=output,
+                stderr=errors,
+            )
+
+            self.assertEqual(result, EXIT_OK, errors.getvalue())
+            self.assertEqual(legacy_path.read_text(encoding="utf-8"), "")
+            self.assertIn("批量清理完成：1 批，1 个动作", output.getvalue())
+            backup_root = (
+                codex_home
+                / ".local-agent-record-janitor"
+                / "legacy-index-backups"
+            )
+            self.assertTrue(any(backup_root.iterdir()))
+
     def test_cindy_codex_home_override_keeps_all_sibling_namespace_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             appdata = Path(temporary_directory) / "AppData"

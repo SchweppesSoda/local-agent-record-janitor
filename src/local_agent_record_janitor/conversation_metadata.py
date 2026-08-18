@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import ntpath
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -405,20 +406,52 @@ def _prefer_database_value(
         if (value := _nonempty_string(item)) is not None
     ]
     distinct = set(values)
-    if len(distinct) > 1:
+    comparison_keys = {
+        _metadata_comparison_key(field, value) for value in values
+    }
+    if len(comparison_keys) > 1:
         conflicts.add(
             f"{field} has conflicting non-database values: "
             f"{_values_json(distinct)}"
         )
     if database_value is not None:
-        if any(value != database_value for value in distinct):
+        database_key = _metadata_comparison_key(field, database_value)
+        if any(
+            _metadata_comparison_key(field, value) != database_key
+            for value in distinct
+        ):
             conflicts.add(
                 f"{field} differs between threads and other metadata: "
                 f"threads={_values_json([database_value])},"
                 f"other={_values_json(distinct)}"
             )
         return database_value
-    return values[0] if len(distinct) == 1 else None
+    if len(comparison_keys) == 1 and values:
+        return min(
+            distinct,
+            key=lambda item: (_metadata_comparison_key(field, item), item),
+        )
+    return None
+
+
+def _metadata_comparison_key(field: str, value: str) -> str:
+    """Return a comparison key without changing the displayed metadata value.
+
+    Codex Desktop can persist the same Windows working directory both with and
+    without the Win32 extended-length prefix. Treat those spellings as the
+    same identity so a harmless ``\\\\?\\`` prefix does not block cleanup.
+    Other metadata fields retain exact string comparison semantics.
+    """
+
+    if field != "cwd":
+        return value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    if re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"):
+        return ntpath.normcase(ntpath.normpath(value))
+    return value
 
 
 def _append_text(values: list[str], value: object) -> None:

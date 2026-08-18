@@ -95,6 +95,13 @@ Claude Code 删除也是独立路径。Claude Code 当前没有本地逐 session
 
 自动化不得保存临时编号，应使用计划 JSON 中的完整 action ID。非交互 `review/high` 审批必须同时绑定完整计划指纹。`--yes` 只跳过最终确认提示，不会选择目标、放宽风险、忽略扫描失败或绕过快照与范围重验证。
 
+`purge --yes --clients-closed` 是唯一的整批选择例外。它只选择完整 Codex 扫描中
+`available` 的 `delete_conversation`、`repair_legacy_index` 和
+`remove_desktop_state`，不会选择正常记录、`keep`、不可用或未实现动作，也不进入
+Pi/Claude 路径。它按兼容 mutation kind 拆批，每批使用刚生成的完整计划指纹调用与
+`clean` 相同的重扫描、快照、范围、live-reference、备份和执行后验证；完整扫描失败、
+计划无进展或任一批失败会停止后续批次。
+
 旧版聚合索引修复是独立的文件资源操作：它不能通过 `--thread-id` 选择、不会进入
 `all`、不能与 Codex thread 删除混跑。非交互修复还要求 `--clients-closed`；TTY 使用
 独立确认词。严格清单、审批指纹、每个原始行的哈希、预期输出哈希、独占锁、持久
@@ -194,7 +201,10 @@ Claude 直接文件删除只允许 `delete --platform claude`，并绑定 `(conf
 - SQLite WAL 中可能存在尚未被当前快照观察到的更新；
 - `thread/delete` 删除根 thread 时会一同删除由该 thread 创建的关联任务 thread。
 
-关闭相关前端只能降低风险，不能替代删除前重验证。`--yes` 不能替代显式目标选择：无人值守执行必须提供完整、唯一的 `--thread-id` 或完整 `--action-id`。在运行中进程检测和审计日志等保护完成前，不建议设置计划任务自动执行。
+关闭相关前端只能降低风险，不能替代删除前重验证。逐项目标的无人值守执行必须提供
+完整、唯一的 `--thread-id` 或完整 `--action-id`；专用 `purge` 仅在同时收到
+`--yes --clients-closed` 时以当前完整扫描的全部可执行异常作为整批目标，并继续执行
+上述逐批重验证。在运行中进程检测和审计日志等保护完成前，不建议设置计划任务自动执行。
 
 ## 可执行文件发现
 

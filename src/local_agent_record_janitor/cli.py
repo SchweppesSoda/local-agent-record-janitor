@@ -7,6 +7,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -599,6 +600,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="app-server 请求超时秒数（默认：30）",
     )
 
+    purge = subparsers.add_parser(
+        "purge",
+        help="一键清理原生 Codex、Cindy 和 AionUI 的可执行残留",
+        description=(
+            "连续重扫并清理原生 Codex、Cindy 和 AionUI 中已经判定为异常、"
+            "当前可安全执行的本地记录；不会删除正常对话，也不会触碰 Pi 或 "
+            "Claude Code 会话。每批仍执行计划指纹复核，Desktop/旧索引修改仍"
+            "创建可验证备份，真正受阻的目标会保留。"
+        ),
+    )
+    _add_common_arguments(
+        purge,
+        codex_only=True,
+        allow_thread_selector=False,
+    )
+    purge.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认执行当前扫描中所有可执行的异常记录清理动作",
+    )
+    purge.add_argument(
+        "--clients-closed",
+        action="store_true",
+        help="确认 Codex/ChatGPT Desktop、Cindy 和 AionUI 均已完全退出",
+    )
+    purge.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        metavar="SECONDS",
+        help="app-server 请求超时秒数（默认：30）",
+    )
+
     restore = subparsers.add_parser(
         "restore-legacy-index",
         help="从 Janitor 的可验证备份还原旧版聚合索引",
@@ -637,20 +671,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_common_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    codex_only: bool = False,
+    allow_thread_selector: bool = True,
+) -> None:
     parser.add_argument(
         "--platform",
         action="append",
-        choices=("all", "aionui", "cindy", "native", "pi", "claude"),
+        choices=(
+            ("all", "aionui", "cindy", "native")
+            if codex_only
+            else ("all", "aionui", "cindy", "native", "pi", "claude")
+        ),
         help="选择扫描来源；可重复（默认：all）",
     )
-    parser.add_argument(
-        "--thread-id",
-        action="append",
-        default=[],
-        metavar="ID_OR_PREFIX",
-        help="选择完整对话 ID 或唯一前缀；可重复",
-    )
+    if allow_thread_selector:
+        parser.add_argument(
+            "--thread-id",
+            action="append",
+            default=[],
+            metavar="ID_OR_PREFIX",
+            help="选择完整对话 ID 或唯一前缀；可重复",
+        )
+    else:
+        parser.set_defaults(thread_id=[])
     parser.add_argument(
         "--json",
         action="store_true",
@@ -663,7 +709,7 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="COUNT",
         help=(
             "人类可读输出中 scan 最多显示的问题数，records/delete/clean "
-            "最多显示的记录或候选目标数；"
+            "最多显示的记录或候选目标数，purge 最多显示的单批目标数；"
             "最终计划和执行结果始终完整；0 表示全部"
             f"（默认：{DEFAULT_HUMAN_LIMIT}；JSON 不受限制）"
         ),
@@ -691,24 +737,25 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cindy-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-db", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-codex-home", type=Path, help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--pi-agent-dir",
-        type=Path,
-        metavar="PATH",
-        help="Pi Agent 数据目录（否则 PI_CODING_AGENT_DIR，再否则 ~/.pi/agent）",
-    )
-    parser.add_argument(
-        "--pi-session-dir",
-        type=Path,
-        metavar="PATH",
-        help="Pi session JSONL 根目录（优先于环境变量、settings.json 与 agentDir 默认值）",
-    )
-    parser.add_argument(
-        "--claude-config-dir",
-        type=Path,
-        metavar="PATH",
-        help="Claude Code 配置根目录（否则 CLAUDE_CONFIG_DIR，再否则 ~/.claude）",
-    )
+    if not codex_only:
+        parser.add_argument(
+            "--pi-agent-dir",
+            type=Path,
+            metavar="PATH",
+            help="Pi Agent 数据目录（否则 PI_CODING_AGENT_DIR，再否则 ~/.pi/agent）",
+        )
+        parser.add_argument(
+            "--pi-session-dir",
+            type=Path,
+            metavar="PATH",
+            help="Pi session JSONL 根目录（优先于环境变量、settings.json 与 agentDir 默认值）",
+        )
+        parser.add_argument(
+            "--claude-config-dir",
+            type=Path,
+            metavar="PATH",
+            help="Claude Code 配置根目录（否则 CLAUDE_CONFIG_DIR，再否则 ~/.claude）",
+        )
 
 
 def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
@@ -806,17 +853,42 @@ def main(
         )
 
     unsupported_engine = _explicit_unsupported_scan_engine(args.platform)
-    if args.command in {"scan", "clean"} and unsupported_engine:
+    if args.command in {"scan", "clean", "purge"} and unsupported_engine:
         return _emit_fatal_error(
             args.command,
             RuntimeError(
                 f"{unsupported_engine} 当前仅支持 records 和 delete；"
-                f"scan/clean 不支持 --platform {unsupported_engine.lower().split()[0]}。"
+                f"scan/clean/purge 不支持 --platform "
+                f"{unsupported_engine.lower().split()[0]}。"
             ),
             json_output=args.json,
             stdout=output,
             stderr=error_output,
         )
+
+    if args.command == "purge":
+        if args.thread_id:
+            return _emit_fatal_error(
+                "purge",
+                RuntimeError(
+                    "purge 固定处理当前扫描中全部可执行异常；"
+                    "不接受 --thread-id。需要逐项选择时请使用 clean。"
+                ),
+                json_output=args.json,
+                stdout=output,
+                stderr=error_output,
+            )
+        if not args.yes or not args.clients_closed:
+            return _emit_fatal_error(
+                "purge",
+                RuntimeError(
+                    "purge 只允许在相关客户端全部退出后批量执行；"
+                    "请同时提供 --yes 和 --clients-closed。"
+                ),
+                json_output=args.json,
+                stdout=output,
+                stderr=error_output,
+            )
 
     if args.command == "delete" and _has_explicit_pi(args.platform):
         if not _is_exact_pi_platform(args.platform):
@@ -887,7 +959,7 @@ def main(
 
     adapter_builder: Callable[[], list[FrontendAdapter]] | None = None
     try:
-        if args.command in {"clean", "delete"}:
+        if args.command in {"clean", "delete", "purge"}:
             if adapters is not None:
                 # All supplied adapters participate as live-reference guards;
                 # --platform filters candidates only after the protected scan.
@@ -954,8 +1026,20 @@ def main(
         )
 
     scan_report = scan_adapters(active_adapters)
-    if args.command == "clean":
+    if args.command in {"clean", "purge"}:
         scan_report = _filter_candidate_platforms(scan_report, args.platform)
+        if args.command == "purge":
+            return _run_codex_purge(
+                args,
+                scan_report=scan_report,
+                active_adapters=active_adapters,
+                stdin=input_stream,
+                stdout=output,
+                stderr=error_output,
+                app_server_factory=app_server_factory,
+                binary_resolver=binary_resolver,
+                adapter_builder=adapter_builder,
+            )
         return _run_planned_cleanup(
             args,
             scan_report=scan_report,
@@ -988,6 +1072,222 @@ def main(
         stderr=error_output,
     )
     return EXIT_OK if selected_report.ok else EXIT_ERROR
+
+
+def _run_codex_purge(
+    args: argparse.Namespace,
+    *,
+    scan_report: ScanReport,
+    active_adapters: Sequence[FrontendAdapter],
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
+) -> int:
+    """Execute every currently available Codex cleanup in safe-sized batches."""
+
+    from .planning import build_cleanup_plan
+
+    current_report = scan_report
+    completed_batches: list[dict[str, Any]] = []
+    seen_batches: set[tuple[str, tuple[str, ...]]] = set()
+    executed_action_count = 0
+
+    for batch_number in range(1, 1025):
+        try:
+            plan = build_cleanup_plan(current_report)
+        except Exception as exc:
+            return _emit_fatal_error(
+                "purge",
+                exc,
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if not plan.scan_complete:
+            return _emit_fatal_error(
+                "purge",
+                RuntimeError(
+                    "完整扫描未成功，批量清理已停止；没有继续猜测或绕过阻断。"
+                ),
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        batch = _next_purge_action_batch(plan.actions)
+        if batch is None:
+            unavailable = [
+                action
+                for action in plan.actions
+                if _enum_value(action.kind) != "keep" and not action.executable
+            ]
+            payload = {
+                "command": "purge",
+                "status": "completed",
+                "batch_count": len(completed_batches),
+                "executed_action_count": executed_action_count,
+                "remaining_blocked_or_unavailable_action_count": len(unavailable),
+                "remaining_plan_fingerprint": plan.plan_fingerprint,
+                "batches": completed_batches,
+            }
+            if args.json:
+                _write_json(payload, stdout)
+            else:
+                stdout.write(
+                    "批量清理完成："
+                    f"{len(completed_batches)} 批，"
+                    f"{executed_action_count} 个动作。"
+                )
+                if unavailable:
+                    stdout.write(
+                        f"另有 {len(unavailable)} 个动作因安全条件不足或尚未实现而保留。"
+                    )
+                stdout.write("\n")
+            return EXIT_OK
+
+        mutation_kind, action_ids = batch
+        signature = (mutation_kind, action_ids)
+        if signature in seen_batches:
+            return _emit_fatal_error(
+                "purge",
+                RuntimeError(
+                    "执行后的重新扫描仍返回完全相同的动作批次；"
+                    "为避免重复修改，批量清理已停止。"
+                ),
+                json_output=args.json,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        seen_batches.add(signature)
+
+        if not args.json:
+            stdout.write(
+                f"批次 {batch_number}：{_ACTION_LABELS.get(mutation_kind, mutation_kind)} "
+                f"{len(action_ids)} 个目标。\n"
+            )
+        batch_args = argparse.Namespace(**vars(args))
+        batch_args.command = "clean"
+        batch_args.action_id = list(action_ids)
+        batch_args.thread_id = []
+        batch_args.plan_fingerprint = plan.plan_fingerprint
+
+        batch_stdout = StringIO() if args.json else stdout
+        batch_stderr = StringIO() if args.json else stderr
+        result = _run_planned_cleanup(
+            batch_args,
+            scan_report=current_report,
+            active_adapters=active_adapters,
+            stdin=stdin,
+            stdout=batch_stdout,
+            stderr=batch_stderr,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+            adapter_builder=adapter_builder,
+        )
+        batch_document = {
+            "batch": batch_number,
+            "mutation_kind": mutation_kind,
+            "action_ids": list(action_ids),
+        }
+        if args.json:
+            batch_document["result"] = _purge_stream_document(batch_stdout)
+            error_document = _purge_stream_document(batch_stderr)
+            if error_document is not None:
+                batch_document["error_output"] = error_document
+        completed_batches.append(batch_document)
+        if result != EXIT_OK:
+            if args.json:
+                _write_json(
+                    {
+                        "command": "purge",
+                        "status": "failed",
+                        "exit_code": result,
+                        "batch_count": len(completed_batches),
+                        "executed_action_count": executed_action_count,
+                        "batches": completed_batches,
+                    },
+                    stdout,
+                )
+            else:
+                stderr.write(
+                    f"批量清理在第 {batch_number} 批停止；"
+                    "后续目标未执行。\n"
+                )
+            return result
+
+        executed_action_count += len(action_ids)
+        recheck_adapters = (
+            list(adapter_builder())
+            if adapter_builder is not None
+            else active_adapters
+        )
+        current_report = _filter_candidate_platforms(
+            scan_adapters(recheck_adapters),
+            args.platform,
+        )
+
+    return _emit_fatal_error(
+        "purge",
+        RuntimeError("批量清理超过 1024 批，已按安全上限停止。"),
+        json_output=args.json,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _next_purge_action_batch(
+    actions: Sequence[Any],
+) -> tuple[str, tuple[str, ...]] | None:
+    executable = [
+        action
+        for action in actions
+        if bool(getattr(action, "executable", False))
+        and _enum_value(action.kind)
+        in {
+            "delete_conversation",
+            "repair_legacy_index",
+            "remove_desktop_state",
+        }
+    ]
+    for mutation_kind in (
+        "delete_conversation",
+        "repair_legacy_index",
+        "remove_desktop_state",
+    ):
+        matching = [
+            action
+            for action in executable
+            if _enum_value(action.kind) == mutation_kind
+        ]
+        if not matching:
+            continue
+        if mutation_kind == "repair_legacy_index":
+            matching = [min(matching, key=lambda action: str(action.action_id))]
+        elif mutation_kind == "remove_desktop_state":
+            storage_id = min(str(action.target.storage_id) for action in matching)
+            matching = [
+                action
+                for action in matching
+                if str(action.target.storage_id) == storage_id
+            ]
+        return (
+            mutation_kind,
+            tuple(sorted(str(action.action_id) for action in matching)),
+        )
+    return None
+
+
+def _purge_stream_document(stream: TextIO) -> object | None:
+    rendered = stream.getvalue().strip() if hasattr(stream, "getvalue") else ""
+    if not rendered:
+        return None
+    try:
+        return json.loads(rendered)
+    except json.JSONDecodeError:
+        return rendered
 
 
 def _run_records(
