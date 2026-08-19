@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import ntpath
+import os
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from .codex_state import parse_thread_source, read_thread_metadata
 from .models import ConversationSummary, RolloutRecord, ThreadSourceInfo
+from .path_identity import canonical_existing_path_key
 
 
 __all__ = [
@@ -144,7 +146,7 @@ def _merge_summary(
             + _evidence_sha256(
                 {
                     "thread_id": record.thread_id,
-                    "path": str(record.path),
+                    "path": canonical_existing_path_key(record.path),
                     "originator": record.originator,
                     "source": record.source,
                     "cwd": record.cwd,
@@ -437,20 +439,16 @@ def _prefer_database_value(
 def _metadata_comparison_key(field: str, value: str) -> str:
     """Return a comparison key without changing the displayed metadata value.
 
-    Codex Desktop can persist the same Windows working directory both with and
-    without the Win32 extended-length prefix. Treat those spellings as the
-    same identity so a harmless ``\\\\?\\`` prefix does not block cleanup.
+    Codex Desktop can persist the same existing Windows directory with and
+    without the extended-length prefix. Collapse those spellings only after
+    filesystem identity is proven; missing paths remain distinct.
     Other metadata fields retain exact string comparison semantics.
     """
 
     if field != "cwd":
         return value
-    if value.startswith("\\\\?\\UNC\\"):
-        value = "\\\\" + value[8:]
-    elif value.startswith("\\\\?\\"):
-        value = value[4:]
-    if re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"):
-        return ntpath.normcase(ntpath.normpath(value))
+    if os.name == "nt" and ntpath.isabs(value):
+        return canonical_existing_path_key(value)
     return value
 
 

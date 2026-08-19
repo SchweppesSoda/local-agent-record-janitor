@@ -241,6 +241,7 @@ class CleanupPlanningTests(unittest.TestCase):
                         "every duplicate rollout; preserve all copies for "
                         "manual review."
                     ),
+                    "cleanup_blocker_codes": ["integrity_review_required"],
                 },
             )
 
@@ -289,6 +290,7 @@ class CleanupPlanningTests(unittest.TestCase):
                         "The alternate rollout may be recoverable; deletion "
                         "is not a safe path repair."
                     ),
+                    "cleanup_blocker_codes": ["integrity_review_required"],
                 },
             )
             plan = build_cleanup_plan(
@@ -633,6 +635,7 @@ class CleanupPlanningTests(unittest.TestCase):
                         "every duplicate rollout; preserve all copies for "
                         "manual review."
                     ),
+                    "cleanup_blocker_codes": ["integrity_review_required"],
                 },
             )
             plan = build_cleanup_plan(
@@ -781,6 +784,9 @@ class CleanupPlanningTests(unittest.TestCase):
                         "Codex thread/delete would cascade into known "
                         "descendant threads."
                     ),
+                    "cleanup_blocker_codes": [
+                        "cascade_requires_explicit_scope"
+                    ],
                 },
             )
             plan = build_cleanup_plan(
@@ -808,6 +814,116 @@ class CleanupPlanningTests(unittest.TestCase):
         )
         self.assertTrue(delete_action.requires_explicit_selection)
         self.assertEqual(delete_action.risk, RiskLevel.REVIEW)
+
+    def test_cascade_words_without_structured_code_never_waive_blocker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            finding = _finding(
+                home,
+                "uncoded-cascade",
+                "frontend_deleted_reference",
+                platform="aionui",
+                details={
+                    "ownership_status": "confirmed",
+                    "cascade_check_available": True,
+                    "cascade_safe": False,
+                    "has_unreviewed_descendants": True,
+                    "cascade_descendant_count": 1,
+                    "cleanable": False,
+                    "thread_delete_supported": True,
+                    "cleanup_blocked_reason": (
+                        "Cascade into descendants would delete protected data."
+                    ),
+                },
+            )
+            plan = build_cleanup_plan(
+                [finding],
+                **_readers(
+                    descendants={"uncoded-cascade": {"protected-child"}},
+                    indexed={"uncoded-cascade", "protected-child"},
+                ),
+            )
+
+        delete_action = next(
+            action
+            for action in plan.actions
+            if action.kind is ActionKind.DELETE_CONVERSATION
+        )
+        self.assertFalse(delete_action.available)
+        self.assertEqual(delete_action.risk, RiskLevel.BLOCKED)
+        self.assertIn("protected data", delete_action.unavailable_reason or "")
+
+    def test_delete_capability_and_blocker_codes_fail_closed(self) -> None:
+        cases = (
+            (
+                "codes-omitted-unsafe",
+                {"cleanable": False, "thread_delete_supported": True},
+                (),
+            ),
+            (
+                "codes-none-unsafe",
+                {
+                    "cleanable": False,
+                    "thread_delete_supported": True,
+                    "cleanup_blocker_codes": None,
+                },
+                (),
+            ),
+            (
+                "codes-malformed",
+                {
+                    "cleanable": True,
+                    "thread_delete_supported": True,
+                    "cleanup_blocker_codes": "cascade_requires_explicit_scope",
+                },
+                (),
+            ),
+            (
+                "codes-unknown",
+                {
+                    "cleanable": True,
+                    "thread_delete_supported": True,
+                    "cleanup_blocker_codes": ["future_safety_blocker"],
+                },
+                (),
+            ),
+            (
+                "cleanable-missing",
+                {"thread_delete_supported": True},
+                ("cleanable",),
+            ),
+            (
+                "thread-delete-support-missing",
+                {"cleanable": True},
+                ("thread_delete_supported",),
+            ),
+        )
+        for thread_id, details, removed_keys in cases:
+            with self.subTest(case=thread_id), tempfile.TemporaryDirectory() as root:
+                home = Path(root) / "home"
+                finding = _finding(
+                    home,
+                    thread_id,
+                    "index_missing_rollout",
+                    details=details,
+                )
+                for key in removed_keys:
+                    finding.details.pop(key, None)
+                plan = build_cleanup_plan(
+                    [finding],
+                    **_readers(indexed={thread_id}),
+                )
+
+            delete_action = next(
+                action
+                for action in plan.actions
+                if action.kind is ActionKind.DELETE_CONVERSATION
+            )
+            self.assertFalse(delete_action.available)
+            self.assertEqual(delete_action.risk, RiskLevel.BLOCKED)
+            self.assertTrue(delete_action.unavailable_reason)
 
     def test_unavailable_frontend_descendant_graph_remains_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -1301,6 +1417,9 @@ class CleanupPlanningTests(unittest.TestCase):
                         "thread/delete does not expose a standalone "
                         "spawn-edge cleanup operation."
                     ),
+                    "cleanup_blocker_codes": [
+                        "standalone_relation_cleanup_unavailable"
+                    ],
                     "direct_database_edit_supported": False,
                 },
             )
@@ -1484,6 +1603,9 @@ class CleanupPlanningTests(unittest.TestCase):
                     "thread/delete does not expose a standalone "
                     "spawn-edge cleanup operation."
                 ),
+                "cleanup_blocker_codes": [
+                    "standalone_relation_cleanup_unavailable"
+                ],
                 "direct_database_edit_supported": False,
             }
             finding = _finding(
@@ -1611,6 +1733,7 @@ class CleanupPlanningTests(unittest.TestCase):
                         "every duplicate rollout; preserve all copies for "
                         "manual review."
                     ),
+                    "cleanup_blocker_codes": ["integrity_review_required"],
                 },
             )
             combined_plan = build_cleanup_plan(

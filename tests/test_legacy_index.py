@@ -119,6 +119,121 @@ class LegacyIndexTests(unittest.TestCase):
         self.assertEqual(payload["residual_thread_ids"], ["gone"])
         self.assertEqual(len(payload["lines"]), len(raw_lines))
 
+    def test_read_only_sqlite_shm_timestamp_touch_is_not_snapshot_drift(self) -> None:
+        self._write_index(b'{"id":"gone"}\n')
+        shm = self.codex_home / "state_5.sqlite-shm"
+        shm.write_bytes(b"stable shared-memory identity")
+        real_connect = sqlite3.connect
+
+        def touch_shm_then_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            current = shm.stat()
+            os.utime(
+                shm,
+                ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000),
+            )
+            return real_connect(*args, **kwargs)
+
+        with mock.patch(
+            "local_agent_record_janitor.legacy_index.sqlite3.connect",
+            side_effect=touch_shm_then_connect,
+        ):
+            inventory = inventory_legacy_index(self.codex_home)
+
+        self.assertEqual(inventory.residual_thread_ids, ("gone",))
+
+    def test_sqlite_shm_size_change_still_blocks_inventory(self) -> None:
+        self._write_index(b'{"id":"gone"}\n')
+        shm = self.codex_home / "state_5.sqlite-shm"
+        shm.write_bytes(b"stable shared-memory identity")
+        real_connect = sqlite3.connect
+
+        def grow_shm_then_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+            shm.write_bytes(shm.read_bytes() + b"drift")
+            return real_connect(*args, **kwargs)
+
+        with mock.patch(
+            "local_agent_record_janitor.legacy_index.sqlite3.connect",
+            side_effect=grow_shm_then_connect,
+        ):
+            with self.assertRaises(LegacyIndexInventoryError):
+                inventory_legacy_index(self.codex_home)
+
+    def test_sqlite_shm_same_size_replacement_still_blocks_inventory(self) -> None:
+        self._write_index(b'{"id":"gone"}\n')
+        shm = self.codex_home / "state_5.sqlite-shm"
+        payload = b"stable shared-memory identity"
+        shm.write_bytes(payload)
+        replacement = self.codex_home / "replacement-shm"
+        replacement.write_bytes(payload)
+        real_connect = sqlite3.connect
+
+        def replace_shm_then_connect(
+            *args: object,
+            **kwargs: object,
+        ) -> sqlite3.Connection:
+            os.replace(replacement, shm)
+            return real_connect(*args, **kwargs)
+
+        with mock.patch(
+            "local_agent_record_janitor.legacy_index.sqlite3.connect",
+            side_effect=replace_shm_then_connect,
+        ):
+            with self.assertRaises(LegacyIndexInventoryError):
+                inventory_legacy_index(self.codex_home)
+
+    def test_main_database_timestamp_change_blocks_inventory(self) -> None:
+        self._write_index(b'{"id":"gone"}\n')
+        database = self.codex_home / "state_5.sqlite"
+        real_connect = sqlite3.connect
+
+        def touch_database_then_connect(
+            *args: object,
+            **kwargs: object,
+        ) -> sqlite3.Connection:
+            current = database.stat()
+            os.utime(
+                database,
+                ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000),
+            )
+            return real_connect(*args, **kwargs)
+
+        with mock.patch(
+            "local_agent_record_janitor.legacy_index.sqlite3.connect",
+            side_effect=touch_database_then_connect,
+        ):
+            with self.assertRaises(LegacyIndexInventoryError):
+                inventory_legacy_index(self.codex_home)
+
+    def test_wal_and_journal_timestamp_changes_are_not_ignored(self) -> None:
+        self._write_index(b'{"id":"gone"}\n')
+        real_connect = sqlite3.connect
+        for suffix in ("-wal", "-journal"):
+            with self.subTest(suffix=suffix):
+                sidecar = self.codex_home / f"state_5.sqlite{suffix}"
+                sidecar.write_bytes(b"stable sidecar identity")
+
+                def touch_sidecar_then_connect(
+                    *args: object,
+                    **kwargs: object,
+                ) -> sqlite3.Connection:
+                    current = sidecar.stat()
+                    os.utime(
+                        sidecar,
+                        ns=(
+                            current.st_atime_ns,
+                            current.st_mtime_ns + 1_000_000_000,
+                        ),
+                    )
+                    return real_connect(*args, **kwargs)
+
+                with mock.patch(
+                    "local_agent_record_janitor.legacy_index.sqlite3.connect",
+                    side_effect=touch_sidecar_then_connect,
+                ):
+                    with self.assertRaises(LegacyIndexInventoryError):
+                        inventory_legacy_index(self.codex_home)
+                sidecar.unlink(missing_ok=True)
+
     def test_repair_removes_only_approved_residual_lines_and_restores(self) -> None:
         raw = (
             b'{"id":"live","thread_name":"first"}\r\n'

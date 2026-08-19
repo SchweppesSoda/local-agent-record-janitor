@@ -10,6 +10,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .adapters.base import FrontendAdapter
+from .blocker_codes import (
+    CASCADE_REQUIRES_EXPLICIT_SCOPE,
+    INTEGRITY_REVIEW_REQUIRED,
+    LIVE_FRONTEND_REFERENCE,
+    STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
+    cleanup_blocker_codes,
+    exact_blocker_codes,
+)
 from .codex_app_server import CodexAppServer
 from .codex_state import (
     find_thread_rollouts,
@@ -29,6 +37,7 @@ from .conversation_metadata import (
 )
 from .discovery import choose_codex_binary
 from .models import Finding
+from .path_identity import canonical_existing_path_key
 
 
 class ThreadSelectionError(ValueError):
@@ -243,16 +252,12 @@ ExpectedDeletionScopes = Mapping[CleanupTargetKey, ExpectedScopeValue]
 def finding_key(finding: Finding) -> tuple[str, str]:
     """Return the stable cleanup identity for a finding."""
 
-    home = os.path.normcase(os.path.abspath(os.fspath(finding.codex_home)))
+    home = canonical_existing_path_key(finding.codex_home)
     return home, finding.thread_id
 
 
 def _normalize_binary_hint(hint: str | os.PathLike[str]) -> str:
-    return os.path.normcase(
-        os.path.abspath(
-            os.fspath(Path(hint).expanduser())
-        )
-    )
+    return canonical_existing_path_key(Path(hint).expanduser())
 
 
 def _finding_binary_hint_candidates(finding: Finding) -> set[str]:
@@ -361,7 +366,7 @@ def scan_adapters(
             continue
         if not os.fspath(raw_binary_hint):
             continue
-        home = os.path.normcase(os.path.abspath(os.fspath(raw_codex_home)))
+        home = canonical_existing_path_key(raw_codex_home)
         binary_hints_by_home[home].add(
             _normalize_binary_hint(raw_binary_hint)
         )
@@ -690,6 +695,12 @@ def cleanup_block_reason(
         explicit_reason = details.get("cleanup_blocked_reason")
         if isinstance(explicit_reason, str) and explicit_reason.strip():
             return explicit_reason.strip()
+        blocker_codes = cleanup_blocker_codes(details)
+        if blocker_codes:
+            return (
+                "Structured cleanup blocker codes prevent deletion: "
+                + ", ".join(sorted(blocker_codes))
+            )
         if details.get("needs_quarantine") is True:
             return (
                 "The finding requires quarantine/manual review; this release "
@@ -771,60 +782,20 @@ def _without_cascade_only_blockers(
     details: Mapping[str, Any],
 ) -> dict[str, Any]:
     sanitized = dict(details)
-    explicit = sanitized.get("cleanup_blocked_reason")
-    explicit_is_cascade_only = (
-        isinstance(explicit, str)
-        and _is_cascade_only_reason(explicit)
-    )
-    descendants = sanitized.get("cascade_descendants")
-    listed_descendants = (
-        isinstance(descendants, (list, tuple, set, frozenset))
-        and bool(descendants)
-    )
-    known_descendant_count = any(
-        isinstance(sanitized.get(key), int)
-        and sanitized[key] > 0
-        for key in (
-            "cascade_descendant_count",
-            "spawn_descendant_edge_count",
-        )
-    )
-    has_cascade_only_evidence = (
-        explicit_is_cascade_only
-        or listed_descendants
-        or known_descendant_count
-    )
-    if not has_cascade_only_evidence:
+    if not exact_blocker_codes(
+        sanitized,
+        CASCADE_REQUIRES_EXPLICIT_SCOPE,
+    ):
         return sanitized
 
-    if explicit_is_cascade_only:
-        sanitized["cleanup_blocked_reason"] = None
+    sanitized["cleanup_blocked_reason"] = None
+    sanitized["cleanup_blocker_codes"] = []
     sanitized["cascade_safe"] = True
     sanitized["has_unreviewed_descendants"] = False
     sanitized["cascade_descendants"] = []
     if sanitized.get("cleanable") is False:
         sanitized["cleanable"] = True
     return sanitized
-
-
-def _is_cascade_only_reason(reason: str) -> bool:
-    lowered = reason.lower()
-    if "descendant" not in lowered and "cascade" not in lowered:
-        return False
-    return not any(
-        token in lowered
-        for token in (
-            "unavailable",
-            "could not",
-            "conflict",
-            "live",
-            "open",
-            "parent still",
-            "unrelated",
-            "recover",
-            "quarantine",
-        )
-    )
 
 
 def _clean_group(
@@ -1504,17 +1475,16 @@ def _without_integrity_soft_blockers(
     ):
         return sanitized
 
-    explicit = sanitized.get("cleanup_blocked_reason")
-    if (
-        not isinstance(explicit, str)
-        or not _is_native_integrity_soft_reason(
-            finding_type,
-            explicit,
-        )
-    ):
+    expected_code = (
+        STANDALONE_RELATION_CLEANUP_UNAVAILABLE
+        if finding_type == "residual_spawn_edge"
+        else INTEGRITY_REVIEW_REQUIRED
+    )
+    if not exact_blocker_codes(sanitized, expected_code):
         return sanitized
 
     sanitized["cleanup_blocked_reason"] = None
+    sanitized["cleanup_blocker_codes"] = []
     if sanitized.get("cleanable") is False:
         sanitized["cleanable"] = True
     if sanitized.get("thread_delete_supported") is False:
@@ -1581,28 +1551,6 @@ def _has_integrity_hard_signal(
         )
         and bool(live_descendants)
     )
-
-
-def _is_native_integrity_soft_reason(
-    finding_type: str,
-    reason: str,
-) -> bool:
-    normalized = " ".join(reason.lower().split())
-    expected_reasons = {
-        "duplicate_rollout": (
-            "official deletion has not been verified to remove every "
-            "duplicate rollout; preserve all copies for manual review."
-        ),
-        "index_rollout_path_mismatch": (
-            "the alternate rollout may be recoverable; deletion is not a "
-            "safe path repair."
-        ),
-        "residual_spawn_edge": (
-            "thread/delete does not expose a standalone spawn-edge cleanup "
-            "operation."
-        ),
-    }
-    return normalized == expected_reasons.get(finding_type)
 
 
 def _resolve_expected_scope(
@@ -1946,7 +1894,7 @@ def _with_verification_scope(
         identity_issues: list[str] = []
         for thread_id, records in records_by_thread.items():
             record_paths = {
-                os.path.normcase(os.path.abspath(record.path))
+                canonical_existing_path_key(record.path)
                 for record in records
             }
             is_root = thread_id == finding.thread_id
@@ -1970,7 +1918,7 @@ def _with_verification_scope(
                 else None
             )
             indexed_path_key = (
-                os.path.normcase(os.path.abspath(indexed_path))
+                canonical_existing_path_key(indexed_path)
                 if indexed_path is not None
                 else None
             )
@@ -2088,17 +2036,17 @@ def _with_verification_scope(
                 )
 
         parsed_path_keys = {
-            os.path.normcase(os.path.abspath(path))
+            canonical_existing_path_key(path)
             for path in parsed_rollout_paths
         }
         unowned_indexed_paths = sorted(
             (
                 path
                 for path in existing_indexed_rollout_paths
-                if os.path.normcase(os.path.abspath(path))
+                if canonical_existing_path_key(path)
                 not in parsed_path_keys
             ),
-            key=lambda path: os.path.normcase(os.path.abspath(path)),
+            key=canonical_existing_path_key,
         )
         if unowned_indexed_paths:
             identity_issues.append(
@@ -2117,8 +2065,10 @@ def _with_verification_scope(
     )
     details["captured_indexed_thread_ids"] = sorted(indexed)
     details["captured_rollout_paths"] = sorted(
-        _normalize_scope_path(finding.codex_home, path)
-        for path in current_rollout_paths
+        {
+            _normalize_scope_path(finding.codex_home, path)
+            for path in current_rollout_paths
+        }
     )
 
     # Exact planned scope follows the planner's "currently existing content
@@ -2501,7 +2451,7 @@ def _normalize_scope_path(
 ) -> str:
     path = _thread_index_rollout_path(codex_home, raw_path)
     assert path is not None
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    return canonical_existing_path_key(path)
 
 
 def _edge_artifact_marker(parent: str, child: str) -> str:
@@ -2536,9 +2486,7 @@ def _apply_live_reference_protection(
         codex_home = getattr(adapter, "codex_home", None)
         if codex_home is None:
             continue
-        home = os.path.normcase(
-            os.path.abspath(os.fspath(codex_home))
-        )
+        home = canonical_existing_path_key(codex_home)
         protected[home].update(
             thread_id
             for thread_id in live_ids
@@ -2590,6 +2538,7 @@ def _apply_live_reference_protection(
 
         details = dict(finding.details)
         reasons: list[str] = []
+        blocker_codes = set(cleanup_blocker_codes(details))
         existing_reason = details.get("cleanup_blocked_reason")
         if isinstance(existing_reason, str) and existing_reason.strip():
             reasons.append(existing_reason.strip())
@@ -2610,6 +2559,9 @@ def _apply_live_reference_protection(
                 "live_descendant_reference_count": len(live_descendants),
                 "live_descendant_thread_ids": live_descendants,
                 "cleanup_blocked_reason": " ".join(reasons),
+                "cleanup_blocker_codes": sorted(
+                    blocker_codes | {LIVE_FRONTEND_REFERENCE}
+                ),
             }
         )
         guarded.append(replace(finding, details=details))

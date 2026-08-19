@@ -252,7 +252,7 @@ class NativeIntegrityAdapterTests(unittest.TestCase):
         # do not double-report the same edge.
         self.assertEqual(self.by_type(findings, "residual_spawn_edge"), [])
 
-    def test_parent_index_without_rollout_blocks_child_autoclean(self) -> None:
+    def test_parent_index_without_rollout_is_one_parent_problem(self) -> None:
         parent_id = "broken-parent"
         child_id = "child-of-broken-parent"
         child_source = {
@@ -293,15 +293,103 @@ class NativeIntegrityAdapterTests(unittest.TestCase):
 
         findings = self.adapter().scan()
         parent = self.by_type(findings, "index_missing_rollout")[0]
-        child = self.by_type(findings, "orphaned_subagent_thread")[0]
 
         self.assertFalse(parent.details["cleanable"])
         self.assertEqual(parent.details["spawn_descendant_edge_count"], 1)
-        self.assertTrue(child.details["thread_delete_supported"])
-        self.assertFalse(child.details["cleanable"])
-        self.assertIn(
-            "parent still has a native artifact",
-            child.details["cleanup_blocked_reason"].lower(),
+        self.assertEqual(
+            self.by_type(findings, "orphaned_subagent_thread"), []
+        )
+        self.assertEqual(self.by_type(findings, "residual_spawn_edge"), [])
+
+    def test_parent_rollout_without_index_is_one_parent_problem(self) -> None:
+        parent_id = "rollout-only-parent"
+        child_id = "child-of-rollout-only-parent"
+        parent_rollout = write_rollout(
+            self.codex_home,
+            parent_id,
+            originator="Codex Desktop",
+        )
+        child_source = {
+            "subagent": {
+                "thread_spawn": {"parent_thread_id": parent_id, "depth": 1}
+            }
+        }
+        child_rollout = write_rollout(
+            self.codex_home,
+            child_id,
+            originator="Codex Desktop",
+            source=child_source,
+        )
+        create_thread_index(
+            self.codex_home,
+            [
+                {
+                    "id": child_id,
+                    "rollout_path": str(child_rollout),
+                    "source": child_source,
+                    "thread_source": "subagent",
+                },
+            ],
+            spawn_edges=[
+                {
+                    "parent_thread_id": parent_id,
+                    "child_thread_id": child_id,
+                    "status": "closed",
+                }
+            ],
+        )
+
+        findings = self.adapter().scan()
+        rollout_only = self.by_type(findings, "rollout_missing_index")
+
+        self.assertEqual(len(rollout_only), 1)
+        self.assertEqual(rollout_only[0].thread_id, parent_id)
+        self.assertIsNotNone(rollout_only[0].rollout)
+        self.assertEqual(rollout_only[0].rollout.path, parent_rollout)
+        self.assertEqual(
+            self.by_type(findings, "orphaned_subagent_thread"), []
+        )
+        self.assertEqual(self.by_type(findings, "residual_spawn_edge"), [])
+
+    def test_rollout_only_child_of_complete_parent_is_one_child_problem(self) -> None:
+        parent_id = "complete-parent"
+        child_id = "rollout-only-child"
+        parent_rollout = write_rollout(
+            self.codex_home,
+            parent_id,
+            originator="Codex Desktop",
+        )
+        child_source = {
+            "subagent": {
+                "thread_spawn": {"parent_thread_id": parent_id, "depth": 1}
+            }
+        }
+        write_rollout(
+            self.codex_home,
+            child_id,
+            originator="Codex Desktop",
+            source=child_source,
+        )
+        create_thread_index(
+            self.codex_home,
+            [{"id": parent_id, "rollout_path": str(parent_rollout)}],
+            spawn_edges=[
+                {
+                    "parent_thread_id": parent_id,
+                    "child_thread_id": child_id,
+                    "status": "closed",
+                }
+            ],
+        )
+
+        findings = self.adapter().scan()
+        rollout_only = self.by_type(findings, "rollout_missing_index")
+
+        self.assertEqual(len(rollout_only), 1)
+        self.assertEqual(rollout_only[0].thread_id, child_id)
+        self.assertEqual(self.by_type(findings, "residual_spawn_edge"), [])
+        self.assertEqual(
+            self.by_type(findings, "orphaned_subagent_thread"), []
         )
 
     def test_open_edge_blocks_orphan_autoclean(self) -> None:

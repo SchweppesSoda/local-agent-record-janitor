@@ -15,6 +15,7 @@ from local_agent_record_janitor.cleaner import (
     ExpectedDeletionScope,
     VerificationResult,
     clean_findings,
+    cleanup_block_reason,
     deduplicate_findings,
     finding_key,
     scan_adapters,
@@ -25,6 +26,7 @@ from local_agent_record_janitor.codex_state import (
 )
 from local_agent_record_janitor.discovery import choose_codex_binary, resolve_cindy_profiles
 from local_agent_record_janitor.models import Finding, RolloutRecord
+from local_agent_record_janitor.path_identity import canonical_existing_path_key
 from local_agent_record_janitor.planning import ActionKind, build_cleanup_plan
 
 from tests.support import create_cindy_database, create_thread_index, write_rollout
@@ -62,6 +64,24 @@ class CleanupExecutionTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self.codex_home = self.root / "codex-home"
         self.codex_home.mkdir()
+
+    def test_direct_cleanup_rejects_unknown_or_malformed_blocker_codes(self) -> None:
+        for blocker_codes in (["future_safety_blocker"], "malformed"):
+            with self.subTest(blocker_codes=blocker_codes):
+                finding = self.finding(
+                    "blocked-" + str(len(str(blocker_codes)))
+                )
+                finding.details["cleanup_blocker_codes"] = blocker_codes
+                reason = cleanup_block_reason(
+                    finding,
+                    explicit_selection=True,
+                )
+                server = FakeAppServer()
+                report = self.clean([finding], server=server)
+
+                self.assertIn("Structured cleanup blocker", reason or "")
+                self.assertEqual(server.deleted_thread_ids, [])
+                self.assertEqual(report.succeeded, 0)
 
     def test_cross_database_live_owner_reference_guards_local_tombstone(self) -> None:
         cindy_root = self.root / "CindyGlobal"
@@ -116,6 +136,10 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(len(scan.findings), 1)
         self.assertTrue(finding.details["live_reference_guard"])
         self.assertTrue(finding.details["live_reference_self"])
+        self.assertIn(
+            "live_frontend_reference",
+            finding.details["cleanup_blocker_codes"],
+        )
         self.assertFalse(finding.details["cleanable"])
         self.assertFalse(action.available)
         self.assertEqual(server.deleted_thread_ids, [])
@@ -183,6 +207,7 @@ class CleanupExecutionTests(unittest.TestCase):
                 "Official deletion has not been verified to remove every "
                 "duplicate rollout; preserve all copies for manual review."
             ),
+            "cleanup_blocker_codes": ["integrity_review_required"],
             "manual_review_required": True,
         }
         return finding, (finding.rollout.path, archived_path)
@@ -218,6 +243,7 @@ class CleanupExecutionTests(unittest.TestCase):
                 "The alternate rollout may be recoverable; deletion is not "
                 "a safe path repair."
             ),
+            "cleanup_blocker_codes": ["integrity_review_required"],
             "manual_review_required": True,
         }
         return finding, finding.rollout.path, indexed_path
@@ -411,33 +437,18 @@ class CleanupExecutionTests(unittest.TestCase):
         parent_id: str = "residual-parent",
         child_id: str = "residual-child",
     ) -> tuple[Finding, object, ExpectedDeletionScope]:
-        parent_path = write_rollout(
-            self.codex_home,
-            parent_id,
-            originator="Codex Desktop",
-        )
-        child_source = {
-            "subagent": {
-                "thread_spawn": {
-                    "parent_thread_id": parent_id,
-                    "depth": 1,
-                }
-            }
-        }
+        # A genuine residual relation has a missing endpoint.  A complete
+        # parent plus rollout-only child is only ``rollout_missing_index`` and
+        # must not be double-classified as a residual edge.
         write_rollout(
             self.codex_home,
             child_id,
             originator="Codex Desktop",
-            source=child_source,
+            source="app-server",
         )
         create_thread_index(
             self.codex_home,
-            [
-                {
-                    "id": parent_id,
-                    "rollout_path": str(parent_path),
-                }
-            ],
+            [],
             spawn_edges=[
                 {
                     "parent_thread_id": parent_id,
@@ -572,11 +583,7 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(
             binary_calls,
             [
-                Path(
-                    os.path.normcase(
-                        os.path.abspath(absolute_hint)
-                    )
-                )
+                Path(canonical_existing_path_key(absolute_hint))
             ],
         )
         self.assertEqual(
@@ -605,12 +612,8 @@ class CleanupExecutionTests(unittest.TestCase):
             deduplicated[0].details["codex_bin_hint_candidates"],
             sorted(
                 [
-                    os.path.normcase(
-                        os.path.abspath(first.codex_bin_hint)
-                    ),
-                    os.path.normcase(
-                        os.path.abspath(second.codex_bin_hint)
-                    ),
+                    canonical_existing_path_key(first.codex_bin_hint),
+                    canonical_existing_path_key(second.codex_bin_hint),
                 ]
             ),
         )
@@ -665,11 +668,7 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(
             resolver_calls,
             [
-                Path(
-                    os.path.normcase(
-                        os.path.abspath(executable)
-                    )
-                )
+                Path(canonical_existing_path_key(executable))
             ],
         )
         self.assertEqual(factory_calls, [])
@@ -1309,8 +1308,8 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(
             set(action.impact.rollout_paths),
             {
-                str(active_path.resolve()).lower(),
-                str(archived_path.resolve()).lower(),
+                canonical_existing_path_key(active_path),
+                canonical_existing_path_key(archived_path),
             },
         )
         self.assertEqual(server.deleted_thread_ids, [child_id])
@@ -1794,7 +1793,7 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(
             action.impact.rollout_paths,
             (
-                str(actual_path.resolve()).lower(),
+                canonical_existing_path_key(actual_path),
             ),
         )
 
@@ -2299,6 +2298,9 @@ class CleanupExecutionTests(unittest.TestCase):
                 "cleanup_blocked_reason": (
                     "thread/delete would cascade into spawned descendants."
                 ),
+                "cleanup_blocker_codes": [
+                    "cascade_requires_explicit_scope"
+                ],
             }
         )
         server = FakeAppServer()
@@ -2312,7 +2314,7 @@ class CleanupExecutionTests(unittest.TestCase):
         self.assertEqual(server.deleted_thread_ids, ["root"])
         self.assertEqual(report.results[0].status, "not_deleted")
 
-    def test_exact_integrity_scope_sanitizes_pure_cascade_flags_first(
+    def test_integrity_approval_does_not_waive_uncoded_cascade_flags(
         self,
     ) -> None:
         root_finding, root_paths = self.duplicate_integrity_finding("root")
@@ -2368,8 +2370,9 @@ class CleanupExecutionTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(server.deleted_thread_ids, ["root"])
-        self.assertEqual(report.results[0].status, "deleted")
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertEqual(report.results[0].status, "unknown")
+        self.assertIn("safety policy", report.results[0].error or "")
 
     def test_startup_descendant_duplicate_blocks_even_if_expected(
         self,

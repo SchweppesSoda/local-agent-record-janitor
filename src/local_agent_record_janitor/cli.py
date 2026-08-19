@@ -13,6 +13,10 @@ from typing import Any, TextIO
 
 from .adapters import AionUIAdapter, CindyAdapter
 from .adapters.base import FrontendAdapter
+from .blocker_codes import (
+    STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
+    exact_blocker_codes,
+)
 from .cleaner import (
     AppServerFactory,
     BinaryResolver,
@@ -38,6 +42,7 @@ from .discovery import (
     resolve_cindy_profiles,
 )
 from .models import Finding
+from .path_identity import canonical_existing_path_key
 from .rendering import safe_single_line
 from .legacy_index import (
     LegacyIndexError,
@@ -52,6 +57,7 @@ from .legacy_index import (
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CONFIRMATION_REQUIRED = 2
+EXIT_GOAL_NOT_SATISFIED = 3
 DEFAULT_HUMAN_LIMIT = 20
 MANUAL_DELETE_CONFIRMATION = "客户端已关闭并确认永久删除"
 PI_DELETE_CONFIRMATION = "Pi 客户端已关闭并确认永久删除"
@@ -102,9 +108,6 @@ _UNIMPLEMENTED_ACTION_REASONS = {
     ),
     "remove_frontend_reference": (
         "清除该前端的残留引用尚未实现；删除 Codex 对话不会清除这条前端记录"
-    ),
-    "repair_legacy_index": (
-        "修复旧版聚合索引尚未实现；聚合索引项不能作为对话删除目标"
     ),
 }
 _BLOCKED_REASON_LABELS = (
@@ -237,6 +240,10 @@ _BLOCKED_REASON_LABELS = (
 )
 
 
+class AgentArgumentError(ValueError):
+    """An Agent-only parser error that must be returned as structured JSON."""
+
+
 class _ChineseArgumentParser(argparse.ArgumentParser):
     """Use Chinese framing around argparse's public help text."""
 
@@ -253,6 +260,11 @@ class _ChineseArgumentParser(argparse.ArgumentParser):
 
     def format_help(self) -> str:
         return super().format_help().replace("usage: ", "用法：", 1)
+
+    def error(self, message: str) -> None:
+        if bool(getattr(self, "_agent_json_errors", False)):
+            raise AgentArgumentError(message)
+        super().error(message)
 
 
 class NumberSelectionError(ValueError):
@@ -633,6 +645,110 @@ def build_parser() -> argparse.ArgumentParser:
         help="app-server 请求超时秒数（默认：30）",
     )
 
+    agent = subparsers.add_parser(
+        "agent",
+        help="供 AGENTS 使用的非交互、可审计清理接口",
+        description=(
+            "只输出结构化 JSON；通过独立 plan 哈希授权、持久化 operation "
+            "状态和只读 verify，避免崩溃后重复发送删除。"
+        ),
+    )
+    agent._agent_json_errors = True
+    agent_subparsers = agent.add_subparsers(
+        dest="agent_command",
+        required=True,
+        title="Agent 命令",
+    )
+
+    agent_doctor = agent_subparsers.add_parser(
+        "doctor",
+        help="只读核验目标存储、扫描和客户端状态",
+    )
+    agent_doctor._agent_json_errors = True
+    _add_common_arguments(
+        agent_doctor,
+        codex_only=True,
+        allow_thread_selector=False,
+    )
+
+    agent_plan = agent_subparsers.add_parser(
+        "plan",
+        help="生成不可变的单批清理授权计划",
+    )
+    agent_plan._agent_json_errors = True
+    _add_common_arguments(
+        agent_plan,
+        codex_only=True,
+        allow_thread_selector=False,
+    )
+    agent_plan.add_argument(
+        "--operation",
+        choices=("purge",),
+        default="purge",
+        help="当前支持 purge（默认：purge）",
+    )
+    agent_plan.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        metavar="PLAN.json",
+        help="新计划文件路径；为防止授权混淆，绝不覆盖现有文件",
+    )
+
+    agent_apply = agent_subparsers.add_parser(
+        "apply",
+        help="按计划哈希执行冻结动作集合",
+    )
+    agent_apply._agent_json_errors = True
+    agent_apply.add_argument("--plan", type=Path, required=True)
+    agent_apply.add_argument(
+        "--authorized-plan-sha256",
+        metavar="SHA256",
+        help="复核后原样回传计划中的 plan_sha256",
+    )
+    agent_apply.add_argument(
+        "--clients-closed",
+        action="store_true",
+        help="确认目标数据目录相关客户端均已关闭",
+    )
+    agent_apply.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        metavar="SECONDS",
+        help="单次 app-server 请求超时（默认：30）",
+    )
+    agent_apply.add_argument(
+        "--verify-timeout",
+        type=_nonnegative_int,
+        default=180,
+        metavar="SECONDS",
+        help="保留给验证策略的总时限（默认：180）",
+    )
+
+    agent_status = agent_subparsers.add_parser(
+        "status",
+        help="只读返回已持久化的 operation 状态",
+    )
+    agent_status._agent_json_errors = True
+    agent_status.add_argument("--operation-id", required=True)
+    agent_status.add_argument("--codex-home", type=Path, metavar="PATH")
+
+    agent_verify = agent_subparsers.add_parser(
+        "verify",
+        help="不重发删除，只读核验冻结目标是否已消失",
+    )
+    agent_verify._agent_json_errors = True
+    agent_verify.add_argument("--operation-id", required=True)
+    agent_verify.add_argument("--codex-home", type=Path, metavar="PATH")
+    agent_verify.add_argument(
+        "--verify-timeout",
+        type=_nonnegative_int,
+        default=180,
+        metavar="SECONDS",
+        help="总核验时限（默认：180）",
+    )
+
     restore = subparsers.add_parser(
         "restore-legacy-index",
         help="从 Janitor 的可验证备份还原旧版聚合索引",
@@ -842,7 +958,68 @@ def main(
     output = stdout or sys.stdout
     error_output = stderr or sys.stderr
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except AgentArgumentError as exc:
+        document = {
+                "schema_version": "larj.agent-result.v1",
+                "document_type": "operation_result",
+                "command": "agent",
+                "subcommand": "invalid",
+                "mode": "agent",
+                "phase": "failed",
+                "operation_id": "unaccepted",
+                "plan_sha256": "",
+                "goal_status": "unknown",
+                "goal_satisfied": False,
+                "modified": False,
+                "mutation_started": False,
+                "blockers": [
+                    {
+                        "blocker_code": "invalid_agent_arguments",
+                        "scope": "agent_command",
+                        "severity": "error",
+                        "retryable": False,
+                        "remediation": (
+                            "Correct the Agent command arguments and retry; "
+                            "no mutation was attempted."
+                        ),
+                        "message": str(exc),
+                    }
+                ],
+                "counts": {
+                    "finding_count": 0,
+                    "issue_group_count": 0,
+                    "root_action_count": 0,
+                    "affected_thread_count": 0,
+                    "artifact_count": 0,
+                    "blocked_group_count": 0,
+                    "legacy_residual_line_count": 0,
+                    "legacy_residual_unique_thread_count": 0,
+                },
+            }
+        json.dump(
+            document,
+            output,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        output.write("\n")
+        return EXIT_ERROR
+
+    if args.command == "agent":
+        from .agent_cli import run_agent_command
+
+        return run_agent_command(
+            args,
+            supplied_adapters=adapters,
+            stdout=output,
+            stderr=error_output,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+        )
 
     if args.command == "restore-legacy-index":
         return _run_legacy_index_restore(
@@ -1107,46 +1284,134 @@ def _run_codex_purge(
                 stderr=stderr,
             )
         if not plan.scan_complete:
-            return _emit_fatal_error(
-                "purge",
-                RuntimeError(
-                    "完整扫描未成功，批量清理已停止；没有继续猜测或绕过阻断。"
-                ),
-                json_output=args.json,
-                stdout=stdout,
-                stderr=stderr,
-            )
+            from .agent_operations import plan_counts, structured_blocker
 
-        batch = _next_purge_action_batch(plan.actions)
-        if batch is None:
-            unavailable = [
-                action
-                for action in plan.actions
-                if _enum_value(action.kind) != "keep" and not action.executable
-            ]
+            counts = plan_counts(
+                findings=current_report.findings,
+                actions=plan.actions,
+            )
             payload = {
                 "command": "purge",
-                "status": "completed",
+                "status": "unknown",
+                "goal_status": "unknown",
+                "goal_satisfied": False,
+                "modified": executed_action_count > 0,
                 "batch_count": len(completed_batches),
                 "executed_action_count": executed_action_count,
-                "remaining_blocked_or_unavailable_action_count": len(unavailable),
+                "remaining_problem_count": counts["issue_group_count"],
+                "remaining_blocked_or_unavailable_action_count": counts[
+                    "blocked_group_count"
+                ],
+                "counts": counts,
+                "blockers": [
+                    structured_blocker(
+                        "scan_incomplete",
+                        scope="purge",
+                        remediation=(
+                            "Resolve every scan error and run a fresh plan; "
+                            "do not infer cleanup success."
+                        ),
+                        message="; ".join(str(value) for value in plan.errors),
+                    )
+                ],
                 "remaining_plan_fingerprint": plan.plan_fingerprint,
                 "batches": completed_batches,
             }
             if args.json:
                 _write_json(payload, stdout)
             else:
-                stdout.write(
-                    "批量清理完成："
-                    f"{len(completed_batches)} 批，"
-                    f"{executed_action_count} 个动作。"
+                stderr.write(
+                    "完整扫描未成功，批量清理结果未知；"
+                    "没有继续猜测或绕过阻断。\n"
                 )
+            return EXIT_ERROR
+
+        batch = _next_purge_action_batch(plan.actions)
+        if batch is None:
+            from .action_registry import action_capability
+            from .agent_operations import plan_counts, structured_blocker
+
+            unavailable = [
+                action
+                for action in plan.actions
+                if _enum_value(action.kind) != "keep"
+                and (
+                    not action.executable
+                    or not action_capability(action.kind).implemented
+                    or action_capability(action.kind).mutation_family is None
+                )
+            ]
+            counts = plan_counts(
+                findings=current_report.findings,
+                actions=plan.actions,
+            )
+            blockers = [
+                structured_blocker(
+                    (
+                        "action_not_implemented"
+                        if not action_capability(action.kind).implemented
+                        else "action_unavailable"
+                    ),
+                    scope=f"action:{action.action_id}",
+                    remediation=(
+                        "Resolve the structured safety condition and create a "
+                        "fresh plan; the action was not executed."
+                    ),
+                    message=str(action.unavailable_reason or "Action unavailable"),
+                    action_id=str(action.action_id),
+                )
+                for action in unavailable
+            ]
+            if unavailable:
+                goal_status = (
+                    "completed_with_residuals"
+                    if executed_action_count
+                    else "blocked"
+                )
+                legacy_status = goal_status
+            else:
+                goal_status = "complete"
+                legacy_status = "completed"
+            payload = {
+                "command": "purge",
+                "status": legacy_status,
+                "goal_status": goal_status,
+                "goal_satisfied": goal_status == "complete",
+                "modified": executed_action_count > 0,
+                "batch_count": len(completed_batches),
+                "executed_action_count": executed_action_count,
+                "remaining_blocked_or_unavailable_action_count": len(unavailable),
+                "remaining_problem_count": counts["blocked_group_count"],
+                "counts": counts,
+                "blockers": blockers,
+                "remaining_plan_fingerprint": plan.plan_fingerprint,
+                "batches": completed_batches,
+            }
+            if args.json:
+                _write_json(payload, stdout)
+            else:
+                if goal_status == "complete":
+                    stdout.write(
+                        "批量清理完成："
+                        f"{len(completed_batches)} 批，"
+                        f"{executed_action_count} 个动作。"
+                    )
+                else:
+                    stdout.write(
+                        "批量清理未达到目标："
+                        f"已执行 {len(completed_batches)} 批、"
+                        f"{executed_action_count} 个动作。"
+                    )
                 if unavailable:
                     stdout.write(
-                        f"另有 {len(unavailable)} 个动作因安全条件不足或尚未实现而保留。"
+                        f"仍有 {len(unavailable)} 个动作因安全条件不足或尚未实现而保留。"
                     )
                 stdout.write("\n")
-            return EXIT_OK
+            return (
+                EXIT_OK
+                if goal_status == "complete"
+                else EXIT_GOAL_NOT_SATISFIED
+            )
 
         mutation_kind, action_ids = batch
         signature = (mutation_kind, action_ids)
@@ -1200,13 +1465,39 @@ def _run_codex_purge(
         completed_batches.append(batch_document)
         if result != EXIT_OK:
             if args.json:
+                from .agent_operations import plan_counts, structured_blocker
+
+                counts = plan_counts(
+                    findings=current_report.findings,
+                    actions=plan.actions,
+                )
                 _write_json(
                     {
                         "command": "purge",
                         "status": "failed",
+                        "goal_status": "unknown",
+                        "goal_satisfied": False,
+                        "modified": executed_action_count > 0,
                         "exit_code": result,
                         "batch_count": len(completed_batches),
                         "executed_action_count": executed_action_count,
+                        "remaining_problem_count": counts[
+                            "issue_group_count"
+                        ],
+                        "remaining_blocked_or_unavailable_action_count": counts[
+                            "blocked_group_count"
+                        ],
+                        "counts": counts,
+                        "blockers": [
+                            structured_blocker(
+                                "batch_outcome_unknown",
+                                scope=f"batch:{batch_number}",
+                                remediation=(
+                                    "Re-scan and verify the selected action IDs "
+                                    "before attempting any further mutation."
+                                ),
+                            )
+                        ],
                         "batches": completed_batches,
                     },
                     stdout,
@@ -1241,26 +1532,27 @@ def _run_codex_purge(
 def _next_purge_action_batch(
     actions: Sequence[Any],
 ) -> tuple[str, tuple[str, ...]] | None:
+    from .action_registry import ACTION_REGISTRY, action_capability
+
     executable = [
         action
         for action in actions
         if bool(getattr(action, "executable", False))
-        and _enum_value(action.kind)
-        in {
-            "delete_conversation",
-            "repair_legacy_index",
-            "remove_desktop_state",
-        }
+        and action_capability(action.kind).implemented
+        and action_capability(action.kind).mutation_family is not None
     ]
-    for mutation_kind in (
-        "delete_conversation",
-        "repair_legacy_index",
-        "remove_desktop_state",
-    ):
+    mutation_families = tuple(
+        dict.fromkeys(
+            capability.mutation_family
+            for capability in ACTION_REGISTRY.values()
+            if capability.implemented and capability.mutation_family is not None
+        )
+    )
+    for mutation_kind in mutation_families:
         matching = [
             action
             for action in executable
-            if _enum_value(action.kind) == mutation_kind
+            if action_capability(action.kind).mutation_family == mutation_kind
         ]
         if not matching:
             continue
@@ -2752,12 +3044,7 @@ def _platform_visible_conversations(
 
 
 def _path_identity(value: Any) -> str:
-    path = Path(value).expanduser()
-    try:
-        canonical = path.resolve(strict=False)
-    except (OSError, RuntimeError):
-        canonical = Path(os.path.abspath(os.fspath(path)))
-    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(canonical))))
+    return canonical_existing_path_key(Path(value).expanduser())
 
 
 def _platform_visible_frontend_sessions(
@@ -4028,14 +4315,9 @@ def _residual_delete_approval_is_narrow(
         )
     ):
         return False
-    explicit = details.get("cleanup_blocked_reason")
-    relation_only = (
-        isinstance(explicit, str)
-        and " ".join(explicit.lower().split())
-        == (
-            "thread/delete does not expose a standalone spawn-edge "
-            "cleanup operation."
-        )
+    relation_only = exact_blocker_codes(
+        details,
+        STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
     )
     impact = action.impact
     has_exact_target_artifact = bool(

@@ -9,9 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from ..codex_desktop_state import DesktopStateError, read_desktop_state
+from ..blocker_codes import (
+    CASCADE_REQUIRES_EXPLICIT_SCOPE,
+    IDENTITY_CONFLICT,
+    INTEGRITY_REVIEW_REQUIRED,
+    LEGACY_INDEX_NOT_THREAD_TARGET,
+    NO_NATIVE_ARTIFACT,
+    SOURCE_PARENT_UNVERIFIED,
+    SPAWN_EDGE_OPEN,
+    STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
+)
 from ..codex_state import _read_rollout_meta
 from ..discovery import discover_path_codex
 from ..models import Finding, RolloutRecord
+from ..path_identity import canonical_existing_path_key
 from ..sqlite_utils import connect_readonly, table_exists
 from .base import FrontendAdapter
 
@@ -343,6 +354,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                                 "The indexed file belongs to another thread; "
                                 "automatic deletion could remove unrelated data."
                             ),
+                            "cleanup_blocker_codes": [IDENTITY_CONFLICT],
                             "manual_review_required": True,
                         },
                     )
@@ -393,6 +405,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                                 "The alternate rollout may be recoverable; "
                                 "deletion is not a safe path repair."
                             ),
+                            "cleanup_blocker_codes": [INTEGRITY_REVIEW_REQUIRED],
                             "manual_review_required": True,
                         },
                     )
@@ -424,6 +437,11 @@ class NativeIntegrityAdapter(FrontendAdapter):
                             None
                             if cleanable
                             else "thread/delete would cascade into spawned descendants."
+                        ),
+                        "cleanup_blocker_codes": (
+                            []
+                            if cleanable
+                            else [CASCADE_REQUIRES_EXPLICIT_SCOPE]
                         ),
                         "spawn_descendant_edge_count": len(descendant_edges),
                     },
@@ -466,6 +484,11 @@ class NativeIntegrityAdapter(FrontendAdapter):
                             if cleanable
                             else "thread/delete would cascade into spawned descendants."
                         ),
+                        "cleanup_blocker_codes": (
+                            []
+                            if cleanable
+                            else [CASCADE_REQUIRES_EXPLICIT_SCOPE]
+                        ),
                         "spawn_descendant_edge_count": len(descendant_edges),
                     },
                 )
@@ -505,6 +528,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                     "Official deletion has not been verified to remove every "
                     "duplicate rollout; preserve all copies for manual review."
                 ),
+                "cleanup_blocker_codes": [INTEGRITY_REVIEW_REQUIRED],
                 "manual_review_required": True,
             },
         )
@@ -552,12 +576,18 @@ class NativeIntegrityAdapter(FrontendAdapter):
             parent_rollout_present = _rollout_artifact_present(
                 parent_id, threads, rollouts, self.codex_home
             )
-            if parent_indexed and parent_rollout_present:
-                continue
-
             matching_edge = (
                 edge is not None and edge["parent_thread_id"] == parent_id
             )
+
+            # A subagent is orphaned only when *both* forms of native parent
+            # evidence are gone.  An index-only or rollout-only parent is the
+            # root inconsistency; reporting every healthy descendant as a
+            # separate orphan duplicates the problem and can block the exact
+            # parent cascade that Codex itself owns.
+            if parent_indexed or parent_rollout_present:
+                continue
+
             if matching_edge:
                 claimed_edges.add((parent_id, child_id))
 
@@ -594,22 +624,28 @@ class NativeIntegrityAdapter(FrontendAdapter):
                 and (matching_edge or source_consensus_cleanup)
             )
             blocked_reasons: list[str] = []
+            blocker_codes: list[str] = []
             if parent_indexed or parent_rollout_present:
                 blocked_reasons.append("The parent still has a native artifact.")
+                blocker_codes.append(IDENTITY_CONFLICT)
             if edge_is_open:
                 blocked_reasons.append("The spawn edge is still open.")
+                blocker_codes.append(SPAWN_EDGE_OPEN)
             if not matching_edge and not source_consensus:
                 blocked_reasons.append(
                     "No matching spawn edge remains to corroborate the source metadata."
                 )
+                blocker_codes.append(SOURCE_PARENT_UNVERIFIED)
             if descendant_edges:
                 blocked_reasons.append(
                     "thread/delete would cascade into spawned descendants."
                 )
+                blocker_codes.append(CASCADE_REQUIRES_EXPLICIT_SCOPE)
             if not thread_delete_supported:
                 blocked_reasons.append(
                     "No native thread or rollout artifact can be passed to thread/delete."
                 )
+                blocker_codes.append(NO_NATIVE_ARTIFACT)
             findings.append(
                 self._finding(
                     thread_id=child_id,
@@ -648,6 +684,9 @@ class NativeIntegrityAdapter(FrontendAdapter):
                         "cleanup_blocked_reason": (
                             None if safely_deletable else " ".join(blocked_reasons)
                         ),
+                        "cleanup_blocker_codes": (
+                            [] if safely_deletable else sorted(set(blocker_codes))
+                        ),
                         "spawn_descendant_edge_count": len(descendant_edges),
                         "manual_review_required": not safely_deletable,
                     },
@@ -680,7 +719,23 @@ class NativeIntegrityAdapter(FrontendAdapter):
             source_conflict = bool(source_parents and parent_id not in source_parents)
             parent_index_missing = parent_id not in threads
             child_index_missing = child_id not in threads
-            if not (source_conflict or parent_index_missing or child_index_missing):
+            parent_rollout_present = _rollout_artifact_present(
+                parent_id, threads, rollouts, self.codex_home
+            )
+            child_rollout_present = _rollout_artifact_present(
+                child_id, threads, rollouts, self.codex_home
+            )
+            parent_artifact_missing = (
+                parent_index_missing and not parent_rollout_present
+            )
+            child_artifact_missing = (
+                child_index_missing and not child_rollout_present
+            )
+            if not (
+                source_conflict
+                or parent_artifact_missing
+                or child_artifact_missing
+            ):
                 continue
 
             rollout = (
@@ -704,12 +759,10 @@ class NativeIntegrityAdapter(FrontendAdapter):
                         "edge_status": edge.get("status"),
                         "parent_index_missing": parent_index_missing,
                         "child_index_missing": child_index_missing,
-                        "parent_rollout_present": _rollout_artifact_present(
-                            parent_id, threads, rollouts, self.codex_home
-                        ),
-                        "child_rollout_present": _rollout_artifact_present(
-                            child_id, threads, rollouts, self.codex_home
-                        ),
+                        "parent_rollout_present": parent_rollout_present,
+                        "child_rollout_present": child_rollout_present,
+                        "parent_artifact_missing": parent_artifact_missing,
+                        "child_artifact_missing": child_artifact_missing,
                         "source_parent_ids": sorted(source_parents),
                         "source_conflict": source_conflict,
                         "subagent_evidence": sorted(set(evidence)),
@@ -722,6 +775,9 @@ class NativeIntegrityAdapter(FrontendAdapter):
                             "thread/delete does not expose a standalone spawn-edge "
                             "cleanup operation."
                         ),
+                        "cleanup_blocker_codes": [
+                            STANDALONE_RELATION_CLEANUP_UNAVAILABLE
+                        ],
                         "manual_review_required": True,
                         "direct_database_edit_supported": False,
                         "diagnostic_artifact_present": True,
@@ -795,6 +851,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                 "cleanup_blocked_reason": (
                     "Legacy index entries are not thread/delete targets."
                 ),
+                "cleanup_blocker_codes": [LEGACY_INDEX_NOT_THREAD_TARGET],
                 "manual_review_required": True,
                 "direct_legacy_index_edit_supported": False,
                 # logs_2.sqlite is retention/diagnostic data.  A missing live
@@ -884,7 +941,7 @@ def _is_file(path: Path) -> bool:
 
 
 def _path_key(path: Path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    return canonical_existing_path_key(path)
 
 
 def _preferred_rollout(records: list[RolloutRecord]) -> RolloutRecord:
@@ -892,7 +949,7 @@ def _preferred_rollout(records: list[RolloutRecord]) -> RolloutRecord:
         records,
         key=lambda record: (
             record.archived,
-            os.path.normcase(os.path.abspath(str(record.path))),
+            canonical_existing_path_key(record.path),
         ),
     )[0]
 

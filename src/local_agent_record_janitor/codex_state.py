@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import RolloutRecord, ThreadSourceInfo
+from .path_identity import canonical_existing_path_key
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -157,10 +158,10 @@ def rollout_state_fingerprint(record: RolloutRecord) -> str:
         "cwd": record.cwd,
         "metadata_thread_id": record.thread_id,
         "originator": record.originator,
-        "path": os.path.normcase(
-            os.path.abspath(os.fspath(record.path))
-        ),
+        "path": canonical_existing_path_key(record.path),
         "source": record.source,
+        "st_dev": stat_result.st_dev,
+        "st_ino": stat_result.st_ino,
         "st_mtime_ns": stat_result.st_mtime_ns,
         "st_size": stat_result.st_size,
         "timestamp": record.timestamp,

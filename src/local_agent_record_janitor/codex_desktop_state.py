@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .codex_state import find_thread_rollouts, read_thread_index
+from .path_identity import canonical_existing_path_key
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -277,7 +278,7 @@ def execute_desktop_state_cleanup(
                 f"Codex Desktop state changed after approval: {thread_id}"
             )
 
-    clients = running_related_clients()
+    clients = running_related_clients(home)
     if clients:
         raise DesktopStateError(
             "Related clients are still running: " + ", ".join(clients)
@@ -418,11 +419,41 @@ def strip_state_references(
     return value, removed
 
 
-def running_related_clients() -> tuple[str, ...]:
+def running_related_clients(codex_home: Path | None = None) -> tuple[str, ...]:
     if os.name != "nt":
         return ()
+    records = _running_related_process_records()
+    if codex_home is None:
+        return tuple(
+            sorted({str(item["name"]) for item in records}, key=str.casefold)
+        )
+    return _relevant_client_names(codex_home, records)
+
+
+def _running_related_process_records() -> tuple[dict[str, Any], ...]:
+    powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if powershell is None:
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        )
+    command = (
+        "$ErrorActionPreference='Stop'; "
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+        "$names=@('codex.exe','chatgpt.exe','aionui.exe','cindy.exe'); "
+        "$items=@(Get-CimInstance Win32_Process | "
+        "Where-Object { $names -contains $_.Name.ToLowerInvariant() } | "
+        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine); "
+        "$items | ConvertTo-Json -Compress -Depth 3"
+    )
     completed = subprocess.run(
-        ["tasklist.exe", "/fo", "csv", "/nh"],
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -434,13 +465,218 @@ def running_related_clients() -> tuple[str, ...]:
         raise DesktopStateError(
             "Could not verify whether Codex Desktop clients are closed"
         )
-    blocked_names = {"codex.exe", "chatgpt.exe", "aionui.exe", "cindy.exe"}
-    found = {
-        row[0]
-        for row in csv.reader(completed.stdout.splitlines())
-        if row and row[0].casefold() in blocked_names
-    }
-    return tuple(sorted(found, key=str.casefold))
+    try:
+        payload = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        ) from exc
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        )
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise DesktopStateError(
+                "Could not verify whether Codex Desktop clients are closed"
+            )
+        try:
+            process_id = int(item["ProcessId"])
+            parent_process_id = int(item["ParentProcessId"])
+            name = str(item["Name"]).strip()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DesktopStateError(
+                "Could not verify whether Codex Desktop clients are closed"
+            ) from exc
+        if name.casefold() not in {
+            "codex.exe",
+            "chatgpt.exe",
+            "aionui.exe",
+            "cindy.exe",
+        }:
+            raise DesktopStateError(
+                "Could not verify whether Codex Desktop clients are closed"
+            )
+        executable_path = item.get("ExecutablePath")
+        command_line = item.get("CommandLine")
+        records.append(
+            {
+                "process_id": process_id,
+                "parent_process_id": parent_process_id,
+                "name": name,
+                "executable_path": (
+                    str(executable_path).strip() if executable_path else None
+                ),
+                "command_line": str(command_line) if command_line else None,
+            }
+        )
+    return tuple(records)
+
+
+def _relevant_client_names(
+    codex_home: Path,
+    records: Iterable[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return client names that might still own the target Codex store.
+
+    A Cindy process family is ignored only when both the family identity and a
+    *different existing* ``codex-home`` are proven.  Missing process metadata,
+    inaccessible paths, orphaned helpers, and failed identity checks all remain
+    blocking.
+    """
+
+    home = codex_home.expanduser()
+    items = tuple(records)
+    try:
+        by_pid = {int(item["process_id"]): item for item in items}
+    except (KeyError, TypeError, ValueError):
+        return tuple(
+            sorted({str(item.get("name") or "unknown") for item in items})
+        )
+
+    cindy_root_by_pid: dict[int, int] = {}
+    for item in items:
+        if str(item.get("name") or "").casefold() != "cindy.exe":
+            continue
+        try:
+            process_id = int(item["process_id"])
+            parent_id = int(item["parent_process_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        root_id = process_id
+        seen = {process_id}
+        while parent_id in by_pid:
+            parent = by_pid[parent_id]
+            if str(parent.get("name") or "").casefold() != "cindy.exe":
+                break
+            if parent_id in seen:
+                root_id = -1
+                break
+            seen.add(parent_id)
+            root_id = parent_id
+            try:
+                parent_id = int(parent["parent_process_id"])
+            except (KeyError, TypeError, ValueError):
+                root_id = -1
+                break
+        cindy_root_by_pid[process_id] = root_id
+
+    valid_cindy_families: dict[int, Path] = {}
+    for root_id in sorted(set(cindy_root_by_pid.values())):
+        if root_id < 0:
+            continue
+        family = tuple(
+            item
+            for item in items
+            if cindy_root_by_pid.get(_integer_or_minus_one(item.get("process_id")))
+            == root_id
+        )
+        executable_paths = [
+            Path(str(item["executable_path"]))
+            for item in family
+            if item.get("executable_path")
+        ]
+        if len(executable_paths) != len(family) or not executable_paths:
+            continue
+        if any(not path.is_absolute() for path in executable_paths):
+            continue
+        if any(
+            _same_existing_path(executable_paths[0], candidate) is not True
+            for candidate in executable_paths[1:]
+        ):
+            continue
+        try:
+            executable = executable_paths[0].resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not str(executable).casefold().endswith(
+            "\\programs\\cindy\\cindy.exe"
+        ):
+            continue
+
+        user_data_dirs: list[Path] = []
+        for item in family:
+            command_line = str(item.get("command_line") or "")
+            match = re.search(
+                r'--user-data-dir=(?:"([^"]+)"|(\S+))',
+                command_line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                user_data_dir = Path(match.group(1) or match.group(2))
+                if not user_data_dir.is_absolute():
+                    user_data_dirs = []
+                    break
+                user_data_dirs.append(user_data_dir)
+        if not user_data_dirs:
+            continue
+        if any(
+            _same_existing_path(user_data_dirs[0], candidate) is not True
+            for candidate in user_data_dirs[1:]
+        ):
+            continue
+        valid_cindy_families[root_id] = user_data_dirs[0]
+
+    relevant: set[str] = set()
+    for item in items:
+        name = str(item.get("name") or "unknown")
+        name_key = name.casefold()
+        separate_cindy_process = False
+        process_id = _integer_or_minus_one(item.get("process_id"))
+        parent_id = _integer_or_minus_one(item.get("parent_process_id"))
+        if name_key == "cindy.exe":
+            root_id = cindy_root_by_pid.get(process_id, -1)
+            user_data_dir = valid_cindy_families.get(root_id)
+            if user_data_dir is not None:
+                separate_cindy_process = (
+                    _same_existing_path(user_data_dir / "codex-home", home)
+                    is False
+                )
+        elif name_key == "codex.exe" and item.get("executable_path"):
+            root_id = cindy_root_by_pid.get(parent_id, -1)
+            user_data_dir = valid_cindy_families.get(root_id)
+            if user_data_dir is not None and (
+                _same_existing_path(user_data_dir / "codex-home", home) is False
+            ):
+                executable_path = Path(str(item["executable_path"]))
+                separate_cindy_process = (
+                    executable_path.is_absolute()
+                    and _is_existing_path_below(
+                        executable_path,
+                        user_data_dir / "codex",
+                    )
+                )
+        if not separate_cindy_process:
+            relevant.add(name)
+    return tuple(sorted(relevant, key=str.casefold))
+
+
+def _same_existing_path(first: Path, second: Path) -> bool | None:
+    try:
+        if not first.exists() or not second.exists():
+            return None
+        return os.path.samefile(first, second)
+    except OSError:
+        return None
+
+
+def _is_existing_path_below(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=True)
+        return resolved_path.is_relative_to(resolved_root)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _integer_or_minus_one(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
 
 
 def sha256_file(path: Path) -> str:
@@ -741,7 +977,7 @@ def _table_columns(
 
 
 def _normalized_path(path: Path) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    return canonical_existing_path_key(path)
 
 
 def _sha256_json(value: Any) -> str:

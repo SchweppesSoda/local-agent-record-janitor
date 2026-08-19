@@ -21,6 +21,7 @@ from local_agent_record_janitor.manual_delete import (
     execute_manual_delete,
 )
 from local_agent_record_janitor.models import Finding
+from local_agent_record_janitor.path_identity import canonical_existing_path_key
 from local_agent_record_janitor.planning import (
     ActionKind,
     build_cleanup_plan,
@@ -270,8 +271,8 @@ class StoreWideRuntimeInvariantTests(unittest.TestCase):
         self.assertEqual(
             set(candidates),
             {
-                os.path.normcase(os.path.abspath(os.fspath(hint_a))),
-                os.path.normcase(os.path.abspath(os.fspath(hint_b))),
+                canonical_existing_path_key(hint_a),
+                canonical_existing_path_key(hint_b),
             },
         )
         self.assertTrue(

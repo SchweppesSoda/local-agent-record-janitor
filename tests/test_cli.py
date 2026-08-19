@@ -21,6 +21,7 @@ from local_agent_record_janitor.cli import (
     ActionSelectionError,
     EXIT_CONFIRMATION_REQUIRED,
     EXIT_ERROR,
+    EXIT_GOAL_NOT_SATISFIED,
     EXIT_OK,
     NumberSelectionError,
     build_parser,
@@ -379,6 +380,9 @@ class CandidateActionSelectionTests(unittest.TestCase):
                         "thread/delete does not expose a standalone "
                         "spawn-edge cleanup operation."
                     ),
+                    "cleanup_blocker_codes": [
+                        "standalone_relation_cleanup_unavailable"
+                    ],
                     "direct_database_edit_supported": False,
                 },
             ),
@@ -404,6 +408,9 @@ class CandidateActionSelectionTests(unittest.TestCase):
                         "thread/delete does not expose a standalone "
                         "spawn-edge cleanup operation."
                     ),
+                    "cleanup_blocker_codes": [
+                        "standalone_relation_cleanup_unavailable"
+                    ],
                     "direct_database_edit_supported": False,
                 },
             ),
@@ -480,32 +487,15 @@ class CandidateActionSelectionTests(unittest.TestCase):
             codex_home = Path(root) / "codex-home"
             parent_id = "existing-parent"
             child_id = "rollout-only-child"
-            parent_rollout = write_rollout(
-                codex_home,
-                parent_id,
-                originator="test-owner",
-                source="app-server",
-            )
             write_rollout(
                 codex_home,
                 child_id,
                 originator="test-owner",
-                source={
-                    "subagent": {
-                        "thread_spawn": {
-                            "parent_thread_id": parent_id,
-                        }
-                    }
-                },
+                source="app-server",
             )
             create_thread_index(
                 codex_home,
-                [
-                    {
-                        "id": parent_id,
-                        "rollout_path": str(parent_rollout),
-                    }
-                ],
+                [],
                 spawn_edges=[
                     {
                         "parent_thread_id": parent_id,
@@ -1089,8 +1079,65 @@ class MainFlowTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["command"], "purge")
         self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["goal_status"], "complete")
+        self.assertTrue(payload["goal_satisfied"])
+        self.assertFalse(payload["modified"])
         self.assertEqual(payload["batch_count"], 0)
         self.assertEqual(payload["executed_action_count"], 0)
+
+    def test_purge_blocked_actions_are_not_reported_as_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            codex_home = Path(root) / "codex-home"
+            indexed_id = "indexed-thread"
+            metadata_id = "metadata-thread"
+            rollout = write_rollout(
+                codex_home,
+                metadata_id,
+                originator="Codex Desktop",
+            )
+            create_thread_index(
+                codex_home,
+                [{"id": indexed_id, "rollout_path": str(rollout)}],
+            )
+            mismatch = next(
+                finding
+                for finding in NativeIntegrityAdapter(
+                    codex_home=codex_home
+                ).scan()
+                if finding.details.get("finding_type")
+                == "index_rollout_metadata_mismatch"
+            )
+            output = StringIO()
+            errors = StringIO()
+
+            result = main(
+                ("purge", "--yes", "--clients-closed", "--json"),
+                adapters=(_FindingAdapter(mismatch),),
+                stdin=StringIO(),
+                stdout=output,
+                stderr=errors,
+                app_server_factory=lambda **_kwargs: self.fail(
+                    "blocked purge must not start app-server"
+                ),
+            )
+
+        self.assertEqual(
+            result,
+            EXIT_GOAL_NOT_SATISFIED,
+            output.getvalue() + errors.getvalue(),
+        )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["goal_status"], "blocked")
+        self.assertFalse(payload["goal_satisfied"])
+        self.assertFalse(payload["modified"])
+        self.assertGreater(payload["remaining_problem_count"], 0)
+        self.assertGreater(payload["counts"]["blocked_group_count"], 0)
+        self.assertTrue(payload["blockers"])
+        self.assertIn(
+            payload["blockers"][0]["blocker_code"],
+            {"action_not_implemented", "action_unavailable"},
+        )
 
     def test_purge_repairs_all_available_codex_residuals_without_selection(self) -> None:
         with tempfile.TemporaryDirectory() as root:

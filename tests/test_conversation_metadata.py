@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -219,8 +220,19 @@ class ConversationSummaryTests(unittest.TestCase):
         self.assertIsNone(summaries["unknown"].display_name)
         self.assertFalse(summaries["unknown"].indexed)
 
+    @unittest.skipUnless(os.name == "nt", "Windows extended path comparison")
     def test_windows_extended_cwd_prefix_is_not_a_metadata_conflict(self) -> None:
         self._create_rich_state()
+        cwd = self.root / "GitRepo" / "VPS-Toolkit"
+        cwd.mkdir(parents=True)
+        with closing(
+            sqlite3.connect(self.codex_home / "state_5.sqlite")
+        ) as connection:
+            connection.execute(
+                "UPDATE threads SET cwd = ? WHERE id = 'child-id'",
+                (str(cwd),),
+            )
+            connection.commit()
         record = RolloutRecord(
             thread_id="child-id",
             path=self.codex_home / "sessions" / "child.jsonl",
@@ -230,7 +242,7 @@ class ConversationSummaryTests(unittest.TestCase):
                     "thread_spawn": {"parent_thread_id": "parent-id"}
                 }
             },
-            cwd=r"\\?\D:\GitRepo\VPS-Toolkit",
+            cwd="\\\\?\\" + str(cwd),
             timestamp="2026-08-18T00:00:00Z",
             archived=False,
         )
@@ -241,7 +253,7 @@ class ConversationSummaryTests(unittest.TestCase):
             rollout_records_by_thread={"child-id": [record]},
         )["child-id"]
 
-        self.assertEqual(summary.cwd, r"D:\GitRepo\VPS-Toolkit")
+        self.assertEqual(summary.cwd, str(cwd))
         self.assertFalse(
             any(
                 conflict.startswith("cwd ")
@@ -250,13 +262,16 @@ class ConversationSummaryTests(unittest.TestCase):
             summary.metadata_conflicts,
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows extended path comparison")
     def test_equivalent_windows_cwds_without_database_are_order_stable(self) -> None:
+        cwd = self.root / "Repo" / "Project"
+        cwd.mkdir(parents=True)
         plain = RolloutRecord(
             thread_id="cwd-only",
             path=self.root / "plain.jsonl",
             originator=None,
             source=None,
-            cwd=r"D:\Repo\Project",
+            cwd=str(cwd),
             timestamp=None,
             archived=False,
         )
@@ -265,7 +280,7 @@ class ConversationSummaryTests(unittest.TestCase):
             path=self.root / "extended.jsonl",
             originator=None,
             source=None,
-            cwd=r"\\?\d:\repo\project",
+            cwd="\\\\?\\" + str(cwd).swapcase(),
             timestamp=None,
             archived=False,
         )
@@ -281,9 +296,41 @@ class ConversationSummaryTests(unittest.TestCase):
             rollout_records_by_thread={"cwd-only": [extended, plain]},
         )["cwd-only"]
 
-        self.assertEqual(forward.cwd, r"D:\Repo\Project")
+        self.assertEqual(forward.cwd, str(cwd))
         self.assertEqual(forward.approval_payload(), reverse.approval_payload())
         self.assertFalse(forward.metadata_conflicts)
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended path comparison")
+    def test_missing_extended_cwd_is_not_merged_without_identity_proof(self) -> None:
+        plain = RolloutRecord(
+            thread_id="missing-cwd",
+            path=self.root / "plain.jsonl",
+            originator=None,
+            source=None,
+            cwd=r"Z:\definitely-missing\Repo",
+            timestamp=None,
+            archived=False,
+        )
+        extended = RolloutRecord(
+            thread_id="missing-cwd",
+            path=self.root / "extended.jsonl",
+            originator=None,
+            source=None,
+            cwd=r"\\?\Z:\definitely-missing\Repo",
+            timestamp=None,
+            archived=False,
+        )
+
+        summary = read_conversation_summaries(
+            self.codex_home,
+            ["missing-cwd"],
+            rollout_records_by_thread={"missing-cwd": [plain, extended]},
+        )["missing-cwd"]
+
+        self.assertTrue(
+            any(value.startswith("cwd ") for value in summary.metadata_conflicts),
+            summary.metadata_conflicts,
+        )
 
     def test_conflicts_are_explicit_and_fingerprint_is_order_stable(self) -> None:
         first = RolloutRecord(

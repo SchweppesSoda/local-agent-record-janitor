@@ -641,7 +641,16 @@ def _sqlite_sidecar_identities(home: Path) -> dict[str, Any]:
             result[path.name] = None
             continue
         _validate_regular_unique(path, value)
-        result[path.name] = FileIdentity.from_stat(value).to_dict()
+        identity = FileIdentity.from_stat(value).to_dict()
+        if suffix == "-shm":
+            # Attaching a read-only SQLite connection to a WAL database can
+            # update the shared-memory sidecar timestamps on Windows.  That
+            # self-induced clock change is not durable database drift.  Keep
+            # every identity and size field strict; omit only the volatile
+            # SHM timestamps from comparisons and fingerprints.
+            identity["mtime_ns"] = None
+            identity["ctime_ns"] = None
+        result[path.name] = identity
     return result
 
 

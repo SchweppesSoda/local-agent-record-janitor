@@ -7,6 +7,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from .path_identity import canonical_existing_path_key
+
 
 def default_codex_home() -> Path:
     configured = os.environ.get("CODEX_HOME")
@@ -292,13 +294,7 @@ def _unique_existing_files(candidates: list[Path]) -> tuple[Path, ...]:
 
 
 def _normalized_path_key(path: Path) -> str:
-    try:
-        canonical = path.resolve(strict=False)
-    except (OSError, RuntimeError):
-        canonical = Path(os.path.abspath(os.fspath(path)))
-    return os.path.normcase(
-        os.path.normpath(os.path.abspath(os.fspath(canonical)))
-    )
+    return canonical_existing_path_key(path)
 
 
 def _optional_directory_exists(path: Path) -> bool:

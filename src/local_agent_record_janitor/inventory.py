@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .codex_state import parse_thread_source
 from .conversation_metadata import read_conversation_summaries
 from .models import ConversationSummary, RolloutRecord
+from .path_identity import canonical_existing_path_key
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -909,19 +910,11 @@ def _normalized_string(value: object) -> str | None:
 
 def _absolute_path(path: Path) -> Path:
     expanded = path.expanduser()
-    try:
-        return expanded.resolve(strict=False)
-    except (OSError, RuntimeError):
-        return Path(os.path.abspath(os.fspath(expanded)))
+    return Path(os.path.normpath(os.path.abspath(os.fspath(expanded))))
 
 
 def _normalized_path(path: Path) -> str:
-    expanded = path.expanduser()
-    try:
-        expanded = expanded.resolve(strict=False)
-    except (OSError, RuntimeError):
-        pass
-    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(expanded))))
+    return canonical_existing_path_key(path.expanduser())
 
 
 def _json_value(value: Any) -> Any:

@@ -14,6 +14,7 @@ from local_agent_record_janitor.cleaner import scan_adapters, verify_finding_del
 from local_agent_record_janitor.cli import EXIT_OK, main
 from local_agent_record_janitor.codex_desktop_state import (
     DesktopStateError,
+    _relevant_client_names,
     execute_desktop_state_cleanup,
     read_desktop_state,
 )
@@ -74,6 +75,156 @@ class CodexDesktopStateTests(unittest.TestCase):
 
     def adapter(self) -> NativeIntegrityAdapter:
         return NativeIntegrityAdapter(codex_home=self.codex_home)
+
+    def _cindy_process_records(
+        self,
+        root: Path,
+    ) -> tuple[dict[str, object], ...]:
+        executable = root / "Programs" / "Cindy" / "Cindy.exe"
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"cindy")
+        user_data = root / "CindyGlobal"
+        (user_data / "codex-home").mkdir(parents=True, exist_ok=True)
+        bundled = user_data / "codex" / "0.145.0" / "codex.exe"
+        bundled.parent.mkdir(parents=True, exist_ok=True)
+        bundled.write_bytes(b"codex")
+        return (
+            {
+                "process_id": 100,
+                "parent_process_id": 1,
+                "name": "Cindy.exe",
+                "executable_path": str(executable),
+                "command_line": f'"{executable}"',
+            },
+            {
+                "process_id": 101,
+                "parent_process_id": 100,
+                "name": "Cindy.exe",
+                "executable_path": str(executable),
+                "command_line": (
+                    f'--type=renderer --user-data-dir="{user_data}"'
+                ),
+            },
+            {
+                "process_id": 102,
+                "parent_process_id": 101,
+                "name": "codex.exe",
+                "executable_path": str(bundled),
+                "command_line": "codex.exe app-server",
+            },
+        )
+
+    def test_native_home_ignores_proven_separate_cindy_family(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        records = self._cindy_process_records(root) + (
+            {
+                "process_id": 200,
+                "parent_process_id": 1,
+                "name": "ChatGPT.exe",
+                "executable_path": None,
+                "command_line": "ChatGPT.exe",
+            },
+        )
+        native_home = root / "native" / ".codex"
+        native_home.mkdir(parents=True)
+
+        self.assertEqual(
+            _relevant_client_names(native_home, records),
+            ("ChatGPT.exe",),
+        )
+
+    def test_cindy_store_blocks_cindy_and_bundled_codex(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        records = self._cindy_process_records(root)
+        cindy_home = root / "CindyGlobal" / "codex-home"
+
+        self.assertEqual(
+            _relevant_client_names(cindy_home, records),
+            ("Cindy.exe", "codex.exe"),
+        )
+
+    def test_unproven_or_orphan_related_processes_still_block(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        native_home = root / "native" / ".codex"
+        native_home.mkdir(parents=True)
+        records = (
+            {
+                "process_id": 100,
+                "parent_process_id": 1,
+                "name": "Cindy.exe",
+                "executable_path": str(root / "missing" / "Cindy.exe"),
+                "command_line": None,
+            },
+            {
+                "process_id": 200,
+                "parent_process_id": 999,
+                "name": "codex.exe",
+                "executable_path": None,
+                "command_line": "codex.exe app-server",
+            },
+        )
+
+        self.assertEqual(
+            _relevant_client_names(native_home, records),
+            ("Cindy.exe", "codex.exe"),
+        )
+
+    def test_identity_check_failure_keeps_cindy_family_blocking(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        records = self._cindy_process_records(root)
+        native_home = root / "native" / ".codex"
+        native_home.mkdir(parents=True)
+
+        with patch(
+            "local_agent_record_janitor.codex_desktop_state._same_existing_path",
+            return_value=None,
+        ):
+            self.assertEqual(
+                _relevant_client_names(native_home, records),
+                ("Cindy.exe", "codex.exe"),
+            )
+
+    def test_relative_cindy_user_data_dir_cannot_prove_another_store(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        records = [dict(item) for item in self._cindy_process_records(root)]
+        relative_name = f"relative-{root.parent.name}"
+        records[1]["command_line"] = (
+            f'--type=renderer --user-data-dir="{relative_name}"'
+        )
+        native_home = root / "native" / ".codex"
+        native_home.mkdir(parents=True)
+        relative_home = Path.cwd() / relative_name / "codex-home"
+        relative_home.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(
+            lambda: relative_home.parent.rmdir()
+            if relative_home.parent.exists()
+            and not any(relative_home.parent.iterdir())
+            else None
+        )
+        self.addCleanup(
+            lambda: relative_home.rmdir()
+            if relative_home.exists() and not any(relative_home.iterdir())
+            else None
+        )
+
+        self.assertEqual(
+            _relevant_client_names(native_home, records),
+            ("Cindy.exe", "codex.exe"),
+        )
+
+    def test_relative_or_environment_executable_paths_remain_blocking(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        native_home = root / "native" / ".codex"
+        native_home.mkdir(parents=True)
+        for executable in (r"Programs\Cindy\Cindy.exe", r"%LOCALAPPDATA%\Cindy.exe"):
+            with self.subTest(executable=executable):
+                records = [dict(item) for item in self._cindy_process_records(root)]
+                records[0]["executable_path"] = executable
+                records[1]["executable_path"] = executable
+                self.assertEqual(
+                    _relevant_client_names(native_home, records),
+                    ("Cindy.exe", "codex.exe"),
+                )
 
     def test_scan_inventory_and_plan_include_desktop_only_ghost(self) -> None:
         report = scan_adapters([self.adapter()])

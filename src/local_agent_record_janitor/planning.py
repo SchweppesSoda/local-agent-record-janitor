@@ -17,6 +17,13 @@ from .codex_state import (
     read_thread_index,
     rollout_state_fingerprint,
 )
+from .blocker_codes import (
+    CASCADE_REQUIRES_EXPLICIT_SCOPE,
+    INTEGRITY_REVIEW_REQUIRED,
+    STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
+    cleanup_blocker_codes,
+    exact_blocker_codes,
+)
 from .conversation_metadata import (
     read_conversation_summaries,
     read_legacy_thread_names,
@@ -26,6 +33,7 @@ from .legacy_index import (
     inventory_legacy_index,
 )
 from .models import ConversationSummary, Finding, RolloutRecord
+from .path_identity import canonical_existing_path_key
 
 
 class ActionKind(str, Enum):
@@ -466,7 +474,7 @@ class _StorageEvidence:
 def normalize_storage_path(path: str | os.PathLike[str]) -> str:
     """Return the normalized absolute Codex data-directory identity."""
 
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    return canonical_existing_path_key(path)
 
 
 def storage_id_for_path(path: str | os.PathLike[str]) -> str:
@@ -1584,6 +1592,7 @@ def _unavailable_reason(
             "Residual relation deletion is blocked because the exact native "
             f"child-target contract is not verified: {residual_contract_issue}"
         )
+    capability_blocker: str | None = None
     for observation in observations:
         details = observation.details
         if details.get("originator_conflict") is True or details.get(
@@ -1614,41 +1623,68 @@ def _unavailable_reason(
                 "Associated task conversation scope could not be verified for "
                 "this target."
             )
-        explicit = details.get("cleanup_blocked_reason")
-        if isinstance(explicit, str) and explicit.strip():
-            cascade_only = _is_cascade_only_reason(explicit)
-            residual_relation_only = (
-                observation.finding_type == "residual_spawn_edge"
-                and _is_residual_relation_only_reason(explicit)
-                and _target_has_exact_native_artifact(
-                    observation.target,
-                    evidence,
-                )
+        explicit_value = details.get("cleanup_blocked_reason")
+        explicit = (
+            explicit_value.strip()
+            if isinstance(explicit_value, str) and explicit_value.strip()
+            else None
+        )
+        blocker_codes = cleanup_blocker_codes(details)
+        cascade_only = exact_blocker_codes(
+            details,
+            CASCADE_REQUIRES_EXPLICIT_SCOPE,
+        )
+        residual_relation_only = (
+            observation.finding_type == "residual_spawn_edge"
+            and exact_blocker_codes(
+                details,
+                STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
             )
-            integrity_soft_reason = (
-                integrity_delete
-                and observation.platform.lower() == "native"
-                and observation.finding_type in integrity_types
-                and _is_integrity_soft_reason(
-                    observation.finding_type,
-                    explicit,
-                )
+            and _target_has_exact_native_artifact(
+                observation.target,
+                evidence,
             )
-            if cascade_only or residual_relation_only:
+        )
+        integrity_soft_reason = (
+            integrity_delete
+            and observation.platform.lower() == "native"
+            and observation.finding_type in integrity_types
+            and exact_blocker_codes(details, INTEGRITY_REVIEW_REQUIRED)
+        )
+        if explicit is not None or blocker_codes:
+            if cascade_only or residual_relation_only or integrity_soft_reason:
                 pass
-            elif integrity_delete:
-                if not integrity_soft_reason:
-                    return explicit.strip()
             else:
-                return explicit.strip()
+                return explicit or (
+                    "Structured cleanup blocker codes prevent deletion: "
+                    + ", ".join(sorted(blocker_codes))
+                )
+        capability_exception = (
+            cascade_only or residual_relation_only or integrity_soft_reason
+        )
+        if (
+            capability_blocker is None
+            and not capability_exception
+            and details.get("cleanable") is not True
+        ):
+            capability_blocker = (
+                "The adapter did not explicitly mark this observation "
+                "cleanable; deletion is fail-closed."
+            )
+        if (
+            capability_blocker is None
+            and not capability_exception
+            and details.get("thread_delete_supported") is not True
+        ):
+            capability_blocker = (
+                "The adapter did not explicitly confirm that official "
+                "thread/delete can repair this observation."
+            )
         if (
             integrity_delete
             and observation.finding_type not in integrity_types
             and details.get("cleanable") is False
-            and not (
-                isinstance(explicit, str)
-                and _is_cascade_only_reason(explicit)
-            )
+            and not cascade_only
         ):
             return (
                 "Another observation for this conversation is explicitly "
@@ -1679,6 +1715,9 @@ def _unavailable_reason(
         )
         if identity_blocker is not None:
             return identity_blocker
+
+    if capability_blocker is not None:
+        return capability_blocker
 
     if not (
         target_has_native_artifact := (
@@ -1750,10 +1789,11 @@ def _descendant_delete_block_reason(
                     f"{thread_id} has an incomplete cascade scope."
                 )
             explicit = details.get("cleanup_blocked_reason")
-            cascade_only = (
-                isinstance(explicit, str)
-                and _is_cascade_only_reason(explicit)
+            cascade_only = exact_blocker_codes(
+                details,
+                CASCADE_REQUIRES_EXPLICIT_SCOPE,
             )
+            blocker_codes = cleanup_blocker_codes(details)
             if (
                 isinstance(explicit, str)
                 and explicit.strip()
@@ -1762,6 +1802,12 @@ def _descendant_delete_block_reason(
                 return (
                     "Associated task conversation "
                     f"{thread_id} is blocked: {explicit.strip()}"
+                )
+            if blocker_codes and not cascade_only:
+                return (
+                    "Associated task conversation "
+                    f"{thread_id} has structured cleanup blockers: "
+                    + ", ".join(sorted(blocker_codes))
                 )
             if (
                 details.get("cleanable") is False
@@ -1889,34 +1935,6 @@ def _current_rollout_snapshot(
     return result
 
 
-def _is_cascade_only_reason(reason: str) -> bool:
-    lowered = reason.lower()
-    if "descendant" not in lowered and "cascade" not in lowered:
-        return False
-    return not any(
-        token in lowered
-        for token in (
-            "unavailable",
-            "could not",
-            "conflict",
-            "live",
-            "open",
-            "parent still",
-            "unrelated",
-            "recover",
-            "quarantine",
-        )
-    )
-
-
-def _is_residual_relation_only_reason(reason: str) -> bool:
-    normalized = " ".join(reason.lower().split())
-    return normalized == (
-        "thread/delete does not expose a standalone spawn-edge cleanup "
-        "operation."
-    )
-
-
 def _residual_delete_contract_issue(
     target: TargetRef,
     observations: Sequence[Observation],
@@ -2014,14 +2032,15 @@ def _residual_delete_contract_issue(
         return "current child artifact state differs from the observation"
 
     edge_status = details.get("edge_status")
-    cleanup_blocked_reason = details.get("cleanup_blocked_reason")
     if not (
         isinstance(edge_status, str)
         and edge_status.lower() == "closed"
         and details.get("thread_delete_supported") is False
         and details.get("cleanable") is False
-        and isinstance(cleanup_blocked_reason, str)
-        and _is_residual_relation_only_reason(cleanup_blocked_reason)
+        and exact_blocker_codes(
+            details,
+            STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
+        )
         and details.get("direct_database_edit_supported") is False
     ):
         return "the edge or relation-only cleanup contract is not exact"
@@ -2066,24 +2085,6 @@ def _source_declares_subagent(value: Any) -> bool:
     return isinstance(value, Mapping) and (
         "subagent" in value or "thread_spawn" in value
     )
-
-
-def _is_integrity_soft_reason(
-    finding_type: str,
-    reason: str,
-) -> bool:
-    normalized = " ".join(reason.lower().split())
-    expected_reasons = {
-        "duplicate_rollout": (
-            "official deletion has not been verified to remove every "
-            "duplicate rollout; preserve all copies for manual review."
-        ),
-        "index_rollout_path_mismatch": (
-            "the alternate rollout may be recoverable; deletion is not a "
-            "safe path repair."
-        ),
-    }
-    return normalized == expected_reasons.get(finding_type)
 
 
 def _current_identity_block_reason(
@@ -2411,7 +2412,7 @@ def _json_value(value: Any) -> Any:
 
 
 def _normalize_artifact_path(path: str | os.PathLike[str]) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    return canonical_existing_path_key(path)
 
 
 def _indexed_rollout_path(

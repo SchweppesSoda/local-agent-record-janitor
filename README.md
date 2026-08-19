@@ -194,8 +194,28 @@ local-agent-record-janitor purge --yes --clients-closed
 Codex 数据目录拆批，顺序处理 thread 删除、旧索引修复和 Desktop 宿主残留；每批绑定
 当次完整计划指纹，执行前重扫，执行后再次扫描。旧索引和 Desktop 状态仍创建可验证
 备份。任何完整扫描失败、计划漂移或执行错误都会立即停止后续批次；确实受阻或尚未
-实现的动作保留并计数。可用 `--platform native|cindy|aionui` 把候选范围缩小到单一
+实现的动作保留并计数，并以退出码 `3` 和 `goal_satisfied=false` 明确表示目标未完成，
+不会再显示为成功。可用 `--platform native|cindy|aionui` 把候选范围缩小到单一
 来源，但所有已发现前端仍参与 live-reference 安全检查。
+
+由 Agent 执行时使用专用的非交互协议，不要模拟人类提示：
+
+```powershell
+local-agent-record-janitor agent doctor --platform native --codex-home 'D:\exact\CODEX_HOME'
+local-agent-record-janitor agent plan --operation purge --platform native `
+  --codex-home 'D:\exact\CODEX_HOME' --out '.\janitor-plan.json'
+local-agent-record-janitor agent apply --plan '.\janitor-plan.json' `
+  --authorized-plan-sha256 '<plan-sha256>' --clients-closed
+local-agent-record-janitor agent status --operation-id '<operation-id>' `
+  --codex-home 'D:\exact\CODEX_HOME'
+local-agent-record-janitor agent verify --operation-id '<operation-id>' `
+  --codex-home 'D:\exact\CODEX_HOME'
+```
+
+Agent 命令只输出 JSON、不读取 stdin；计划只授权一个不可变动作批次。`apply` 在触发
+修改前持久化 mutation gate，结果为 `unknown` 时会拒绝重复发送删除，只能通过
+`status`/`verify` 收口。完整约定见 [AGENTS.md](AGENTS.md) 和
+[Agent automation protocol](docs/agent-automation.md)。
 
 列出全部正常/异常 Codex thread 及 Cindy/AionUI frontend reference：
 

@@ -25,6 +25,7 @@ from .codex_app_server import CodexAppServer
 from .codex_state import rollout_state_fingerprint
 from .discovery import choose_codex_binary
 from .models import ConversationSummary, Finding, RolloutRecord
+from .path_identity import canonical_existing_path_key
 
 
 class ManualDeletePlanError(ValueError):
@@ -1164,17 +1165,12 @@ def _action_id(normalized_home: str, thread_id: str) -> str:
 
 
 def _normalize_home(value: str | os.PathLike[str]) -> str:
-    path = _canonical_path(value)
-    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
+    return canonical_existing_path_key(_canonical_path(value))
 
 
 def _canonical_path(value: str | os.PathLike[str]) -> Path:
     path = Path(value).expanduser()
-    try:
-        path = path.resolve(strict=False)
-    except (OSError, RuntimeError):
-        path = Path(os.path.abspath(os.fspath(path)))
-    return path
+    return Path(os.path.normpath(os.path.abspath(os.fspath(path))))
 
 
 def _optional_regular_file_exists(path: Path) -> bool:
