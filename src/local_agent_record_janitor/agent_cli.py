@@ -24,7 +24,8 @@ from .agent_operations import (
     verify_frozen_actions,
     zero_counts,
 )
-from .cleaner import AppServerFactory, BinaryResolver, scan_adapters
+from .cleaner import AppServerFactory, BinaryResolver
+from .cleanup_service import CleanupService
 from .codex_desktop_state import (
     ClientInspector,
     DesktopStateError,
@@ -44,7 +45,6 @@ from .path_identity import canonical_existing_path_key
 from .planning import (
     ScanStatus,
     StorageLocation,
-    build_cleanup_plan,
     normalize_storage_path,
     storage_id_for_path,
 )
@@ -64,9 +64,15 @@ def run_agent_command(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
     client_inspector: ClientInspector | None = None,
+    cleanup_service: CleanupService | None = None,
 ) -> int:
     del stderr  # Agent mode writes exactly one JSON/JSONL stream to stdout.
-    inspect_clients = client_inspector or running_related_clients
+    if cleanup_service is not None:
+        service = cleanup_service
+        inspect_clients = service.client_inspector
+    else:
+        inspect_clients = client_inspector or running_related_clients
+        service = CleanupService(client_inspector=inspect_clients)
     try:
         if args.agent_command == "doctor":
             return _run_doctor(
@@ -74,9 +80,15 @@ def run_agent_command(
                 supplied_adapters,
                 stdout,
                 client_inspector=inspect_clients,
+                cleanup_service=service,
             )
         if args.agent_command == "plan":
-            return _run_plan(args, supplied_adapters, stdout)
+            return _run_plan(
+                args,
+                supplied_adapters,
+                stdout,
+                cleanup_service=service,
+            )
         if args.agent_command == "apply":
             return _run_apply(
                 args,
@@ -85,11 +97,17 @@ def run_agent_command(
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
                 client_inspector=inspect_clients,
+                cleanup_service=service,
             )
         if args.agent_command == "status":
             return _run_status(args, stdout)
         if args.agent_command == "verify":
-            return _run_verify(args, supplied_adapters, stdout)
+            return _run_verify(
+                args,
+                supplied_adapters,
+                stdout,
+                cleanup_service=service,
+            )
         raise OperationStoreError("Unknown agent subcommand")
     except Exception as exc:
         blocker = structured_blocker(
@@ -121,10 +139,15 @@ def _run_doctor(
     stdout: TextIO,
     *,
     client_inspector: ClientInspector,
+    cleanup_service: CleanupService,
 ) -> int:
     operation_id = "doctor-" + new_operation_id().removeprefix("purge-")
     try:
-        context = _scan_context(args, supplied_adapters)
+        context = _scan_context(
+            args,
+            supplied_adapters,
+            cleanup_service=cleanup_service,
+        )
         target_home = _target_home(args)
         storage = _target_storage(
             context["plan"], target_home, context["active_adapters"]
@@ -241,10 +264,16 @@ def _run_plan(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
     stdout: TextIO,
+    *,
+    cleanup_service: CleanupService,
 ) -> int:
     operation_id = new_operation_id()
     try:
-        context = _scan_context(args, supplied_adapters)
+        context = _scan_context(
+            args,
+            supplied_adapters,
+            cleanup_service=cleanup_service,
+        )
         target_home = _target_home(args)
         storage = _target_storage(
             context["plan"], target_home, context["active_adapters"]
@@ -332,6 +361,7 @@ def _run_apply(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
     client_inspector: ClientInspector,
+    cleanup_service: CleanupService,
 ) -> int:
     plan, error = _load_authorized_plan(
         Path(args.plan).expanduser(),
@@ -409,6 +439,7 @@ def _run_apply(
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
                 client_inspector=client_inspector,
+                cleanup_service=cleanup_service,
             )
     except OperationLockedError as exc:
         result = result_document(
@@ -501,6 +532,7 @@ def _apply_locked(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
     client_inspector: ClientInspector,
+    cleanup_service: CleanupService,
 ) -> int:
     operation_id = str(plan["operation_id"])
     plan_hash = str(plan["plan_sha256"])
@@ -528,7 +560,11 @@ def _apply_locked(
     store.append_event({"event": "plan_accepted", "plan_sha256": plan_hash})
 
     context_args = _args_from_scan_options(plan)
-    context = _scan_context(context_args, supplied_adapters)
+    context = _scan_context(
+        context_args,
+        supplied_adapters,
+        cleanup_service=cleanup_service,
+    )
     target_home = Path(str(_mapping(plan.get("target"), {}).get("codex_home") or ""))
     storage = _target_storage(
         context["plan"], target_home, context["active_adapters"]
@@ -686,6 +722,7 @@ def _apply_locked(
                 supplied_adapters,
                 total_timeout=float(args.verify_timeout),
                 retry_pending=False,
+                cleanup_service=cleanup_service,
             )
             if (
                 verification is not None
@@ -801,6 +838,7 @@ def _apply_locked(
             binary_resolver=binary_resolver,
             adapter_builder=context["adapter_builder"],
             client_inspector=client_inspector,
+            cleanup_service=cleanup_service,
         )
     except Exception as exc:
         exit_code = EXIT_UNKNOWN
@@ -817,6 +855,7 @@ def _apply_locked(
         supplied_adapters,
         total_timeout=float(args.verify_timeout),
         retry_pending=True,
+        cleanup_service=cleanup_service,
     )
 
     exact_satisfied = bool(
@@ -995,6 +1034,8 @@ def _run_verify(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
     stdout: TextIO,
+    *,
+    cleanup_service: CleanupService,
 ) -> int:
     store: OperationStore | None = None
     try:
@@ -1013,6 +1054,7 @@ def _run_verify(
                 supplied_adapters,
                 total_timeout=float(args.verify_timeout),
                 retry_pending=bool(state.get("mutation_started", False)),
+                cleanup_service=cleanup_service,
             )
             mutation_started = bool(state.get("mutation_started", False))
             if (
@@ -1142,8 +1184,10 @@ def _run_verify(
 def _scan_context(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
+    *,
+    cleanup_service: CleanupService,
 ) -> dict[str, Any]:
-    from .cli import create_default_adapters, _filter_candidate_platforms
+    from .cli import create_default_adapters
 
     platforms = _effective_platforms(getattr(args, "platform", None))
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None
@@ -1154,23 +1198,24 @@ def _scan_context(
         guard_args.platform = ["all"]
         adapter_builder = lambda: create_default_adapters(guard_args)
         active_adapters = list(adapter_builder())
-    report = scan_adapters(active_adapters)
-    report = _filter_candidate_platforms(report, platforms)
-    plan = build_cleanup_plan(report)
-    return {
-        "platforms": platforms,
-        "active_adapters": active_adapters,
-        "adapter_builder": adapter_builder,
-        "report": report,
-        "plan": plan,
-    }
+    return cleanup_service.prepare(
+        active_adapters,
+        platforms=platforms,
+        adapter_builder=adapter_builder,
+    ).legacy_dict()
 
 
 def _verify_full_target_scope(
     plan: Mapping[str, Any],
     supplied_adapters: Iterable[FrontendAdapter] | None,
+    *,
+    cleanup_service: CleanupService,
 ) -> dict[str, Any]:
-    context = _scan_context(_args_from_scan_options(plan), supplied_adapters)
+    context = _scan_context(
+        _args_from_scan_options(plan),
+        supplied_adapters,
+        cleanup_service=cleanup_service,
+    )
     target = _mapping(plan.get("target"), {})
     target_home = Path(str(target.get("codex_home") or ""))
     storage = _target_storage(
@@ -1219,6 +1264,7 @@ def _verify_with_retry(
     *,
     total_timeout: float,
     retry_pending: bool,
+    cleanup_service: CleanupService | None = None,
 ) -> tuple[
     dict[str, Any] | None,
     dict[str, Any] | None,
@@ -1233,6 +1279,7 @@ def _verify_with_retry(
     only when a mutation may still be settling, up to the caller's budget.
     """
 
+    service = cleanup_service or CleanupService()
     deadline = time.monotonic() + max(0.0, total_timeout)
     delay = 0.25
     attempts = 0
@@ -1251,7 +1298,11 @@ def _verify_with_retry(
         except Exception as exc:
             verification_error = str(exc) or repr(exc)
         try:
-            final_scope = _verify_full_target_scope(plan, supplied_adapters)
+            final_scope = _verify_full_target_scope(
+                plan,
+                supplied_adapters,
+                cleanup_service=service,
+            )
         except Exception as exc:
             final_scope_error = str(exc) or repr(exc)
 

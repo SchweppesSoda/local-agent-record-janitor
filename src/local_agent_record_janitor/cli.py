@@ -17,6 +17,12 @@ from .blocker_codes import (
     STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
     exact_blocker_codes,
 )
+from .cleanup_service import (
+    CleanupService,
+    filter_candidate_platforms,
+    filter_supplied_adapters,
+    selected_platforms,
+)
 from .cleaner import (
     AppServerFactory,
     BinaryResolver,
@@ -955,6 +961,7 @@ def main(
     claude_catalog_builder: Any | None = None,
     claude_delete_executor: Any | None = None,
     client_inspector: ClientInspector | None = None,
+    cleanup_service: CleanupService | None = None,
 ) -> int:
     input_stream = stdin or sys.stdin
     output = stdout or sys.stdout
@@ -1022,7 +1029,13 @@ def main(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             client_inspector=client_inspector,
+            cleanup_service=cleanup_service,
         )
+
+    service = cleanup_service or CleanupService(
+        scanner=scan_adapters,
+        client_inspector=client_inspector,
+    )
 
     if args.command == "restore-legacy-index":
         return _run_legacy_index_restore(
@@ -1205,9 +1218,15 @@ def main(
             adapter_builder=adapter_builder,
         )
 
-    scan_report = scan_adapters(active_adapters)
+    scan_report = service.scan(
+        active_adapters,
+        platforms=(
+            args.platform
+            if args.command in {"clean", "purge"}
+            else None
+        ),
+    ).report
     if args.command in {"clean", "purge"}:
-        scan_report = _filter_candidate_platforms(scan_report, args.platform)
         if args.command == "purge":
             return _run_codex_purge(
                 args,
@@ -1219,7 +1238,8 @@ def main(
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
                 adapter_builder=adapter_builder,
-                client_inspector=client_inspector,
+                client_inspector=service.client_inspector,
+                cleanup_service=service,
             )
         return _run_planned_cleanup(
             args,
@@ -1231,7 +1251,8 @@ def main(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             adapter_builder=adapter_builder,
-            client_inspector=client_inspector,
+            client_inspector=service.client_inspector,
+            cleanup_service=service,
         )
 
     try:
@@ -1268,10 +1289,13 @@ def _run_codex_purge(
     binary_resolver: BinaryResolver,
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
     client_inspector: ClientInspector | None = None,
+    cleanup_service: CleanupService | None = None,
 ) -> int:
     """Execute every currently available Codex cleanup in safe-sized batches."""
 
-    from .planning import build_cleanup_plan
+    service = cleanup_service or CleanupService(
+        client_inspector=client_inspector,
+    )
 
     current_report = scan_report
     completed_batches: list[dict[str, Any]] = []
@@ -1280,7 +1304,13 @@ def _run_codex_purge(
 
     for batch_number in range(1, 1025):
         try:
-            plan = build_cleanup_plan(current_report)
+            plan = service.plan(
+                service.snapshot_from_report(
+                    current_report,
+                    active_adapters=active_adapters,
+                    platforms=args.platform,
+                )
+            )
         except Exception as exc:
             return _emit_fatal_error(
                 "purge",
@@ -1457,7 +1487,8 @@ def _run_codex_purge(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             adapter_builder=adapter_builder,
-            client_inspector=client_inspector,
+            client_inspector=service.client_inspector,
+            cleanup_service=service,
         )
         batch_document = {
             "batch": batch_number,
@@ -1522,10 +1553,10 @@ def _run_codex_purge(
             if adapter_builder is not None
             else active_adapters
         )
-        current_report = _filter_candidate_platforms(
-            scan_adapters(recheck_adapters),
-            args.platform,
-        )
+        current_report = service.scan(
+            recheck_adapters,
+            platforms=args.platform,
+        ).report
 
     return _emit_fatal_error(
         "purge",
@@ -3496,11 +3527,21 @@ def _run_planned_cleanup(
     binary_resolver: BinaryResolver,
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
     client_inspector: ClientInspector | None = None,
+    cleanup_service: CleanupService | None = None,
 ) -> int:
-    from .planning import build_cleanup_plan, normalize_storage_path
+    from .planning import normalize_storage_path
+
+    service = cleanup_service or CleanupService(
+        client_inspector=client_inspector,
+    )
 
     try:
-        plan = build_cleanup_plan(scan_report)
+        plan = service.prepare_report(
+            scan_report,
+            active_adapters=active_adapters,
+            platforms=args.platform,
+            adapter_builder=adapter_builder,
+        ).plan
     except Exception as exc:
         return _emit_fatal_error(
             "clean",
@@ -3866,13 +3907,14 @@ def _run_planned_cleanup(
         if adapter_builder is not None
         else active_adapters
     )
-    revalidated_report = scan_adapters(revalidated_adapters)
-    revalidated_report = _filter_candidate_platforms(
-        revalidated_report,
-        args.platform,
-    )
     try:
-        revalidated_plan = build_cleanup_plan(revalidated_report)
+        revalidated_context = service.prepare(
+            revalidated_adapters,
+            platforms=args.platform,
+            adapter_builder=adapter_builder,
+        )
+        revalidated_report = revalidated_context.report
+        revalidated_plan = revalidated_context.plan
     except Exception as exc:
         return _emit_fatal_error(
             "clean",
@@ -4034,7 +4076,7 @@ def _run_planned_cleanup(
             desktop_result = execute_desktop_state_cleanup(
                 Path(storage.path),
                 approved_desktop_snapshots,
-                client_inspector=client_inspector,
+                client_inspector=service.client_inspector,
             )
         except (ActionSelectionError, DesktopStateError) as exc:
             return _emit_fatal_error(
@@ -4127,12 +4169,12 @@ def _run_planned_cleanup(
             if adapter_builder is not None
             else active_adapters
         )
-        latest_report = scan_adapters(latest_adapters)
-        latest_report = _filter_candidate_platforms(
-            latest_report,
-            args.platform,
+        latest_context = service.prepare(
+            latest_adapters,
+            platforms=args.platform,
+            adapter_builder=adapter_builder,
         )
-        latest_plan = build_cleanup_plan(latest_report)
+        latest_plan = latest_context.plan
         expected_action = next(
             (
                 action
@@ -4423,47 +4465,21 @@ def _findings_for_actions(
 
 
 def _selected_platforms(values: Sequence[str] | None) -> set[str]:
-    if not values or "all" in values:
-        return {"aionui", "cindy", "native"}
-    return set(values)
+    return selected_platforms(values)
 
 
 def _filter_supplied_adapters(
     adapters: Iterable[FrontendAdapter],
     platforms: Sequence[str] | None,
 ) -> list[FrontendAdapter]:
-    supplied = list(adapters)
-    if not platforms or "all" in platforms:
-        return supplied
-    selected = _selected_platforms(platforms)
-    return [
-        adapter
-        for adapter in supplied
-        if str(getattr(adapter, "name", "")).lower() in selected
-    ]
+    return filter_supplied_adapters(adapters, platforms)
 
 
 def _filter_candidate_platforms(
     report: ScanReport,
     platforms: Sequence[str] | None,
 ) -> ScanReport:
-    if not platforms or "all" in platforms:
-        return report
-    selected = _selected_platforms(platforms)
-    return ScanReport(
-        findings=[
-            finding
-            for finding in report.findings
-            if finding.platform.lower() in selected
-            or (
-                finding.platform.lower() == "codex-desktop"
-                and "native" in selected
-            )
-        ],
-        # Guard/scanner failures remain global cleanup blockers even when the
-        # corresponding platform is not a requested candidate source.
-        errors=list(report.errors),
-    )
+    return filter_candidate_platforms(report, platforms)
 
 
 def _emit_scan(
