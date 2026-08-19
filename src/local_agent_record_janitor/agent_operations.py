@@ -13,6 +13,7 @@ from .codex_desktop_state import (
 )
 from .codex_state import read_rollouts_at_paths, read_thread_index
 from .legacy_index import inventory_legacy_index
+from .frontend_reference_cleanup import verify_frontend_reference_evidence
 from .operation_store import plan_sha256
 from .path_identity import canonical_existing_path_key
 
@@ -169,6 +170,8 @@ def plan_counts(
 
 def _physical_artifact_count(action: Any) -> int:
     impact = action.impact
+    if enum_value(action.kind) == "remove_frontend_reference":
+        return int(getattr(impact, "frontend_residual_count", 0))
     return (
         int(getattr(impact, "index_record_count", 0))
         + int(getattr(impact, "rollout_file_count", 0))
@@ -394,6 +397,20 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
             markers.extend(
                 f"native-rollout:{value}" for value in evidence["rollout_paths"]
             )
+        elif kind == "remove_frontend_reference":
+            impact = raw.get("impact")
+            references = (
+                impact.get("frontend_reference_evidence", [])
+                if isinstance(impact, Mapping)
+                else []
+            )
+            if not isinstance(references, list) or any(
+                not isinstance(value, Mapping) for value in references
+            ):
+                raise ValueError(
+                    "Frontend action has invalid exact reference evidence"
+                )
+            markers.extend(verify_frontend_reference_evidence(references))
         else:
             markers.append(f"unsupported-action-kind:{kind}")
         if markers:

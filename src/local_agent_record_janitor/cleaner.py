@@ -306,6 +306,7 @@ def deduplicate_findings(findings: Iterable[Finding]) -> list[Finding]:
             "platform_session_id": finding.platform_session_id,
             "reason": finding.reason,
             "details": finding.details,
+            "platform_db": str(finding.platform_db),
         }
         existing_details = dict(existing.details)
         hint_candidates = (
@@ -413,7 +414,14 @@ def scan_adapters(
                     )
                 )
                 continue
-            if require_codex_artifacts and not finding.has_codex_artifacts:
+            if (
+                require_codex_artifacts
+                and not finding.has_codex_artifacts
+                and not isinstance(
+                    finding.details.get("frontend_reference"),
+                    Mapping,
+                )
+            ):
                 continue
             findings.append(finding)
     findings, protection_errors = _apply_live_reference_protection(

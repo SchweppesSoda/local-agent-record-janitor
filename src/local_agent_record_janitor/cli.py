@@ -115,9 +115,6 @@ _UNIMPLEMENTED_ACTION_REASONS = {
     "quarantine_artifacts": (
         "隔离对话数据尚未实现；需要可恢复的隔离清单和还原流程"
     ),
-    "remove_frontend_reference": (
-        "清除该前端的残留引用尚未实现；删除 Codex 对话不会清除这条前端记录"
-    ),
 }
 _BLOCKED_REASON_LABELS = (
     (
@@ -3600,6 +3597,7 @@ def _run_planned_cleanup(
             "delete_conversation",
             "repair_legacy_index",
             "remove_desktop_state",
+            "remove_frontend_reference",
             "keep",
         }
     ]
@@ -3683,6 +3681,7 @@ def _run_planned_cleanup(
             "delete_conversation",
             "repair_legacy_index",
             "remove_desktop_state",
+            "remove_frontend_reference",
         }
     ]
     mutation_kinds = {
@@ -3692,8 +3691,8 @@ def _run_planned_cleanup(
     if len(mutation_kinds) > 1:
         return _emit_action_selection_error(
             ActionSelectionError(
-                "原生 thread 删除、旧版聚合索引修复和 Desktop 宿主残留"
-                "清理不能混在同一执行中；"
+                "原生 thread 删除、旧版聚合索引修复、Desktop 宿主残留"
+                "清理和前端引用清理不能混在同一执行中；"
                 "请分别复核和执行。",
                 kind="mixed_mutation_kinds",
                 matches=[
@@ -3715,6 +3714,11 @@ def _run_planned_cleanup(
         action
         for action in mutation_actions
         if _enum_value(action.kind) == "remove_desktop_state"
+    ]
+    frontend_actions = [
+        action
+        for action in mutation_actions
+        if _enum_value(action.kind) == "remove_frontend_reference"
     ]
     if len(legacy_actions) > 1:
         return _emit_action_selection_error(
@@ -3746,6 +3750,28 @@ def _run_planned_cleanup(
             stdout=stdout,
             stderr=stderr,
         )
+    if frontend_actions and len(
+        {
+            path
+            for action in frontend_actions
+            for path in getattr(
+                action.impact,
+                "frontend_database_paths",
+                (),
+            )
+        }
+    ) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "一次前端引用清理只能处理一个物理数据库；请按数据库分别执行。",
+                kind="multiple_frontend_storages",
+                matches=[str(action.action_id) for action in frontend_actions],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if not interactive:
         if not (args.json and args.yes and mutation_actions):
             _emit_plan_catalog(
@@ -3771,10 +3797,14 @@ def _run_planned_cleanup(
             else:
                 stdout.write("没有动作进入执行计划；未做任何更改。\n")
         return EXIT_OK
-    if (legacy_actions or desktop_actions) and args.yes and not args.clients_closed:
+    if (
+        legacy_actions or desktop_actions or frontend_actions
+    ) and args.yes and not args.clients_closed:
         mutation_label = (
             "清理 Codex Desktop 宿主残留"
             if desktop_actions
+            else "清理前端残留引用"
+            if frontend_actions
             else "修复旧版聚合索引"
         )
         return _emit_action_selection_error(
@@ -3782,7 +3812,12 @@ def _run_planned_cleanup(
                 f"使用 --yes {mutation_label}前，必须先关闭使用同一数据目录的 "
                 "Codex、AionUI 和 Cindy 客户端，并显式提供 --clients-closed。",
                 kind="clients_closed_ack_required",
-                matches=[str(action.action_id) for action in (legacy_actions or desktop_actions)],
+                matches=[
+                    str(action.action_id)
+                    for action in (
+                        legacy_actions or desktop_actions or frontend_actions
+                    )
+                ],
             ),
             plan=plan,
             json_output=args.json,
@@ -3805,6 +3840,13 @@ def _run_planned_cleanup(
                     "“客户端已关闭并确认清理桌面残留”继续，输入其他内容取消："
                 )
                 required_confirmation = "客户端已关闭并确认清理桌面残留"
+            elif frontend_actions:
+                stdout.write(
+                    "\n请先关闭使用该数据目录的前端客户端。清理只会移除"
+                    "已批准的精确残留引用。请输入“客户端已关闭并确认清理前端引用”"
+                    "继续，输入其他内容取消："
+                )
+                required_confirmation = "客户端已关闭并确认清理前端引用"
             else:
                 stdout.write(
                     "\n删除不可恢复。请输入“确认删除”继续，"
@@ -3832,6 +3874,12 @@ def _run_planned_cleanup(
                         "未做任何更改。复核 Desktop 宿主目录行、全局状态引用"
                         "和计划指纹后，关闭相关客户端，再使用同一 action ID、"
                         "计划指纹、--clients-closed 与 --yes 执行。\n"
+                    )
+                elif frontend_actions:
+                    stdout.write(
+                        "未做任何更改。复核前端数据库、精确行/字段和计划指纹后，"
+                        "关闭相关客户端，再使用同一 action ID、计划指纹、"
+                        "--clients-closed 与 --yes 执行。\n"
                     )
                 else:
                     stdout.write(
@@ -3983,6 +4031,18 @@ def _run_planned_cleanup(
                 f"{desktop_result.deleted_catalog_rows} 条目录记录，"
                 f"{desktop_result.removed_global_state_references} 条精确 UI 引用。\n"
                 f"可验证备份：{desktop_result.backup_directory}\n"
+            )
+        return EXIT_OK
+
+    if outcome.frontend_cleanup is not None:
+        frontend_result = outcome.frontend_cleanup
+        if args.json:
+            _write_json(outcome.audit_payload(), stdout)
+        else:
+            stdout.write(
+                "前端残留引用已精确清理："
+                f"{frontend_result.removed_reference_count} 条；"
+                "临时回滚副本已删除。\n"
             )
         return EXIT_OK
 

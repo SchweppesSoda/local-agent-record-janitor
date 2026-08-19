@@ -1495,6 +1495,21 @@ def _next_frozen_batch(actions: Sequence[Any]) -> tuple[str | None, list[Any]]:
             continue
         if family == "repair_legacy_index":
             matches = [min(matches, key=lambda value: str(value.action_id))]
+        if family == "remove_frontend_reference":
+            by_database: dict[str, list[Any]] = {}
+            for action in matches:
+                paths = tuple(
+                    str(value)
+                    for value in getattr(
+                        action.impact,
+                        "frontend_database_paths",
+                        (),
+                    )
+                )
+                database = paths[0] if len(paths) == 1 else ""
+                by_database.setdefault(database, []).append(action)
+            selected_database = min(by_database)
+            matches = by_database[selected_database]
         return family, sorted(matches, key=lambda value: str(value.action_id))
     return None, []
 

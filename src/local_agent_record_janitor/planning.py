@@ -150,6 +150,8 @@ class ActionImpact:
     frontend_reference_count: int = 0
     frontend_residual_count: int = 0
     frontend_references_preserved: bool = True
+    frontend_database_paths: tuple[str, ...] = ()
+    frontend_reference_evidence: tuple[Mapping[str, Any], ...] = ()
     indexed_thread_ids: tuple[str, ...] = ()
     rollout_state_fingerprints: tuple[str, ...] = ()
     conversation_metadata_fingerprints: tuple[str, ...] = ()
@@ -200,6 +202,11 @@ class ActionImpact:
             "frontend_reference_count": self.frontend_reference_count,
             "frontend_residual_count": self.frontend_residual_count,
             "frontend_references_preserved": self.frontend_references_preserved,
+            "frontend_database_paths": list(self.frontend_database_paths),
+            "frontend_reference_evidence": [
+                _json_value(value)
+                for value in self.frontend_reference_evidence
+            ],
         }
 
 
@@ -916,6 +923,7 @@ def _make_observations(
                     "platform_session_id": finding.platform_session_id,
                     "reason": finding.reason,
                     "details": finding.details,
+                    "platform_db": str(finding.platform_db),
                     "primary": True,
                 }
             ]
@@ -938,6 +946,12 @@ def _make_observations(
                                 item.get("details")
                                 if isinstance(item.get("details"), Mapping)
                                 else {}
+                            ),
+                            "platform_db": str(
+                                item.get(
+                                    "platform_db",
+                                    finding.platform_db,
+                                )
                             ),
                             "primary": False,
                         }
@@ -970,7 +984,7 @@ def _make_observations(
                         codex_indexed=finding.codex_indexed,
                         codex_archived=finding.codex_archived,
                         rollout_paths=tuple(sorted(rollout_paths)),
-                        platform_db=str(finding.platform_db),
+                        platform_db=str(entry["platform_db"]),
                     )
                 )
     return _reidentify_observations(observations)
@@ -1012,6 +1026,7 @@ def _reidentify_observations(
             "finding_type": observation.finding_type,
             "reason": observation.reason,
             "details": observation.details,
+            "platform_db": observation.platform_db,
             "codex_indexed": observation.codex_indexed,
             "rollout_paths": list(observation.rollout_paths),
         }
@@ -1077,6 +1092,10 @@ def _candidate_actions(
     kinds = {ActionKind.KEEP}
     for observation in observations:
         kinds.update(_action_kinds_for_observation(observation))
+    include_frontend_actions = (
+        ActionKind.REMOVE_FRONTEND_REFERENCE in kinds
+    )
+    kinds.discard(ActionKind.REMOVE_FRONTEND_REFERENCE)
     if (
         any(
             observation.finding_type == "residual_spawn_edge"
@@ -1399,6 +1418,134 @@ def _candidate_actions(
                 ),
             )
         )
+    if include_frontend_actions:
+        actions.extend(
+            _frontend_reference_actions(
+                target,
+                observations,
+                impact,
+                evidence,
+                unscoped_reason=unscoped_reason,
+            )
+        )
+    return actions
+
+
+def _frontend_reference_actions(
+    target: TargetRef,
+    observations: Sequence[Observation],
+    base_impact: ActionImpact,
+    storage_evidence: _StorageEvidence,
+    *,
+    unscoped_reason: str | None,
+) -> list[CandidateAction]:
+    groups: dict[tuple[str, str], list[Observation]] = defaultdict(list)
+    for observation in observations:
+        if observation.finding_type != "frontend_deleted_reference":
+            continue
+        reference = observation.details.get("frontend_reference")
+        database = (
+            str(reference.get("database") or "")
+            if isinstance(reference, Mapping)
+            else str(observation.platform_db or "")
+        )
+        groups[(observation.platform.lower(), database)].append(observation)
+
+    actions: list[CandidateAction] = []
+    for (platform, database), group in sorted(groups.items()):
+        references = tuple(
+            dict(reference)
+            for observation in group
+            if isinstance(
+                (reference := observation.details.get("frontend_reference")),
+                Mapping,
+            )
+        )
+        unavailable_reason = unscoped_reason
+        if unavailable_reason is None and storage_evidence.errors:
+            unavailable_reason = (
+                "Cleanup is blocked for this Codex data directory because "
+                "current state could not be read completely: "
+                + "; ".join(storage_evidence.errors)
+            )
+        if unavailable_reason is None and platform not in {"aionui", "cindy"}:
+            unavailable_reason = (
+                "This frontend has no supported exact reference writer."
+            )
+        if unavailable_reason is None and (
+            not database or len(references) != len(group)
+        ):
+            unavailable_reason = (
+                "The frontend reference has no complete physical-row evidence."
+            )
+        if unavailable_reason is None and any(
+            observation.details.get("frontend_reference_cleanable") is not True
+            for observation in group
+        ):
+            unavailable_reason = (
+                "The frontend reference identity or ownership is not exact."
+            )
+        if unavailable_reason is None and any(
+            str(reference.get("database") or "") != database
+            or str(reference.get("platform") or "").lower() != platform
+            for reference in references
+        ):
+            unavailable_reason = (
+                "Frontend evidence does not agree on one physical database."
+            )
+
+        observation_ids = tuple(
+            observation.observation_id for observation in group
+        )
+        snapshot = _fingerprint(
+            {
+                "storage_path": normalize_storage_path(storage_evidence.path),
+                "target": target.to_dict(),
+                "platform": platform,
+                "database": database,
+                "observation_ids": list(observation_ids),
+                "references": list(references),
+            }
+        )
+        action_impact = replace(
+            base_impact,
+            frontend_residual_count=len(group),
+            frontend_references_preserved=False,
+            frontend_database_paths=((database,) if database else ()),
+            frontend_reference_evidence=references,
+            resource_path=database or None,
+        )
+        action_id_digest = _fingerprint(
+            {
+                "target": target.to_dict(),
+                "kind": ActionKind.REMOVE_FRONTEND_REFERENCE.value,
+                "platform": platform,
+                "database": database,
+                "observation_ids": list(observation_ids),
+            }
+        )[:24]
+        actions.append(
+            CandidateAction(
+                action_id=(
+                    f"{ActionKind.REMOVE_FRONTEND_REFERENCE.value}-"
+                    f"{action_id_digest}"
+                ),
+                kind=ActionKind.REMOVE_FRONTEND_REFERENCE,
+                target=target,
+                risk=(
+                    RiskLevel.REVIEW
+                    if unavailable_reason is None
+                    else RiskLevel.BLOCKED
+                ),
+                available=unavailable_reason is None,
+                unavailable_reason=unavailable_reason,
+                impact=action_impact,
+                snapshot_fingerprint=snapshot,
+                observation_ids=observation_ids,
+                requires_explicit_selection=True,
+                resource_kind="frontend_reference",
+            )
+        )
     return actions
 
 
@@ -1470,10 +1617,6 @@ _UNIMPLEMENTED_REASONS = {
     ActionKind.QUARANTINE_ARTIFACTS: (
         "Artifact quarantine is not implemented; a recoverable quarantine "
         "manifest and restore workflow are required."
-    ),
-    ActionKind.REMOVE_FRONTEND_REFERENCE: (
-        "Removing a frontend residual reference is not implemented for this "
-        "frontend; Codex conversation deletion would not remove that record."
     ),
 }
 

@@ -121,11 +121,6 @@ class CindyAdapter(FrontendAdapter):
             records = rollout_groups.get(thread_id, [])
             rollout = _preferred_rollout(records)
             state_row = evidence.indexed_threads.get(thread_id)
-            if rollout is None and state_row is None:
-                # Cindy retains a soft-delete row, but there is no longer
-                # anything for Codex thread/delete to repair.
-                continue
-
             originators = {
                 normalized
                 for record in records
@@ -182,6 +177,7 @@ class CindyAdapter(FrontendAdapter):
                 and live_reference_count == 0
                 and cascade_safe
             )
+            frontend_reference = _cindy_reference_evidence(reference)
             findings.append(
                 Finding(
                     platform=self.name,
@@ -196,6 +192,11 @@ class CindyAdapter(FrontendAdapter):
                     codex_archived=bool(state_row["archived"]) if state_row else None,
                     codex_bin_hint=self.codex_bin_hint,
                     details={
+                        "frontend_reference": frontend_reference,
+                        "frontend_reference_cleanable": (
+                            not ownership_conflict
+                            and frontend_reference.get("exact") is True
+                        ),
                         "session_status": reference.session_status,
                         "source": (reference.session_details or {}).get("source"),
                         "parent_session_id": (reference.session_details or {}).get("parent_session_id"),
@@ -274,3 +275,52 @@ def _display_string(value: object) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _cindy_reference_evidence(
+    reference: CindyNativeReference,
+) -> dict[str, object]:
+    historical = reference.reference_kind == "agent_switch"
+    exact = bool(
+        reference.session_schema_fingerprint
+        and reference.session_row_fingerprint
+        and (
+            not historical
+            or (
+                reference.boundary_id
+                and reference.message_schema_fingerprint
+                and reference.message_row_fingerprint
+                and reference.message_content_sha256
+            )
+        )
+    )
+    return {
+        "schema_version": 1,
+        "platform": "cindy",
+        "database": str(reference.database.expanduser().absolute()),
+        "operation": (
+            "remove_agent_switch_from_sdk_session_id"
+            if historical
+            else "clear_session_sdk_session_id"
+        ),
+        "table": "messages" if historical else "sessions",
+        "locator": {
+            "cindy_session_id": reference.cindy_session_id,
+            "message_id": reference.boundary_id,
+        },
+        "expected": {
+            "native_session_id": reference.native_session_id,
+            "agent_kind": reference.agent_kind,
+            "reference_kind": reference.reference_kind,
+        },
+        "session_schema_fingerprint": (
+            reference.session_schema_fingerprint
+        ),
+        "session_row_fingerprint": reference.session_row_fingerprint,
+        "message_schema_fingerprint": (
+            reference.message_schema_fingerprint
+        ),
+        "message_row_fingerprint": reference.message_row_fingerprint,
+        "message_content_sha256": reference.message_content_sha256,
+        "exact": exact,
+    }

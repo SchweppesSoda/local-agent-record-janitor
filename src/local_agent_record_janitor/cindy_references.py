@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .sqlite_utils import connect_readonly, table_exists
+from .sqlite_identity import (
+    row_fingerprint,
+    schema_fingerprint,
+    table_schema,
+    text_sha256,
+)
 
 
 _BACKENDS = {"cc": "claude", "codex": "codex", "pi": "pi"}
@@ -38,6 +44,11 @@ class CindyNativeReference:
     boundary_created_at_ms: int | None = None
     boundary_rewind_at_ms: int | None = None
     session_details: Mapping[str, Any] | None = None
+    session_schema_fingerprint: str | None = None
+    session_row_fingerprint: str | None = None
+    message_schema_fingerprint: str | None = None
+    message_row_fingerprint: str | None = None
+    message_content_sha256: str | None = None
 
     @property
     def is_live(self) -> bool:
@@ -64,6 +75,11 @@ class CindyNativeReference:
             "boundary_created_at_ms": self.boundary_created_at_ms,
             "boundary_rewind_at_ms": self.boundary_rewind_at_ms,
             "is_live": self.is_live,
+            "session_schema_fingerprint": self.session_schema_fingerprint,
+            "session_row_fingerprint": self.session_row_fingerprint,
+            "message_schema_fingerprint": self.message_schema_fingerprint,
+            "message_row_fingerprint": self.message_row_fingerprint,
+            "message_content_sha256": self.message_content_sha256,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -153,25 +169,13 @@ def build_cindy_reference_catalog(
                 "sessions",
                 {"id", "sdk_session_id", "status", "agent_kind"},
             )
-            optional = (
-                "working_dir",
-                "updated_at",
-                "source",
-                "created_at",
-                "parent_session_id",
-                "title",
+            session_schema = table_schema(connection, "sessions")
+            session_schema_hash = schema_fingerprint(session_schema)
+            session_column_order = tuple(
+                value["name"] for value in session_schema
             )
-            projections = [
-                column if column in session_columns else f"NULL AS {column}"
-                for column in optional
-            ]
             session_rows = connection.execute(
-                f"""
-                SELECT id, sdk_session_id, status, agent_kind,
-                       {", ".join(projections)}
-                FROM sessions
-                ORDER BY id
-                """
+                "SELECT * FROM sessions ORDER BY id"
             ).fetchall()
             if table_exists(connection, "messages"):
                 _require_columns(
@@ -179,12 +183,17 @@ def build_cindy_reference_catalog(
                     "messages",
                     {"id", "session_id", "role", "content", "created_at", "rewind_at"},
                 )
+                message_schema = table_schema(connection, "messages")
+                message_schema_hash = schema_fingerprint(message_schema)
+                message_column_order = tuple(
+                    value["name"] for value in message_schema
+                )
                 switch_rows = connection.execute(
                     """
-                    SELECT id, session_id, content, created_at, rewind_at
+                    SELECT *
                     FROM messages
                     WHERE role = 'agent_switch'
-                    ORDER BY created_at, rowid
+                    ORDER BY created_at, id
                     """
                 ).fetchall()
             else:
@@ -192,6 +201,8 @@ def build_cindy_reference_catalog(
                 # table.  Current session bindings remain reliable evidence;
                 # there cannot be a switch row hidden in an absent table.
                 switch_rows = []
+                message_schema_hash = None
+                message_column_order = ()
     except (sqlite3.Error, CindyReferenceError) as exc:
         return _failed(database, root, exc, "Could not read Cindy native references")
 
@@ -216,10 +227,17 @@ def build_cindy_reference_catalog(
                     agent_kind=kind,
                     native_session_id=_optional_native_id(row["sdk_session_id"], "sessions.sdk_session_id"),
                     reference_kind="current",
+                    session_schema_hash=session_schema_hash,
+                    session_column_order=session_column_order,
                 )
             )
 
+        seen_message_ids: set[str] = set()
         for row in switch_rows:
+            message_id = _required_string(row["id"], "messages.id")
+            if message_id in seen_message_ids:
+                raise CindyReferenceError("messages.id is duplicated")
+            seen_message_ids.add(message_id)
             session_id = _required_string(row["session_id"], "messages.session_id")
             session = sessions.get(session_id)
             if session is None:
@@ -228,13 +246,13 @@ def build_cindy_reference_catalog(
                 )
             payload = _switch_payload(row["content"])
             kind = _agent_kind(payload.get("fromAgentKind"), "agent_switch.fromAgentKind")
+            if "fromSdkSessionId" not in payload:
+                # Exact cleanup deliberately removes this one binding field
+                # while retaining the switch message and its other metadata.
+                continue
             native_id = _optional_native_id(
                 payload.get("fromSdkSessionId"), "agent_switch.fromSdkSessionId"
             )
-            if "fromSdkSessionId" not in payload:
-                raise CindyReferenceError(
-                    "agent_switch content has no fromSdkSessionId field"
-                )
             backend = _BACKENDS.get(kind)
             if backend is None or native_id is None:
                 continue
@@ -247,9 +265,14 @@ def build_cindy_reference_catalog(
                     agent_kind=kind,
                     native_session_id=native_id,
                     reference_kind="agent_switch",
-                    boundary_id=_required_string(row["id"], "messages.id"),
+                    boundary_id=message_id,
                     boundary_created_at_ms=_optional_int(row["created_at"], "messages.created_at"),
                     boundary_rewind_at_ms=_optional_int(row["rewind_at"], "messages.rewind_at"),
+                    session_schema_hash=session_schema_hash,
+                    session_column_order=session_column_order,
+                    message_row=row,
+                    message_schema_hash=message_schema_hash,
+                    message_column_order=message_column_order,
                 )
             )
     except CindyReferenceError as exc:
@@ -277,17 +300,31 @@ def _reference(
     agent_kind: str,
     native_session_id: str | None,
     reference_kind: str,
+    session_schema_hash: str,
+    session_column_order: tuple[str, ...],
     boundary_id: str | None = None,
     boundary_created_at_ms: int | None = None,
     boundary_rewind_at_ms: int | None = None,
+    message_row: sqlite3.Row | None = None,
+    message_schema_hash: str | None = None,
+    message_column_order: tuple[str, ...] = (),
 ) -> CindyNativeReference:
+    message_content = (
+        message_row["content"] if message_row is not None else None
+    )
     return CindyNativeReference(
         database=database,
         profile_root=root,
         cindy_session_id=_required_string(session["id"], "sessions.id"),
         session_status=_optional_string(session["status"], "sessions.status"),
-        working_dir=_optional_string(session["working_dir"], "sessions.working_dir"),
-        session_updated_at_ms=_optional_int(session["updated_at"], "sessions.updated_at"),
+        working_dir=_optional_string(
+            _row_value(session, "working_dir"),
+            "sessions.working_dir",
+        ),
+        session_updated_at_ms=_optional_int(
+            _row_value(session, "updated_at"),
+            "sessions.updated_at",
+        ),
         backend=backend,
         native_session_id=native_session_id,
         reference_kind=reference_kind,
@@ -296,12 +333,32 @@ def _reference(
         boundary_created_at_ms=boundary_created_at_ms,
         boundary_rewind_at_ms=boundary_rewind_at_ms,
         session_details={
-            "source": session["source"],
-            "created_at": session["created_at"],
-            "parent_session_id": session["parent_session_id"],
-            "title": session["title"],
+            "source": _row_value(session, "source"),
+            "created_at": _row_value(session, "created_at"),
+            "parent_session_id": _row_value(session, "parent_session_id"),
+            "title": _row_value(session, "title"),
         },
+        session_schema_fingerprint=session_schema_hash,
+        session_row_fingerprint=row_fingerprint(
+            session,
+            session_column_order,
+        ),
+        message_schema_fingerprint=message_schema_hash,
+        message_row_fingerprint=(
+            row_fingerprint(message_row, message_column_order)
+            if message_row is not None
+            else None
+        ),
+        message_content_sha256=(
+            text_sha256(message_content)
+            if isinstance(message_content, str)
+            else None
+        ),
     )
+
+
+def _row_value(row: sqlite3.Row, name: str) -> Any:
+    return row[name] if name in row.keys() else None
 
 
 def _switch_payload(value: object) -> Mapping[str, Any]:

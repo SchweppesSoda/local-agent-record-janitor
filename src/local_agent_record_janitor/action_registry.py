@@ -67,10 +67,10 @@ ACTION_REGISTRY: Mapping[str, ActionCapability] = {
     ),
     "remove_frontend_reference": ActionCapability(
         kind="remove_frontend_reference",
-        implemented=False,
-        mutation_family=None,
+        implemented=True,
+        mutation_family="remove_frontend_reference",
         requires_clients_closed=True,
-        verifies_by="not_implemented",
+        verifies_by="approved_frontend_reference_absent",
     ),
     "keep": ActionCapability(
         kind="keep",

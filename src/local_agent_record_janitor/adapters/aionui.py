@@ -10,6 +10,13 @@ from ..codex_state import iter_rollouts
 from ..discovery import discover_aionui_codex
 from ..models import Finding, RolloutRecord
 from ..sqlite_utils import connect_readonly, table_exists
+from ..sqlite_identity import (
+    quote_identifier,
+    row_fingerprint,
+    schema_fingerprint,
+    sqlite_value,
+    table_schema,
+)
 from .base import (
     AdapterScanError,
     FrontendAdapter,
@@ -158,6 +165,28 @@ class AionUIAdapter(FrontendAdapter):
                     connection,
                     self.database,
                 )
+                acp_schema = table_schema(connection, "acp_session")
+                acp_schema_hash = schema_fingerprint(acp_schema)
+                acp_columns = tuple(
+                    str(value["name"]) for value in acp_schema
+                )
+                acp_primary_key = tuple(
+                    str(value["name"])
+                    for value in sorted(
+                        acp_schema,
+                        key=lambda value: int(value["pk"]),
+                    )
+                    if int(value["pk"]) > 0
+                )
+                has_rowid = _table_has_rowid(
+                    connection,
+                    "acp_session",
+                )
+                identity_projection = ",\n                        ".join(
+                    f"a.{quote_identifier(column)} AS "
+                    f"{quote_identifier(f'__acp_{index}')}"
+                    for index, column in enumerate(acp_columns)
+                )
                 rows = connection.execute(
                     f"""
                     SELECT
@@ -168,6 +197,8 @@ class AionUIAdapter(FrontendAdapter):
                         a.session_status,
                         a.last_active_at,
                         {backend_column} AS backend,
+                        {"a.rowid" if has_rowid else "NULL"} AS __acp_rowid,
+                        {identity_projection},
                         (
                             SELECT COUNT(*)
                             FROM acp_session live
@@ -246,12 +277,6 @@ class AionUIAdapter(FrontendAdapter):
             records = rollout_groups.get(thread_id, [])
             rollout = _preferred_rollout(records)
             state_row = evidence.indexed_threads.get(thread_id)
-            if rollout is None and state_row is None:
-                # The stale frontend mapping has already been resolved on the
-                # Codex side. Re-reporting it would create a permanent false
-                # cleanup candidate.
-                continue
-
             backend = _normalized_string(row["backend"])
             originators = {
                 normalized
@@ -297,6 +322,15 @@ class AionUIAdapter(FrontendAdapter):
                 and live_reference_count == 0
                 and cascade_safe
             )
+            frontend_reference = _aionui_reference_evidence(
+                database=self.database,
+                row=row,
+                schema=acp_schema,
+                schema_hash=acp_schema_hash,
+                columns=acp_columns,
+                primary_key=acp_primary_key,
+                has_rowid=has_rowid,
+            )
             findings.append(
                 Finding(
                     platform=self.name,
@@ -311,6 +345,7 @@ class AionUIAdapter(FrontendAdapter):
                     codex_archived=bool(state_row["archived"]) if state_row else None,
                     codex_bin_hint=self.codex_bin_hint,
                     details={
+                        "frontend_reference": frontend_reference,
                         "agent_source": row["agent_source"],
                         "session_status": row["session_status"],
                         "backend": row["backend"],
@@ -319,6 +354,11 @@ class AionUIAdapter(FrontendAdapter):
                         ),
                         "rollout_originators": sorted(originators),
                         "ownership_status": ownership,
+                        "frontend_reference_cleanable": (
+                            ownership == "confirmed"
+                            and frontend_reference["locator"]["kind"]
+                            in {"primary_key", "rowid"}
+                        ),
                         "ownership_evidence": _ownership_evidence(
                             backend=backend,
                             originators=originators,
@@ -350,6 +390,63 @@ class AionUIAdapter(FrontendAdapter):
 
 def _as_int(value: object) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
+
+
+def _table_has_rowid(
+    connection: sqlite3.Connection,
+    table: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if row is None or not isinstance(row["sql"], str):
+        raise AdapterScanError(f"Required table {table!r} has no schema SQL")
+    return "WITHOUT ROWID" not in row["sql"].upper()
+
+
+def _aionui_reference_evidence(
+    *,
+    database: Path,
+    row: sqlite3.Row,
+    schema: tuple[dict[str, Any], ...],
+    schema_hash: str,
+    columns: tuple[str, ...],
+    primary_key: tuple[str, ...],
+    has_rowid: bool,
+) -> dict[str, Any]:
+    values = {
+        column: row[f"__acp_{index}"]
+        for index, column in enumerate(columns)
+    }
+    if primary_key:
+        locator = {
+            "kind": "primary_key",
+            "columns": list(primary_key),
+            "values": [sqlite_value(values[column]) for column in primary_key],
+        }
+    elif has_rowid and isinstance(row["__acp_rowid"], int):
+        locator = {
+            "kind": "rowid",
+            "rowid": int(row["__acp_rowid"]),
+        }
+    else:
+        locator = {"kind": "unavailable"}
+    return {
+        "schema_version": 1,
+        "platform": "aionui",
+        "database": str(database.expanduser().absolute()),
+        "table": "acp_session",
+        "operation": "delete_row",
+        "schema_fingerprint": schema_hash,
+        "schema_columns": [dict(value) for value in schema],
+        "locator": locator,
+        "row_fingerprint": row_fingerprint(values, columns),
+        "expected": {
+            "conversation_id": row["conversation_id"],
+            "session_id": row["session_id"],
+        },
+    }
 
 
 def _rollouts_by_thread(

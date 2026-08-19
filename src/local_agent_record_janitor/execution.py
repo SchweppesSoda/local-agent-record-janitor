@@ -23,6 +23,10 @@ from .codex_desktop_state import (
     execute_desktop_state_cleanup,
 )
 from .legacy_index import LegacyIndexRepairResult, repair_legacy_index
+from .frontend_reference_cleanup import (
+    FrontendReferenceCleanupResult,
+    execute_frontend_reference_cleanup,
+)
 from .models import Finding
 from .planning import normalize_storage_path
 from .targeted_guard import (
@@ -70,12 +74,17 @@ class ExecutionOutcome:
     cleanup_report: CleanupReport | None = None
     legacy_repair: LegacyIndexRepairResult | None = None
     desktop_cleanup: DesktopCleanupResult | None = None
+    frontend_cleanup: FrontendReferenceCleanupResult | None = None
 
     @property
     def ok(self) -> bool:
         if self.cleanup_report is not None:
             return self.cleanup_report.ok
-        return self.legacy_repair is not None or self.desktop_cleanup is not None
+        return (
+            self.legacy_repair is not None
+            or self.desktop_cleanup is not None
+            or self.frontend_cleanup is not None
+        )
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
@@ -98,6 +107,16 @@ class ExecutionOutcome:
                     str(action.action_id) for action in self.selected_actions
                 ],
                 "result": self.desktop_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
+        if self.frontend_cleanup is not None:
+            return {
+                "command": "clean",
+                "mutation_kind": "remove_frontend_reference",
+                "selected_action_ids": [
+                    str(action.action_id) for action in self.selected_actions
+                ],
+                "result": self.frontend_cleanup.to_dict(),
                 "plan_fingerprint": str(self.plan.plan_fingerprint),
             }
         assert self.cleanup_report is not None
@@ -233,6 +252,52 @@ def execute_prevalidated_actions(
             selected_actions=actions,
             plan=plan,
             desktop_cleanup=result,
+        )
+
+    if mutation_kind == "remove_frontend_reference":
+        database_paths = {
+            str(path)
+            for action in actions
+            for path in getattr(
+                action.impact,
+                "frontend_database_paths",
+                (),
+            )
+        }
+        if len(database_paths) != 1:
+            raise ExecutionError(
+                "One frontend reference batch must target one physical database.",
+                kind="multiple_frontend_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        reference_evidence = tuple(
+            dict(item)
+            for action in actions
+            for item in getattr(
+                action.impact,
+                "frontend_reference_evidence",
+                (),
+            )
+        )
+        if action_state_callback is not None:
+            for action in actions:
+                action_state_callback("guard_started", action, None)
+            for action in actions:
+                action_state_callback("mutation_started", action, None)
+        storage = _storage_for_action(actions[0], plan)
+        result = execute_frontend_reference_cleanup(
+            Path(storage.path),
+            reference_evidence,
+            client_inspector=client_inspector,
+        )
+        if action_state_callback is not None:
+            for action in actions:
+                action_state_callback("verified", action, None)
+        return ExecutionOutcome(
+            mutation_kind=mutation_kind,
+            selected_actions=actions,
+            plan=plan,
+            frontend_cleanup=result,
         )
 
     if mutation_kind != "delete_conversation":

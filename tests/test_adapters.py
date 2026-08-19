@@ -375,7 +375,7 @@ class AionUIAdapterTests(unittest.TestCase):
         self.assertFalse(finding.details["cleanable"])
         self.assertTrue(finding.details["needs_quarantine"])
 
-    def test_resolved_mapping_without_codex_artifact_is_not_reported(self) -> None:
+    def test_mapping_only_row_is_reported_for_exact_reference_cleanup(self) -> None:
         create_aionui_database(
             self.database,
             sessions=[
@@ -388,7 +388,14 @@ class AionUIAdapterTests(unittest.TestCase):
             metadata=[("codex-agent", "codex")],
         )
 
-        self.assertEqual(self.adapter().scan(), [])
+        finding = self.adapter().scan()[0]
+
+        self.assertFalse(finding.has_codex_artifacts)
+        self.assertTrue(finding.details["frontend_reference_cleanable"])
+        self.assertEqual(
+            finding.details["frontend_reference"]["operation"],
+            "delete_row",
+        )
 
     def test_blank_session_id_is_ignored(self) -> None:
         create_aionui_database(
@@ -760,7 +767,7 @@ class CindyAdapterTests(unittest.TestCase):
             ["spawn_edge_open"],
         )
 
-    def test_resolved_soft_delete_without_codex_artifact_is_not_reported(self) -> None:
+    def test_mapping_only_session_is_reported_for_exact_reference_cleanup(self) -> None:
         create_cindy_database(
             self.database,
             [
@@ -772,7 +779,14 @@ class CindyAdapterTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(self.adapter().scan(), [])
+        finding = self.adapter().scan()[0]
+
+        self.assertFalse(finding.has_codex_artifacts)
+        self.assertTrue(finding.details["frontend_reference_cleanable"])
+        self.assertEqual(
+            finding.details["frontend_reference"]["operation"],
+            "clear_session_sdk_session_id",
+        )
 
     def test_blank_sdk_session_id_is_ignored(self) -> None:
         create_cindy_database(
