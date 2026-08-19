@@ -72,6 +72,20 @@ ACTION_REGISTRY: Mapping[str, ActionCapability] = {
         requires_clients_closed=True,
         verifies_by="approved_frontend_reference_absent",
     ),
+    "delete_pi_session": ActionCapability(
+        kind="delete_pi_session",
+        implemented=True,
+        mutation_family="delete_pi_session",
+        requires_clients_closed=True,
+        verifies_by="approved_pi_transcript_absent",
+    ),
+    "delete_claude_session": ActionCapability(
+        kind="delete_claude_session",
+        implemented=True,
+        mutation_family="delete_claude_session",
+        requires_clients_closed=True,
+        verifies_by="approved_claude_manifest_absent",
+    ),
     "keep": ActionCapability(
         kind="keep",
         implemented=True,

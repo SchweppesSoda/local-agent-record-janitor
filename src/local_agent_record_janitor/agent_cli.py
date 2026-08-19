@@ -148,7 +148,7 @@ def _run_doctor(
             supplied_adapters,
             cleanup_service=cleanup_service,
         )
-        target_home = _target_home(args)
+        target_home = Path(context.get("target_home") or _target_home(args))
         storage = _target_storage(
             context["plan"], target_home, context["active_adapters"]
         )
@@ -183,18 +183,20 @@ def _run_doctor(
             )
         clients: tuple[str, ...] = ()
         client_error: str | None = None
-        try:
-            clients = client_inspector(target_home)
-        except DesktopStateError as exc:
-            client_error = str(exc)
-            blockers.append(
-                structured_blocker(
-                    "client_check_failed",
-                    scope="target_store",
-                    remediation="Run doctor again with Windows process inspection available.",
-                    message=client_error,
+        session_engine = context.get("session_engine")
+        if session_engine is None:
+            try:
+                clients = client_inspector(target_home)
+            except DesktopStateError as exc:
+                client_error = str(exc)
+                blockers.append(
+                    structured_blocker(
+                        "client_check_failed",
+                        scope="target_store",
+                        remediation="Run doctor again with Windows process inspection available.",
+                        message=client_error,
+                    )
                 )
-            )
         if clients:
             blockers.append(
                 structured_blocker(
@@ -210,6 +212,11 @@ def _run_doctor(
                 "ok": not clients and client_error is None,
                 "running_clients": list(clients),
                 "error": client_error,
+                "check_mode": (
+                    "explicit_apply_acknowledgement"
+                    if session_engine is not None
+                    else "process_attribution"
+                ),
             }
         )
         status = "ready" if not blockers else "unknown"
@@ -274,7 +281,7 @@ def _run_plan(
             supplied_adapters,
             cleanup_service=cleanup_service,
         )
-        target_home = _target_home(args)
+        target_home = Path(context.get("target_home") or _target_home(args))
         storage = _target_storage(
             context["plan"], target_home, context["active_adapters"]
         )
@@ -287,6 +294,9 @@ def _run_plan(
         mutation_kind, selected_actions = _next_frozen_batch(target_actions)
         if not context["plan"].scan_complete:
             mutation_kind, selected_actions = None, []
+        scan_options = _scan_options(args, context["platforms"])
+        if context.get("session_engine") is not None:
+            scan_options["target_home"] = str(target_home)
         document = build_agent_plan_document(
             operation_id=operation_id,
             codex_home=target_home,
@@ -296,7 +306,8 @@ def _run_plan(
             findings=context["report"].findings,
             selected_actions=selected_actions,
             mutation_kind=mutation_kind,
-            scan_options=_scan_options(args, context["platforms"]),
+            scan_options=scan_options,
+            additional_blockers=context.get("selection_blockers", ()),
         )
         write_new_json(Path(args.out).expanduser(), document)
         _write_document(
@@ -660,18 +671,29 @@ def _apply_locked(
             )
         else:
             selected_actions.append(fresh)
-    try:
-        running = client_inspector(target_home)
-    except DesktopStateError as exc:
+    target_platforms = tuple(
+        str(value)
+        for value in _mapping(plan.get("target"), {}).get("platforms", ())
+    )
+    if len(target_platforms) == 1 and target_platforms[0] in {"pi", "claude"}:
+        # Pi/Claude process command lines do not expose a trustworthy physical
+        # store identity on every supported OS.  Their native inventory still
+        # blocks known-active targets, and apply additionally requires the
+        # caller's explicit --clients-closed acknowledgement.
         running = ()
-        preflight_blockers.append(
-            structured_blocker(
-                "client_check_failed",
-                scope="target_store",
-                remediation="Restore reliable process inspection before applying.",
-                message=str(exc),
+    else:
+        try:
+            running = client_inspector(target_home)
+        except DesktopStateError as exc:
+            running = ()
+            preflight_blockers.append(
+                structured_blocker(
+                    "client_check_failed",
+                    scope="target_store",
+                    remediation="Restore reliable process inspection before applying.",
+                    message=str(exc),
+                )
             )
-        )
     if running:
         preflight_blockers.append(
             structured_blocker(
@@ -926,6 +948,7 @@ def _apply_locked(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             action_state_callback=record_action_state,
+            session_preflight_verified=True,
         )
         exit_code = EXIT_OK if outcome.ok else EXIT_UNKNOWN
         execution_result = outcome.audit_payload()
@@ -1279,6 +1302,53 @@ def _scan_context(
     from .adapter_factory import create_default_adapters
 
     platforms = _effective_platforms(getattr(args, "platform", None))
+    session_platforms = set(platforms) & {"pi", "claude"}
+    if session_platforms:
+        if len(platforms) != 1:
+            raise OperationStoreError(
+                "Pi/Claude Agent operations must target exactly one engine."
+            )
+        engine = next(iter(session_platforms))
+        from .cli import _build_claude_catalog, _build_pi_catalog
+        from .session_cleanup import select_session_context
+
+        if engine == "pi":
+            catalog_builder = lambda: _build_pi_catalog(args)
+        else:
+            catalog_builder = lambda: _build_claude_catalog(args)
+        catalog = catalog_builder()
+        target_root = _session_target_root(args, engine, catalog)
+        prepared = cleanup_service.prepare_session_catalog(
+            engine,
+            catalog,
+            catalog_builder=catalog_builder,
+            target_root=target_root,
+        )
+        selection_blockers: tuple[dict[str, Any], ...] = ()
+        if str(getattr(args, "agent_command", "")) in {
+            "plan",
+            "apply_context",
+        }:
+            prepared, selection_blockers = select_session_context(
+                prepared,
+                action_ids=tuple(getattr(args, "action_id", ()) or ()),
+                session_ids=tuple(getattr(args, "session_id", ()) or ()),
+            )
+        result = prepared.legacy_dict()
+        result.update(
+            {
+                "cleanup_context": prepared,
+                "session_engine": engine,
+                "target_home": target_root,
+                "selection_blockers": selection_blockers,
+            }
+        )
+        return result
+
+    if getattr(args, "action_id", None) or getattr(args, "session_id", None):
+        raise OperationStoreError(
+            "--action-id/--session-id on agent plan are only valid for Pi or Claude."
+        )
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None
     if supplied_adapters is not None:
         active_adapters = list(supplied_adapters)
@@ -1294,7 +1364,55 @@ def _scan_context(
     )
     result = prepared.legacy_dict()
     result["cleanup_context"] = prepared
+    result["session_engine"] = None
+    result["target_home"] = _target_home(args)
+    result["selection_blockers"] = ()
     return result
+
+
+def _session_target_root(
+    args: argparse.Namespace,
+    engine: str,
+    catalog: Any,
+) -> Path:
+    override = getattr(args, "target_home_override", None)
+    if override is not None:
+        return Path(override).expanduser().resolve()
+    if engine == "claude":
+        from .claude_sessions import resolve_claude_paths
+
+        return resolve_claude_paths(
+            config_dir=getattr(args, "claude_config_dir", None)
+        ).config_dir
+
+    from .pi_sessions import resolve_pi_paths
+
+    resolved = resolve_pi_paths(
+        agent_dir=getattr(args, "pi_agent_dir", None),
+        session_root=getattr(args, "pi_session_dir", None),
+    )
+    explicit_session = getattr(args, "pi_session_dir", None)
+    explicit_agent = getattr(args, "pi_agent_dir", None)
+    if explicit_session is None or explicit_agent is not None:
+        return resolved.agent_dir
+
+    # An explicit session root can point at a Cindy-owned Pi store.  Resolve
+    # its qualified agent root from the catalog rather than relabeling it as
+    # the standalone default store.
+    requested_session = Path(explicit_session).expanduser().resolve()
+    nested = getattr(catalog, "catalogs", None)
+    catalogs = tuple(nested) if nested is not None else (catalog,)
+    matches = {
+        normalize_storage_path(getattr(item, "agent_dir"))
+        for item in catalogs
+        if getattr(item, "session_root", None) is not None
+        and normalize_storage_path(getattr(item, "session_root"))
+        == normalize_storage_path(requested_session)
+        and getattr(item, "agent_dir", None) is not None
+    }
+    if len(matches) == 1:
+        return Path(next(iter(matches)))
+    return resolved.agent_dir
 
 
 def _verify_full_target_scope(
@@ -1638,8 +1756,18 @@ def _load_authorized_plan(
             or len(platforms) != len(set(platforms))
             or any(
                 not isinstance(platform, str)
-                or platform not in {"aionui", "cindy", "native"}
+                or platform not in {
+                    "aionui",
+                    "cindy",
+                    "native",
+                    "pi",
+                    "claude",
+                }
                 for platform in platforms
+            )
+            or (
+                any(platform in {"pi", "claude"} for platform in platforms)
+                and len(platforms) != 1
             )
         ):
             raise ValueError("target platforms are invalid")
@@ -1694,7 +1822,10 @@ def _load_authorized_plan(
                 or capability.mutation_family is None
                 or storage_id != target_storage_id
                 or not thread_id
-                or not re.fullmatch(r"(?:v1:)?[0-9a-f]{64}", snapshot)
+                or not re.fullmatch(
+                    r"(?:(?:v1|sha256):)?[0-9a-f]{64}",
+                    snapshot,
+                )
                 or not isinstance(affected, list)
                 or any(not isinstance(value, str) or not value for value in affected)
                 or thread_id not in affected
@@ -1757,6 +1888,19 @@ def _load_authorized_plan(
                 same_option_home = False
             if not same_option_home:
                 raise ValueError("scan_options codex_home changes the target")
+        option_target_home = scan_options.get("target_home")
+        if option_target_home is not None:
+            try:
+                same_option_target = Path(
+                    str(option_target_home)
+                ).is_absolute() and os.path.samefile(
+                    Path(str(option_target_home)),
+                    target_home,
+                )
+            except OSError:
+                same_option_target = False
+            if not same_option_target:
+                raise ValueError("scan_options target_home changes the target")
         OperationStore(target_home, operation_id)
     except (KeyError, TypeError, ValueError, OperationStoreError) as exc:
         return None, result_document(
@@ -1792,6 +1936,13 @@ def _args_from_scan_options(plan: Mapping[str, Any]) -> argparse.Namespace:
         "cindy_root": _optional_path(options.get("cindy_root")),
         "cindy_db": _optional_path(options.get("cindy_db")),
         "cindy_codex_home": _optional_path(options.get("cindy_codex_home")),
+        "pi_agent_dir": _optional_path(options.get("pi_agent_dir")),
+        "pi_session_dir": _optional_path(options.get("pi_session_dir")),
+        "claude_config_dir": _optional_path(options.get("claude_config_dir")),
+        "target_home_override": _optional_path(options.get("target_home")),
+        "action_id": list(options.get("action_ids") or []),
+        "session_id": list(options.get("session_ids") or []),
+        "agent_command": "apply_context",
         "thread_id": [],
         "json": True,
         "limit": 0,
@@ -1800,7 +1951,7 @@ def _args_from_scan_options(plan: Mapping[str, Any]) -> argparse.Namespace:
 
 
 def _scan_options(args: argparse.Namespace, platforms: Sequence[str]) -> dict[str, Any]:
-    return {
+    result = {
         "platforms": list(platforms),
         **{
             name: str(value) if value is not None else None
@@ -1813,10 +1964,27 @@ def _scan_options(args: argparse.Namespace, platforms: Sequence[str]) -> dict[st
                 "cindy_root",
                 "cindy_db",
                 "cindy_codex_home",
+                "pi_agent_dir",
+                "pi_session_dir",
+                "claude_config_dir",
             )
             if (value := getattr(args, name, None)) is not None
         },
     }
+    target_override = getattr(args, "target_home_override", None)
+    if target_override is not None:
+        result["target_home"] = str(target_override)
+    elif len(platforms) == 1 and platforms[0] in {"pi", "claude"}:
+        # Persist the resolved, physical operation root.  Environment or Cindy
+        # discovery must not silently retarget apply to another store.
+        result["target_home"] = str(_target_home(args))
+    action_ids = list(getattr(args, "action_id", ()) or ())
+    session_ids = list(getattr(args, "session_id", ()) or ())
+    if action_ids:
+        result["action_ids"] = action_ids
+    if session_ids:
+        result["session_ids"] = session_ids
+    return result
 
 
 def _target_storage(
@@ -1858,11 +2026,32 @@ def _target_storage(
 
 
 def _target_home(args: argparse.Namespace) -> Path:
+    override = getattr(args, "target_home_override", None)
+    if override is not None:
+        return Path(override).expanduser().resolve()
+    platforms = _effective_platforms(getattr(args, "platform", None))
+    if platforms == ["pi"]:
+        from .pi_sessions import resolve_pi_paths
+
+        return resolve_pi_paths(
+            agent_dir=getattr(args, "pi_agent_dir", None),
+            session_root=getattr(args, "pi_session_dir", None),
+        ).agent_dir
+    if platforms == ["claude"]:
+        from .claude_sessions import resolve_claude_paths
+
+        return resolve_claude_paths(
+            config_dir=getattr(args, "claude_config_dir", None)
+        ).config_dir
     return (getattr(args, "codex_home", None) or default_codex_home()).expanduser().resolve()
 
 
 def _status_home(args: argparse.Namespace) -> Path:
-    return (getattr(args, "codex_home", None) or default_codex_home()).expanduser().resolve()
+    return (
+        getattr(args, "operation_home", None)
+        or getattr(args, "codex_home", None)
+        or default_codex_home()
+    ).expanduser().resolve()
 
 
 def _effective_platforms(values: Sequence[str] | None) -> list[str]:

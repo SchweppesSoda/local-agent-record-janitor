@@ -172,6 +172,11 @@ def _physical_artifact_count(action: Any) -> int:
     impact = action.impact
     if enum_value(action.kind) == "remove_frontend_reference":
         return int(getattr(impact, "frontend_residual_count", 0))
+    if enum_value(action.kind) in {
+        "delete_pi_session",
+        "delete_claude_session",
+    }:
+        return len(tuple(getattr(impact, "external_artifact_paths", ())))
     return (
         int(getattr(impact, "index_record_count", 0))
         + int(getattr(impact, "rollout_file_count", 0))
@@ -205,6 +210,7 @@ def build_agent_plan_document(
     selected_actions: Sequence[Any],
     mutation_kind: str | None,
     scan_options: Mapping[str, Any],
+    additional_blockers: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     target_actions = [
         action
@@ -264,6 +270,7 @@ def build_agent_plan_document(
                 action_id=str(action.action_id),
             )
         )
+    blockers.extend(dict(value) for value in additional_blockers)
 
     counts = plan_counts(
         findings=findings,
@@ -411,6 +418,17 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
                     "Frontend action has invalid exact reference evidence"
                 )
             markers.extend(verify_frontend_reference_evidence(references))
+        elif kind in {"delete_pi_session", "delete_claude_session"}:
+            impact = raw.get("impact")
+            if not isinstance(impact, Mapping):
+                raise ValueError("Session action has no exact impact binding")
+            markers.extend(
+                _remaining_session_artifact_markers(
+                    codex_home,
+                    kind,
+                    impact,
+                )
+            )
         else:
             markers.append(f"unsupported-action-kind:{kind}")
         if markers:
@@ -429,6 +447,72 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
         "remaining_actions": remaining,
         "all_satisfied": not remaining,
     }
+
+
+def _remaining_session_artifact_markers(
+    target_root: Path,
+    kind: str,
+    impact: Mapping[str, Any],
+) -> list[str]:
+    engine = "pi" if kind == "delete_pi_session" else "claude"
+    if impact.get("external_engine") != engine:
+        raise ValueError("Session action engine binding is invalid")
+    storage_root = Path(str(impact.get("external_storage_root") or ""))
+    if not _same_existing_path(storage_root, target_root):
+        raise ValueError("Session action physical storage binding changed")
+    payload = impact.get("external_action_payload")
+    paths = impact.get("external_artifact_paths")
+    if not isinstance(payload, Mapping) or not isinstance(paths, list):
+        raise ValueError("Session action exact artifact evidence is invalid")
+    if any(not isinstance(value, str) or not value for value in paths):
+        raise ValueError("Session action contains an invalid artifact path")
+    if len(paths) != len(set(paths)):
+        raise ValueError("Session action contains duplicate artifact paths")
+
+    if engine == "pi":
+        scope = Path(str(payload.get("session_root") or ""))
+        expected = [str(payload.get("path") or "")]
+    else:
+        scope = Path(str(payload.get("config_dir") or ""))
+        manifest = payload.get("manifest")
+        if not isinstance(manifest, list):
+            raise ValueError("Claude action manifest is invalid")
+        expected = sorted(
+            str(item.get("path") or "")
+            for item in manifest
+            if isinstance(item, Mapping)
+        )
+    if not scope.is_absolute() or sorted(paths) != sorted(expected):
+        raise ValueError("Session artifact list does not match its approval payload")
+
+    markers: list[str] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.is_absolute() or not _lexically_within(path, scope):
+            raise ValueError("Session artifact path escaped its approved scope")
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"Could not verify session artifact absence: {exc}") from exc
+        markers.append(f"{engine}-artifact:{path}")
+    return markers
+
+
+def _same_existing_path(left: Path, right: Path) -> bool:
+    try:
+        return left.is_absolute() and right.is_absolute() and left.samefile(right)
+    except OSError:
+        return canonical_existing_path_key(left) == canonical_existing_path_key(right)
+
+
+def _lexically_within(path: Path, root: Path) -> bool:
+    try:
+        path.absolute().relative_to(root.absolute())
+    except ValueError:
+        return False
+    return True
 
 
 def result_document(

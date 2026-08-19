@@ -110,6 +110,17 @@ class CleanupContext:
         repr=False,
         compare=False,
     )
+    session_engine: str | None = None
+    session_catalog_builder: Callable[[], Any] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    session_native_plan: Any | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def report(self) -> ScanReport:
@@ -269,6 +280,8 @@ class CleanupService:
         integrity_approval_builder: Any = None,
         desktop_fingerprint_resolver: Any = None,
         cleaner: Any = None,
+        session_executor: Any = None,
+        session_preflight_verified: bool = False,
     ) -> Any:
         """Execute one already-prevalidated physical mutation batch.
 
@@ -290,6 +303,43 @@ class CleanupService:
             integrity_approval_builder=integrity_approval_builder,
             desktop_fingerprint_resolver=desktop_fingerprint_resolver,
             cleaner=cleaner,
+            session_executor=session_executor,
+            session_preflight_verified=session_preflight_verified,
+        )
+
+    def prepare_session_catalog(
+        self,
+        engine: str,
+        catalog: Any,
+        *,
+        catalog_builder: Callable[[], Any],
+        target_root: Path | None = None,
+    ) -> CleanupContext:
+        """Adapt one Pi/Claude inventory to the shared immutable plan model."""
+
+        from .session_cleanup import build_session_cleanup_context
+
+        return build_session_cleanup_context(
+            engine,
+            catalog,
+            catalog_builder=catalog_builder,
+            target_root=target_root,
+            captured_at=self._clock(),
+            typed_action_builder=self.typed_actions,
+        )
+
+    def prepare_sessions(
+        self,
+        engine: str,
+        catalog_builder: Callable[[], Any],
+        *,
+        target_root: Path | None = None,
+    ) -> CleanupContext:
+        return self.prepare_session_catalog(
+            engine,
+            catalog_builder(),
+            catalog_builder=catalog_builder,
+            target_root=target_root,
         )
 
 
@@ -480,6 +530,10 @@ def _record_kind_for_action(candidate: Any, kind: MutationKind) -> RecordKind:
         return RecordKind.FRONTEND_REFERENCE
     if kind is MutationKind.REMOVE_DESKTOP_STATE:
         return RecordKind.DESKTOP_STATE
+    if kind is MutationKind.DELETE_PI_SESSION:
+        return RecordKind.PI_SESSION
+    if kind is MutationKind.DELETE_CLAUDE_SESSION:
+        return RecordKind.CLAUDE_SESSION
     return RecordKind.CONVERSATION
 
 

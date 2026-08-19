@@ -3,7 +3,8 @@
 Pi has no local equivalent of Codex's ``thread/delete`` RPC.  This module is
 therefore deliberately separate from :mod:`manual_delete`: it approves and
 unlinks one exact transcript file, never an enclosing directory or a child
-session.  The inventory is rebuilt before *every* unlink.
+session.  Execution performs one complete preflight inventory followed by an
+exact file guard for each approved unlink.
 """
 
 from __future__ import annotations
@@ -269,8 +270,11 @@ def execute_pi_delete(
     lstat_fn: Callable[[str | os.PathLike[str]], os.stat_result] = os.lstat,
     read_bytes_fn: Callable[[Path], bytes] | None = None,
     unlink_fn: Callable[[Path], None] | None = None,
+    preflight_verified: bool = False,
+    targeted_guards_only: bool = False,
+    action_state_callback: Callable[[str, Any, Any | None], None] | None = None,
 ) -> PiDeleteResult:
-    """Rebuild, compare and permanently unlink precisely approved files only."""
+    """Preflight once, then permanently unlink precisely approved files only."""
     if not clients_closed:
         raise PiDeletePlanError("Pi deletion requires an explicit clients-closed confirmation")
     if not plan.selected or not plan.actions or not plan.plan_fingerprint:
@@ -279,36 +283,85 @@ def execute_pi_delete(
         raise PiDeletePlanError("The approved plan fingerprint does not match the selected plan")
     if not callable(catalog_builder):
         raise PiDeletePlanError("catalog_builder must be callable")
-    # Full rebuild before side effects; selection also ensures newly blocked items fail.
-    refreshed = build_pi_delete_plan(catalog_builder()).with_selected_actions(action.action_id for action in plan.actions)
-    if not hmac.compare_digest(approved_plan_fingerprint, refreshed.plan_fingerprint or ""):
-        raise PiDeletePlanError("The Pi deletion plan changed after approval; nothing was deleted")
+    if preflight_verified:
+        refreshed = plan
+    else:
+        # One full rebuild before side effects.  The caller may skip it only
+        # after the shared CleanupService has just completed and compared its
+        # own full immutable preflight snapshot.
+        refreshed = build_pi_delete_plan(catalog_builder()).with_selected_actions(
+            action.action_id for action in plan.actions
+        )
+        if not hmac.compare_digest(
+            approved_plan_fingerprint,
+            refreshed.plan_fingerprint or "",
+        ):
+            raise PiDeletePlanError(
+                "The Pi deletion plan changed after approval; nothing was deleted"
+            )
     reader = read_bytes_fn or (lambda path: path.read_bytes())
     unlink = unlink_fn or (lambda path: path.unlink())
     results: list[PiDeleteItemResult] = []
     for approved in refreshed.actions:
         try:
-            # A fresh catalog just before every unlink catches activity, children and
-            # every inventory field, including catalog-wide blocking failures.
-            current = build_pi_delete_plan(catalog_builder()).with_selected_actions((approved.action_id,)).actions[0]
-            if not hmac.compare_digest(_fingerprint(approved.approval_payload()), _fingerprint(current.approval_payload())):
-                raise PiDeletePlanError("Pi transcript inventory changed after approval")
-            _verify_exact_file(current, lstat_fn=lstat_fn, read_bytes_fn=reader)
+            current = approved
+            if not targeted_guards_only:
+                # Compatibility for direct callers predating CleanupService.
+                # Unified CLI/Agent paths set targeted_guards_only after their
+                # one shared full preflight and avoid this full-catalog call.
+                current = build_pi_delete_plan(
+                    catalog_builder()
+                ).with_selected_actions((approved.action_id,)).actions[0]
+                if not hmac.compare_digest(
+                    _fingerprint(approved.approval_payload()),
+                    _fingerprint(current.approval_payload()),
+                ):
+                    raise PiDeletePlanError(
+                        "Pi transcript inventory changed after approval"
+                    )
+            if action_state_callback is not None:
+                action_state_callback("guard_started", current, None)
+            _verify_exact_file(
+                current,
+                lstat_fn=lstat_fn,
+                read_bytes_fn=reader,
+            )
+            if action_state_callback is not None:
+                action_state_callback("mutation_started", current, None)
             unlink(current.path)
             try:
                 lstat_fn(current.path)
             except FileNotFoundError:
-                results.append(_result(current, "deleted"))
+                item = _result(current, "deleted")
             else:
-                results.append(_result(current, "unknown", "unlink returned but transcript still exists"))
+                item = _result(
+                    current,
+                    "unknown",
+                    "unlink returned but transcript still exists",
+                )
         except PiDeletePlanError as exc:
-            results.append(_result(approved, "not_deleted", str(exc)))
+            item = _result(approved, "not_deleted", str(exc))
         except FileNotFoundError as exc:
-            results.append(_result(approved, "not_deleted", f"transcript disappeared before deletion: {exc}"))
+            item = _result(
+                approved,
+                "not_deleted",
+                f"transcript disappeared before deletion: {exc}",
+            )
         except OSError as exc:
-            results.append(_result(approved, "unknown", f"could not safely delete transcript: {exc}"))
+            item = _result(
+                approved,
+                "unknown",
+                f"could not safely delete transcript: {exc}",
+            )
         except Exception as exc:  # injected file functions and malformed data fail closed
-            results.append(_result(approved, "unknown", f"unexpected deletion verification failure: {exc}"))
+            item = _result(
+                approved,
+                "unknown",
+                f"unexpected deletion verification failure: {exc}",
+            )
+        results.append(item)
+        if action_state_callback is not None:
+            action_state_callback("verified", approved, item)
     return PiDeleteResult(tuple(results))
 
 

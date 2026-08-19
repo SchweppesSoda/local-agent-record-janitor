@@ -673,9 +673,10 @@ def build_parser() -> argparse.ArgumentParser:
     agent_doctor._agent_json_errors = True
     _add_common_arguments(
         agent_doctor,
-        codex_only=True,
+        codex_only=False,
         allow_thread_selector=False,
     )
+    agent_doctor.set_defaults(action_id=[], session_id=[])
 
     agent_plan = agent_subparsers.add_parser(
         "plan",
@@ -684,8 +685,22 @@ def build_parser() -> argparse.ArgumentParser:
     agent_plan._agent_json_errors = True
     _add_common_arguments(
         agent_plan,
-        codex_only=True,
+        codex_only=False,
         allow_thread_selector=False,
+    )
+    agent_plan.add_argument(
+        "--action-id",
+        action="append",
+        default=[],
+        metavar="ACTION_ID",
+        help="仅 Pi/Claude：选择完整、存储限定的删除动作 ID；可重复",
+    )
+    agent_plan.add_argument(
+        "--session-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="仅 Pi/Claude：选择完整会话 ID；可重复且不得存在歧义",
     )
     agent_plan.add_argument(
         "--operation",
@@ -739,6 +754,12 @@ def build_parser() -> argparse.ArgumentParser:
     agent_status._agent_json_errors = True
     agent_status.add_argument("--operation-id", required=True)
     agent_status.add_argument("--codex-home", type=Path, metavar="PATH")
+    agent_status.add_argument(
+        "--operation-home",
+        type=Path,
+        metavar="PATH",
+        help="Pi/Claude operation 所在的 Agent/config 根目录",
+    )
 
     agent_verify = agent_subparsers.add_parser(
         "verify",
@@ -747,6 +768,12 @@ def build_parser() -> argparse.ArgumentParser:
     agent_verify._agent_json_errors = True
     agent_verify.add_argument("--operation-id", required=True)
     agent_verify.add_argument("--codex-home", type=Path, metavar="PATH")
+    agent_verify.add_argument(
+        "--operation-home",
+        type=Path,
+        metavar="PATH",
+        help="Pi/Claude operation 所在的 Agent/config 根目录",
+    )
     agent_verify.add_argument(
         "--verify-timeout",
         type=_nonnegative_int,
@@ -1044,6 +1071,7 @@ def main(
             stderr=error_output,
             catalog_builder=pi_catalog_builder,
             delete_executor=pi_delete_executor,
+            cleanup_service=service,
         )
 
     if args.command == "delete" and _has_explicit_claude(args.platform):
@@ -1066,6 +1094,7 @@ def main(
             args, stdin=input_stream, stdout=output, stderr=error_output,
             catalog_builder=claude_catalog_builder,
             delete_executor=claude_delete_executor,
+            cleanup_service=service,
         )
 
     if args.command == "records" and adapters is not None:
@@ -2173,6 +2202,7 @@ def _run_pi_delete(
     stderr: TextIO,
     catalog_builder: Any | None,
     delete_executor: Any | None,
+    cleanup_service: CleanupService,
 ) -> int:
     """Handle Pi's separate, file-level delete contract without Codex RPC."""
 
@@ -2180,8 +2210,14 @@ def _run_pi_delete(
         from .pi_delete import build_pi_delete_plan, execute_pi_delete
 
         catalog = _build_pi_catalog(args, catalog_builder)
-        plan = build_pi_delete_plan(catalog)
-        executor = delete_executor or execute_pi_delete
+        catalog_factory = lambda: _build_pi_catalog(args, catalog_builder)
+        cleanup_context = cleanup_service.prepare_session_catalog(
+            "pi",
+            catalog,
+            catalog_builder=catalog_factory,
+        )
+        plan = cleanup_context.session_native_plan
+        assert plan is not None
         if args.thread_id:
             raise ActionSelectionError(
                 "--platform pi 请使用 --session-id 或 --action-id，不能使用 --thread-id。",
@@ -2274,12 +2310,26 @@ def _run_pi_delete(
         _write_pi_delete_plan(selected_plan, stdout=stdout)
 
     try:
-        result = executor(
-            selected_plan,
-            catalog_builder=lambda: _build_pi_catalog(args, catalog_builder),
-            approved_plan_fingerprint=approved_fingerprint,
-            clients_closed=clients_closed,
+        selected_ids = {
+            str(action.action_id) for action in selected_plan.actions
+        }
+        candidates = tuple(
+            action
+            for action in cleanup_context.plan.actions
+            if str(action.action_id) in selected_ids
         )
+        outcome = cleanup_service.execute(
+            cleanup_context,
+            candidates,
+            timeout=0.0,
+            app_server_factory=None,
+            binary_resolver=None,
+            session_executor=delete_executor or execute_pi_delete,
+            session_preflight_verified=False,
+        )
+        result = outcome.session_cleanup
+        if result is None:
+            raise RuntimeError("Pi cleanup service returned no session result")
     except Exception as exc:
         return _emit_pi_delete_error(exc, plan=selected_plan, json_output=args.json, stdout=stdout, stderr=stderr)
     _emit_pi_delete_result(result, selected_plan, json_output=args.json, stdout=stdout)
@@ -2363,6 +2413,7 @@ def _run_claude_delete(
     stderr: TextIO,
     catalog_builder: Any | None,
     delete_executor: Any | None,
+    cleanup_service: CleanupService,
 ) -> int:
     """Handle Claude's separate, manifest-level local delete contract."""
 
@@ -2370,8 +2421,14 @@ def _run_claude_delete(
         from .claude_delete import build_claude_delete_plan, execute_claude_delete
 
         catalog = _build_claude_catalog(args, catalog_builder)
-        plan = build_claude_delete_plan(catalog)
-        executor = delete_executor or execute_claude_delete
+        catalog_factory = lambda: _build_claude_catalog(args, catalog_builder)
+        cleanup_context = cleanup_service.prepare_session_catalog(
+            "claude",
+            catalog,
+            catalog_builder=catalog_factory,
+        )
+        plan = cleanup_context.session_native_plan
+        assert plan is not None
         if args.thread_id:
             raise ActionSelectionError(
                 "--platform claude 只可使用 --session-id 或 --action-id，"
@@ -2494,12 +2551,26 @@ def _run_claude_delete(
         _write_claude_delete_plan(selected_plan, stdout=stdout)
 
     try:
-        result = executor(
-            selected_plan,
-            catalog_builder=lambda: _build_claude_catalog(args, catalog_builder),
-            approved_plan_fingerprint=approved_fingerprint,
-            clients_closed=clients_closed,
+        selected_ids = {
+            str(action.action_id) for action in selected_plan.actions
+        }
+        candidates = tuple(
+            action
+            for action in cleanup_context.plan.actions
+            if str(action.action_id) in selected_ids
         )
+        outcome = cleanup_service.execute(
+            cleanup_context,
+            candidates,
+            timeout=0.0,
+            app_server_factory=None,
+            binary_resolver=None,
+            session_executor=delete_executor or execute_claude_delete,
+            session_preflight_verified=False,
+        )
+        result = outcome.session_cleanup
+        if result is None:
+            raise RuntimeError("Claude cleanup service returned no session result")
     except Exception as exc:
         return _emit_claude_delete_error(
             exc,

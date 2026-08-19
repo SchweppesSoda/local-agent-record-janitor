@@ -44,6 +44,8 @@ class ActionKind(str, Enum):
     REMOVE_FRONTEND_REFERENCE = "remove_frontend_reference"
     REMOVE_DESKTOP_STATE = "remove_desktop_state"
     REPAIR_LEGACY_INDEX = "repair_legacy_index"
+    DELETE_PI_SESSION = "delete_pi_session"
+    DELETE_CLAUDE_SESSION = "delete_claude_session"
     KEEP = "keep"
 
 
@@ -165,6 +167,10 @@ class ActionImpact:
     desktop_global_state_reference_count: int = 0
     desktop_database_paths: tuple[str, ...] = ()
     desktop_global_state_paths: tuple[str, ...] = ()
+    external_engine: str | None = None
+    external_storage_root: str | None = None
+    external_artifact_paths: tuple[str, ...] = ()
+    external_action_payload: Mapping[str, Any] | None = None
 
     @property
     def descendant_count(self) -> int:
@@ -196,6 +202,15 @@ class ActionImpact:
             ),
             "desktop_database_paths": list(self.desktop_database_paths),
             "desktop_global_state_paths": list(self.desktop_global_state_paths),
+            "external_engine": self.external_engine,
+            "external_storage_root": self.external_storage_root,
+            "external_artifact_count": len(self.external_artifact_paths),
+            "external_artifact_paths": list(self.external_artifact_paths),
+            "external_action_payload": (
+                _json_value(self.external_action_payload)
+                if self.external_action_payload is not None
+                else None
+            ),
             "descendant_thread_count": self.descendant_count,
             "descendant_thread_ids": list(self.descendant_thread_ids),
             "affected_thread_ids": list(self.affected_thread_ids),
@@ -234,6 +249,28 @@ class CandidateAction:
         return self.available and self.kind is not ActionKind.KEEP
 
     def to_dict(self) -> dict[str, Any]:
+        if self.resource_kind in {"pi_session", "claude_session"}:
+            resource = {
+                "kind": self.resource_kind,
+                "target": self.target.to_dict(),
+                "storage_root": self.impact.external_storage_root,
+                "artifact_paths": list(self.impact.external_artifact_paths),
+            }
+        elif self.resource_kind == "legacy_index":
+            resource = {
+                "kind": "legacy_index",
+                "path": self.impact.resource_path,
+                "inventory": (
+                    self.legacy_inventory.to_dict()
+                    if self.legacy_inventory is not None
+                    else None
+                ),
+            }
+        else:
+            resource = {
+                "kind": "conversation",
+                "target": self.target.to_dict(),
+            }
         return {
             "action_id": self.action_id,
             "kind": self.kind.value,
@@ -245,22 +282,7 @@ class CandidateAction:
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "observation_ids": list(self.observation_ids),
             "requires_explicit_selection": self.requires_explicit_selection,
-            "resource": (
-                {
-                    "kind": "legacy_index",
-                    "path": self.impact.resource_path,
-                    "inventory": (
-                        self.legacy_inventory.to_dict()
-                        if self.legacy_inventory is not None
-                        else None
-                    ),
-                }
-                if self.resource_kind == "legacy_index"
-                else {
-                    "kind": "conversation",
-                    "target": self.target.to_dict(),
-                }
-            ),
+            "resource": resource,
         }
 
 

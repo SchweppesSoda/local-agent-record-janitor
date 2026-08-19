@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,11 +76,17 @@ class ExecutionOutcome:
     legacy_repair: LegacyIndexRepairResult | None = None
     desktop_cleanup: DesktopCleanupResult | None = None
     frontend_cleanup: FrontendReferenceCleanupResult | None = None
+    session_engine: str | None = None
+    session_cleanup: Any | None = None
 
     @property
     def ok(self) -> bool:
         if self.cleanup_report is not None:
             return self.cleanup_report.ok
+        if self.session_cleanup is not None:
+            return not tuple(getattr(self.session_cleanup, "not_deleted", ())) and not tuple(
+                getattr(self.session_cleanup, "unknown", ())
+            )
         return (
             self.legacy_repair is not None
             or self.desktop_cleanup is not None
@@ -117,6 +124,17 @@ class ExecutionOutcome:
                     str(action.action_id) for action in self.selected_actions
                 ],
                 "result": self.frontend_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
+        if self.session_cleanup is not None:
+            return {
+                "command": "delete",
+                "mutation_kind": self.mutation_kind,
+                "platform": self.session_engine,
+                "selected_action_ids": [
+                    str(action.action_id) for action in self.selected_actions
+                ],
+                "result": self.session_cleanup.to_dict(),
                 "plan_fingerprint": str(self.plan.plan_fingerprint),
             }
         assert self.cleanup_report is not None
@@ -178,6 +196,8 @@ def execute_prevalidated_actions(
     integrity_approval_builder: IntegrityApprovalBuilder | None = None,
     desktop_fingerprint_resolver: DesktopFingerprintResolver | None = None,
     cleaner: Cleaner | None = None,
+    session_executor: Any = None,
+    session_preflight_verified: bool = False,
 ) -> ExecutionOutcome:
     """Execute an already-authorized batch without another full scan."""
 
@@ -191,6 +211,87 @@ def execute_prevalidated_actions(
         )
     mutation_kind = next(iter(mutation_kinds), "")
     plan = context.plan
+
+    if mutation_kind in {"delete_pi_session", "delete_claude_session"}:
+        engine = "pi" if mutation_kind == "delete_pi_session" else "claude"
+        if context.session_engine != engine:
+            raise ExecutionError(
+                "The session action does not match its inventory engine.",
+                kind="session_engine_mismatch",
+                matches=[str(action.action_id) for action in actions],
+            )
+        if context.session_native_plan is None or context.session_catalog_builder is None:
+            raise ExecutionError(
+                "The session action is missing its immutable native inventory.",
+                kind="session_inventory_missing",
+                matches=[str(action.action_id) for action in actions],
+            )
+        storage_ids = {str(action.target.storage_id) for action in actions}
+        if len(storage_ids) != 1:
+            raise ExecutionError(
+                "One session deletion batch must target one physical store.",
+                kind="multiple_session_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        selected_native = context.session_native_plan.with_selected_actions(
+            str(action.action_id) for action in actions
+        )
+        candidate_by_id = {
+            str(action.action_id): action for action in actions
+        }
+
+        def forward_session_state(
+            checkpoint: str,
+            native_action: Any,
+            item_result: Any | None,
+        ) -> None:
+            if action_state_callback is None:
+                return
+            candidate = candidate_by_id.get(str(native_action.action_id))
+            if candidate is None:
+                raise ExecutionError(
+                    "A session checkpoint is not bound to its authorized action.",
+                    kind="session_action_binding_failed",
+                )
+            action_state_callback(checkpoint, candidate, item_result)
+
+        if session_executor is None:
+            if engine == "pi":
+                from .pi_delete import execute_pi_delete
+
+                run_session_delete = execute_pi_delete
+            else:
+                from .claude_delete import execute_claude_delete
+
+                run_session_delete = execute_claude_delete
+        else:
+            run_session_delete = session_executor
+        kwargs: dict[str, Any] = {
+            "catalog_builder": context.session_catalog_builder,
+            "approved_plan_fingerprint": str(
+                selected_native.plan_fingerprint or ""
+            ),
+            "clients_closed": True,
+        }
+        supported = inspect.signature(run_session_delete).parameters
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in supported.values()
+        )
+        if "preflight_verified" in supported or accepts_kwargs:
+            kwargs["preflight_verified"] = bool(session_preflight_verified)
+        if "targeted_guards_only" in supported or accepts_kwargs:
+            kwargs["targeted_guards_only"] = True
+        if "action_state_callback" in supported or accepts_kwargs:
+            kwargs["action_state_callback"] = forward_session_state
+        result = run_session_delete(selected_native, **kwargs)
+        return ExecutionOutcome(
+            mutation_kind=mutation_kind,
+            selected_actions=actions,
+            plan=plan,
+            session_engine=engine,
+            session_cleanup=result,
+        )
 
     if mutation_kind == "repair_legacy_index":
         if len(actions) != 1:

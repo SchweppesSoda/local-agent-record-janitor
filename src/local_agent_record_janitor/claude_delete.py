@@ -253,6 +253,9 @@ def execute_claude_delete(
     read_bytes_fn: Callable[[Path], bytes] | None = None,
     unlink_fn: Callable[[Path], None] | None = None,
     rmdir_fn: Callable[[Path], None] | None = None,
+    preflight_verified: bool = False,
+    targeted_guards_only: bool = False,
+    action_state_callback: Callable[[str, Any, Any | None], None] | None = None,
 ) -> ClaudeDeleteResult:
     """Rebuild, compare, verify, and remove only approved manifest paths."""
     if not clients_closed:
@@ -265,11 +268,19 @@ def execute_claude_delete(
         raise ClaudeDeletePlanError("The approved Claude plan fingerprint does not match")
     if not callable(catalog_builder):
         raise ClaudeDeletePlanError("catalog_builder must be callable")
-    refreshed = build_claude_delete_plan(catalog_builder()).with_selected_actions(
-        action.action_id for action in plan.actions
-    )
-    if not hmac.compare_digest(approved_plan_fingerprint, refreshed.plan_fingerprint or ""):
-        raise ClaudeDeletePlanError("The Claude deletion plan changed after approval; nothing was deleted")
+    if preflight_verified:
+        refreshed = plan
+    else:
+        refreshed = build_claude_delete_plan(
+            catalog_builder()
+        ).with_selected_actions(action.action_id for action in plan.actions)
+        if not hmac.compare_digest(
+            approved_plan_fingerprint,
+            refreshed.plan_fingerprint or "",
+        ):
+            raise ClaudeDeletePlanError(
+                "The Claude deletion plan changed after approval; nothing was deleted"
+            )
 
     digest_file = _stream_sha256 if read_bytes_fn is None else (
         lambda path: hashlib.sha256(read_bytes_fn(path)).hexdigest()
@@ -280,18 +291,27 @@ def execute_claude_delete(
     for approved in refreshed.actions:
         mutated: list[str] = []
         try:
-            # Re-read both physical inventory and Cindy references immediately
-            # before this action's first mutation.
-            current_plan = build_claude_delete_plan(catalog_builder()).with_selected_actions((approved.action_id,))
-            current = current_plan.actions[0]
-            if not hmac.compare_digest(
-                _fingerprint(approved.approval_payload()),
-                _fingerprint(current.approval_payload()),
-            ):
-                raise ClaudeDeletePlanError("Claude session manifest or frontend reference snapshot changed after approval")
+            current = approved
+            if not targeted_guards_only:
+                current = build_claude_delete_plan(
+                    catalog_builder()
+                ).with_selected_actions((approved.action_id,)).actions[0]
+                if not hmac.compare_digest(
+                    _fingerprint(approved.approval_payload()),
+                    _fingerprint(current.approval_payload()),
+                ):
+                    raise ClaudeDeletePlanError(
+                        "Claude session manifest or frontend reference snapshot changed after approval"
+                    )
+            if action_state_callback is not None:
+                action_state_callback("guard_started", current, None)
             _verify_manifest_preflight(
-                current, lstat_fn=lstat_fn, digest_file=digest_file
+                current,
+                lstat_fn=lstat_fn,
+                digest_file=digest_file,
             )
+            if action_state_callback is not None:
+                action_state_callback("mutation_started", current, None)
             files = sorted(
                 (item for item in current.manifest if _manifest_type(item) == "file"),
                 key=lambda item: _manifest_relative(item), reverse=True,
@@ -338,27 +358,50 @@ def execute_claude_delete(
                 mutated.append(_normal_path(path))
             remaining = _remaining_paths(current, lstat_fn)
             if remaining:
-                results.append(_result(current, "unknown", mutated, remaining,
-                                       "approved paths still exist after deletion"))
+                item = _result(
+                    current,
+                    "unknown",
+                    mutated,
+                    remaining,
+                    "approved paths still exist after deletion",
+                )
             else:
-                results.append(_result(current, "deleted", mutated, ()))
+                item = _result(current, "deleted", mutated, ())
         except ClaudeDeletePlanError as exc:
             remaining = _remaining_paths(approved, lstat_fn)
             status = "unknown" if mutated else "not_deleted"
-            results.append(_result(approved, status, mutated, remaining, str(exc)))
+            item = _result(approved, status, mutated, remaining, str(exc))
         except FileNotFoundError as exc:
             remaining = _remaining_paths(approved, lstat_fn)
             status = "unknown" if mutated else "not_deleted"
-            results.append(_result(approved, status, mutated, remaining,
-                                   f"approved Claude path disappeared unexpectedly: {exc}"))
+            item = _result(
+                approved,
+                status,
+                mutated,
+                remaining,
+                f"approved Claude path disappeared unexpectedly: {exc}",
+            )
         except OSError as exc:
             remaining = _remaining_paths(approved, lstat_fn)
-            results.append(_result(approved, "unknown", mutated, remaining,
-                                   f"could not safely delete Claude session: {exc}"))
+            item = _result(
+                approved,
+                "unknown",
+                mutated,
+                remaining,
+                f"could not safely delete Claude session: {exc}",
+            )
         except Exception as exc:
             remaining = _remaining_paths(approved, lstat_fn)
-            results.append(_result(approved, "unknown", mutated, remaining,
-                                   f"unexpected Claude deletion verification failure: {exc}"))
+            item = _result(
+                approved,
+                "unknown",
+                mutated,
+                remaining,
+                f"unexpected Claude deletion verification failure: {exc}",
+            )
+        results.append(item)
+        if action_state_callback is not None:
+            action_state_callback("verified", approved, item)
     return ClaudeDeleteResult(tuple(results))
 
 
