@@ -258,6 +258,7 @@ class CleanupExecutionTests(unittest.TestCase):
         expected_scopes=None,
         approved_integrity_deletes=None,
         pre_delete_validator=None,
+        explicit_selection: bool = False,
     ):
         server = server or FakeAppServer()
         kwargs = {}
@@ -273,6 +274,7 @@ class CleanupExecutionTests(unittest.TestCase):
             expected_scopes=expected_scopes,
             approved_integrity_deletes=approved_integrity_deletes,
             pre_delete_validator=pre_delete_validator,
+            explicit_selection=explicit_selection,
             **kwargs,
         )
 
@@ -1460,6 +1462,7 @@ class CleanupExecutionTests(unittest.TestCase):
             approved_integrity_deletes={
                 finding_key(finding): {"residual_spawn_edge"}
             },
+            explicit_selection=True,
         )
 
         self.assertEqual(server.deleted_thread_ids, [finding.thread_id])
@@ -1483,13 +1486,14 @@ class CleanupExecutionTests(unittest.TestCase):
             verification_attempts=1,
             verification_interval=0,
             expected_scopes={finding_key(finding): scope},
+            explicit_selection=True,
         )
 
         self.assertEqual(binary_calls, [])
         self.assertEqual(factory_calls, [])
         self.assertEqual(report.results[0].status, "unknown")
         self.assertIn(
-            "standalone spawn-edge",
+            "thread/delete cannot repair",
             report.results[0].error or "",
         )
 
@@ -1520,6 +1524,7 @@ class CleanupExecutionTests(unittest.TestCase):
             approved_integrity_deletes={
                 finding_key(finding): {"residual_spawn_edge"}
             },
+            explicit_selection=True,
         )
 
         self.assertEqual(server.deleted_thread_ids, [])

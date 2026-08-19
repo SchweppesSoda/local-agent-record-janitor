@@ -1,5 +1,10 @@
 # 全量记录清单与选择性删除设计
 
+> 历史说明：本文记录 0.1.x 的 records/delete 设计。0.2.0 的统一 CleanupService、
+> 精确 frontend-reference writer、临时回滚副本与最小 operation 回执以
+> [design.md](design.md) 为准；下文“前端数据库只读”仅描述旧版 thread delete 动作，
+> 不限制 0.2.0 中另行授权的精确引用清理批次。
+
 状态：方案 review 已通过，可进入实现
 
 ## 1. 目标

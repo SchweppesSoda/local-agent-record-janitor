@@ -7,7 +7,7 @@ import re
 import stat
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -18,6 +18,8 @@ OPERATION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _STATE_SCHEMA = "larj.agent-state.v1"
 _RESULT_SCHEMA = "larj.agent-result.v1"
+_RECEIPT_SCHEMA = "larj.agent-receipt.v1"
+_RECEIPT_RETENTION = timedelta(days=7)
 _GOAL_STATUSES = frozenset(
     {"unknown", "blocked", "complete", "completed_with_residuals"}
 )
@@ -141,12 +143,22 @@ class OperationStore:
         self.events_path = self.directory / "events.jsonl"
         self.state_path = self.directory / "state.json"
         self.result_path = self.directory / "result.json"
+        self.receipt_path = self.directory / "receipt.json"
         self.lock_path = self.directory / "apply.lock"
 
     def accept_plan(self, plan: Mapping[str, Any]) -> None:
         self._ensure_directory(create=True)
+        if self._purge_expired_receipt_if_needed():
+            self._ensure_directory(create=True)
         expected_hash = str(plan.get("plan_sha256") or "")
         self._validate_plan_binding(plan)
+        receipt = self._read_receipt()
+        if receipt is not None:
+            if str(receipt.get("plan_sha256") or "") != expected_hash:
+                raise OperationStoreError(
+                    "Operation ID is already bound to a different completed plan"
+                )
+            return
         plan_state = _optional_lstat(self.plan_path)
         if plan_state is not None:
             _validate_regular_file(self.plan_path, plan_state)
@@ -293,8 +305,117 @@ class OperationStore:
         atomic_write_json(self.result_path, dict(result))
         self._assert_safe()
 
+    def compact_completed(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Replace a known terminal journal with one bounded metadata receipt."""
+
+        self._assert_safe()
+        self._validate_result_document(result)
+        goal = str(result.get("goal_status") or "")
+        if goal == "unknown":
+            raise OperationStoreError(
+                "Unknown operations must retain their detailed recovery journal"
+            )
+        plan = self.read_plan()
+        authorization = plan.get("authorization")
+        roots = (
+            authorization.get("root_actions", [])
+            if isinstance(authorization, Mapping)
+            else []
+        )
+        action_ids = sorted(
+            {
+                str(item.get("action_id") or "")
+                for item in roots
+                if isinstance(item, Mapping) and item.get("action_id")
+            }
+        )
+        verification = result.get("verification")
+        verified_action_ids = sorted(
+            {
+                str(value)
+                for value in (
+                    verification.get("verified_action_ids", [])
+                    if isinstance(verification, Mapping)
+                    else []
+                )
+                if isinstance(value, str) and value
+            }
+        )
+        final_scope = result.get("final_scope_verification")
+        completed_at = datetime.now(timezone.utc)
+        compact_blockers = [
+            {
+                key: item[key]
+                for key in ("blocker_code", "scope", "action_id")
+                if key in item
+            }
+            for item in result.get("blockers", [])
+            if isinstance(item, Mapping)
+        ]
+        receipt: dict[str, Any] = {
+            "schema_version": _RECEIPT_SCHEMA,
+            "source_subcommand": str(result.get("subcommand") or "apply"),
+            "phase": str(result.get("phase") or "finished"),
+            "operation_id": self.operation_id,
+            "plan_sha256": str(plan["plan_sha256"]),
+            "goal_status": goal,
+            "modified": bool(result.get("modified")),
+            "mutation_started": bool(result.get("mutation_started")),
+            "blockers": compact_blockers,
+            "counts": dict(result.get("counts") or {}),
+            "action_statuses": [
+                {
+                    "action_id": action_id,
+                    "status": (
+                        "verified"
+                        if action_id in verified_action_ids
+                        else "not_verified"
+                    ),
+                }
+                for action_id in action_ids
+            ],
+            "exact_goal_satisfied": bool(
+                isinstance(verification, Mapping)
+                and verification.get("all_satisfied") is True
+            ),
+            "full_scope_satisfied": bool(
+                isinstance(final_scope, Mapping)
+                and final_scope.get("all_satisfied") is True
+            ),
+            "full_scope_scan_complete": bool(
+                isinstance(final_scope, Mapping)
+                and final_scope.get("scan_complete") is True
+            ),
+            "completed_at": completed_at.isoformat(),
+            "receipt_expires_at": (
+                completed_at + _RECEIPT_RETENTION
+            ).isoformat(),
+        }
+        receipt["receipt_sha256"] = _receipt_sha256(receipt)
+        existing = _optional_lstat(self.receipt_path)
+        if existing is not None:
+            _validate_regular_file(self.receipt_path, existing)
+        atomic_write_json(self.receipt_path, receipt)
+        trusted = self._read_receipt()
+        if trusted is None or canonical_json_bytes(trusted) != canonical_json_bytes(
+            receipt
+        ):
+            raise OperationStoreError("Completed operation receipt verification failed")
+        self._discard_detailed_files()
+        self._assert_safe()
+        return receipt
+
     def read_result(self) -> dict[str, Any] | None:
         self._assert_safe()
+        if self._purge_expired_receipt_if_needed():
+            return None
+        receipt = self._read_receipt()
+        if receipt is not None:
+            # A valid receipt is authoritative.  If a prior compaction was
+            # interrupted after publishing it, finish removing only the known
+            # detail files without touching the live lock.
+            self._discard_detailed_files(ignore_errors=True)
+            return self._result_from_receipt(receipt)
         result_stat = _optional_lstat(self.result_path)
         if result_stat is None:
             return None
@@ -385,11 +506,160 @@ class OperationStore:
             self.events_path,
             self.state_path,
             self.result_path,
+            self.receipt_path,
             self.lock_path,
         ):
             value = _optional_lstat(path)
             if value is not None:
                 _validate_regular_file(path, value)
+
+    def _read_receipt(self) -> dict[str, Any] | None:
+        receipt_state = _optional_lstat(self.receipt_path)
+        if receipt_state is None:
+            return None
+        _validate_regular_file(self.receipt_path, receipt_state)
+        value = strict_json_load(self.receipt_path)
+        if not isinstance(value, dict):
+            raise OperationStoreError("Operation receipt is not a JSON object")
+        self._validate_receipt_document(value)
+        return value
+
+    def _validate_receipt_document(self, receipt: Mapping[str, Any]) -> None:
+        goal = receipt.get("goal_status")
+        expires = _parse_utc_timestamp(receipt.get("receipt_expires_at"))
+        completed = _parse_utc_timestamp(receipt.get("completed_at"))
+        if (
+            receipt.get("schema_version") != _RECEIPT_SCHEMA
+            or receipt.get("operation_id") != self.operation_id
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(receipt.get("plan_sha256") or "")
+            )
+            or goal not in (_GOAL_STATUSES - {"unknown"})
+            or type(receipt.get("modified")) is not bool
+            or type(receipt.get("mutation_started")) is not bool
+            or not isinstance(receipt.get("blockers"), list)
+            or not isinstance(receipt.get("counts"), Mapping)
+            or not isinstance(receipt.get("action_statuses"), list)
+            or type(receipt.get("exact_goal_satisfied")) is not bool
+            or type(receipt.get("full_scope_satisfied")) is not bool
+            or type(receipt.get("full_scope_scan_complete")) is not bool
+            or completed is None
+            or expires is None
+            or expires <= completed
+            or str(receipt.get("receipt_sha256") or "")
+            != _receipt_sha256(receipt)
+        ):
+            raise OperationStoreError(
+                "Operation receipt schema, binding, or hash is invalid"
+            )
+        statuses = receipt.get("action_statuses")
+        assert isinstance(statuses, list)
+        action_ids: list[str] = []
+        for item in statuses:
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("action_id"), str)
+                or not item.get("action_id")
+                or item.get("status") not in {"verified", "not_verified"}
+            ):
+                raise OperationStoreError("Operation receipt action status is invalid")
+            action_ids.append(str(item["action_id"]))
+        if action_ids != sorted(set(action_ids)):
+            raise OperationStoreError("Operation receipt action IDs are invalid")
+        if goal == "complete" and not (
+            receipt.get("exact_goal_satisfied") is True
+            and receipt.get("full_scope_satisfied") is True
+        ):
+            raise OperationStoreError(
+                "Complete receipt lacks successful verification"
+            )
+
+    def _result_from_receipt(
+        self,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        statuses = receipt.get("action_statuses")
+        assert isinstance(statuses, list)
+        action_ids = [str(item["action_id"]) for item in statuses]
+        verified = [
+            str(item["action_id"])
+            for item in statuses
+            if item.get("status") == "verified"
+        ]
+        return {
+            "schema_version": _RESULT_SCHEMA,
+            "receipt_schema_version": _RECEIPT_SCHEMA,
+            "document_type": "operation_result",
+            "command": "agent",
+            "subcommand": str(receipt.get("source_subcommand") or "apply"),
+            "mode": "agent",
+            "phase": str(receipt.get("phase") or "finished"),
+            "operation_id": self.operation_id,
+            "plan_sha256": str(receipt.get("plan_sha256") or ""),
+            "goal_status": str(receipt.get("goal_status") or ""),
+            "goal_satisfied": receipt.get("goal_status") == "complete",
+            "modified": bool(receipt.get("modified")),
+            "mutation_started": bool(receipt.get("mutation_started")),
+            "blockers": [dict(item) for item in receipt.get("blockers", [])],
+            "counts": dict(receipt.get("counts") or {}),
+            "action_ids": action_ids,
+            "verified_action_ids": verified,
+            "verification": {
+                "all_satisfied": bool(receipt.get("exact_goal_satisfied")),
+                "verified_action_ids": verified,
+            },
+            "final_scope_verification": {
+                "all_satisfied": bool(receipt.get("full_scope_satisfied")),
+                "scan_complete": bool(receipt.get("full_scope_scan_complete")),
+            },
+            "compacted": True,
+            "completed_at": receipt.get("completed_at"),
+            "receipt_expires_at": receipt.get("receipt_expires_at"),
+            "receipt_sha256": receipt.get("receipt_sha256"),
+        }
+
+    def _discard_detailed_files(self, *, ignore_errors: bool = False) -> None:
+        for path in (
+            self.result_path,
+            self.events_path,
+            self.state_path,
+            self.plan_path,
+        ):
+            try:
+                value = _optional_lstat(path)
+                if value is None:
+                    continue
+                _validate_regular_file(path, value)
+                path.unlink()
+            except (OSError, OperationStoreError):
+                if not ignore_errors:
+                    raise
+        try:
+            _fsync_directory(self.directory)
+        except OSError:
+            if not ignore_errors:
+                raise
+
+    def _purge_expired_receipt_if_needed(self) -> bool:
+        receipt = self._read_receipt()
+        if receipt is None:
+            return False
+        expires = _parse_utc_timestamp(receipt.get("receipt_expires_at"))
+        assert expires is not None
+        if expires > datetime.now(timezone.utc):
+            return False
+        # Expiry cleanup is deliberately non-recursive and only removes an
+        # otherwise empty, trusted receipt directory.
+        entries = {path.name for path in self.directory.iterdir()}
+        if entries != {self.receipt_path.name}:
+            raise OperationStoreError(
+                "Expired receipt directory contains unexpected files"
+            )
+        self.receipt_path.unlink()
+        _fsync_directory(self.directory)
+        self.directory.rmdir()
+        _fsync_directory(self.directory.parent)
+        return True
 
     def _assert_within_home(self) -> None:
         try:
@@ -486,6 +756,24 @@ class OperationStore:
                 raise OperationStoreError(
                     "Complete result lacks successful exact and target verification"
                 )
+
+
+def _receipt_sha256(receipt: Mapping[str, Any]) -> str:
+    payload = dict(receipt)
+    payload.pop("receipt_sha256", None)
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _strict_json_text(raw: str) -> Any:

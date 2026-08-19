@@ -360,7 +360,8 @@ class CodexDesktopStateTests(unittest.TestCase):
 
         self.assertEqual(result.deleted_catalog_rows, 1)
         self.assertEqual(result.removed_global_state_references, 2)
-        self.assertTrue((result.backup_directory / "manifest.json").is_file())
+        self.assertFalse(result.temporary_backup_retained)
+        self.assertFalse(result.backup_directory.exists())
         remaining = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
         self.assertFalse(remaining.present)
         global_state = json.loads(self.state_path.read_text(encoding="utf-8"))

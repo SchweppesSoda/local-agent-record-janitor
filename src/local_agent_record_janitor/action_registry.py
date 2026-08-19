@@ -46,10 +46,10 @@ ACTION_REGISTRY: Mapping[str, ActionCapability] = {
     ),
     "remove_broken_relation": ActionCapability(
         kind="remove_broken_relation",
-        implemented=False,
-        mutation_family=None,
+        implemented=True,
+        mutation_family="remove_broken_relation",
         requires_clients_closed=True,
-        verifies_by="not_implemented",
+        verifies_by="approved_spawn_edge_absent",
     ),
     "repair_index_path": ActionCapability(
         kind="repair_index_path",

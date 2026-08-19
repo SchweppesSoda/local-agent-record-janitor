@@ -28,6 +28,10 @@ from .frontend_reference_cleanup import (
     FrontendReferenceCleanupResult,
     execute_frontend_reference_cleanup,
 )
+from .relation_cleanup import (
+    RelationCleanupResult,
+    execute_relation_cleanup,
+)
 from .models import Finding
 from .planning import normalize_storage_path
 from .targeted_guard import (
@@ -76,6 +80,7 @@ class ExecutionOutcome:
     legacy_repair: LegacyIndexRepairResult | None = None
     desktop_cleanup: DesktopCleanupResult | None = None
     frontend_cleanup: FrontendReferenceCleanupResult | None = None
+    relation_cleanup: RelationCleanupResult | None = None
     session_engine: str | None = None
     session_cleanup: Any | None = None
 
@@ -91,6 +96,7 @@ class ExecutionOutcome:
             self.legacy_repair is not None
             or self.desktop_cleanup is not None
             or self.frontend_cleanup is not None
+            or self.relation_cleanup is not None
         )
 
     def audit_payload(self) -> dict[str, Any]:
@@ -124,6 +130,16 @@ class ExecutionOutcome:
                     str(action.action_id) for action in self.selected_actions
                 ],
                 "result": self.frontend_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
+        if self.relation_cleanup is not None:
+            return {
+                "command": "clean",
+                "mutation_kind": "remove_broken_relation",
+                "selected_action_ids": [
+                    str(action.action_id) for action in self.selected_actions
+                ],
+                "result": self.relation_cleanup.to_dict(),
                 "plan_fingerprint": str(self.plan.plan_fingerprint),
             }
         if self.session_cleanup is not None:
@@ -401,6 +417,50 @@ def execute_prevalidated_actions(
             frontend_cleanup=result,
         )
 
+    if mutation_kind == "remove_broken_relation":
+        database_paths = {
+            str(path)
+            for action in actions
+            for path in getattr(action.impact, "relation_database_paths", ())
+        }
+        if len(database_paths) != 1:
+            raise ExecutionError(
+                "One relation cleanup batch must target one physical database.",
+                kind="multiple_relation_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        relation_evidence = tuple(
+            dict(item)
+            for action in actions
+            for item in getattr(action.impact, "relation_evidence", ())
+        )
+        if len(relation_evidence) != len(actions):
+            raise ExecutionError(
+                "Every relation action must bind exactly one database row.",
+                kind="relation_evidence_incomplete",
+                matches=[str(action.action_id) for action in actions],
+            )
+        if action_state_callback is not None:
+            for action in actions:
+                action_state_callback("guard_started", action, None)
+            for action in actions:
+                action_state_callback("mutation_started", action, None)
+        storage = _storage_for_action(actions[0], plan)
+        result = execute_relation_cleanup(
+            Path(storage.path),
+            relation_evidence,
+            client_inspector=client_inspector,
+        )
+        if action_state_callback is not None:
+            for action in actions:
+                action_state_callback("verified", action, None)
+        return ExecutionOutcome(
+            mutation_kind=mutation_kind,
+            selected_actions=actions,
+            plan=plan,
+            relation_cleanup=result,
+        )
+
     if mutation_kind != "delete_conversation":
         raise ExecutionError(
             f"Unsupported mutation kind: {mutation_kind or '<empty>'}",
@@ -646,6 +706,27 @@ def _residual_delete_approval_is_narrow(
         details,
         STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
     )
+    relation_evidence = details.get("relation_evidence")
+    relation_expected = (
+        relation_evidence.get("expected")
+        if isinstance(relation_evidence, Mapping)
+        else None
+    )
+    exact_relation_writer = bool(
+        details.get("cleanable") is True
+        and details.get("direct_database_edit_supported") is True
+        and exact_blocker_codes(details)
+        and isinstance(relation_evidence, Mapping)
+        and relation_evidence.get("schema_version") == 1
+        and relation_evidence.get("table") == "thread_spawn_edges"
+        and isinstance(relation_evidence.get("schema_fingerprint"), str)
+        and isinstance(relation_evidence.get("row_fingerprint"), str)
+        and isinstance(relation_expected, Mapping)
+        and relation_expected.get("child_thread_id") == target_thread_id
+        and relation_expected.get("parent_thread_id")
+        == details.get("parent_thread_id")
+        and relation_expected.get("status") == details.get("edge_status")
+    )
     impact = action.impact
     has_exact_target_artifact = bool(
         impact.index_record_count or impact.rollout_file_count
@@ -696,9 +777,14 @@ def _residual_delete_approval_is_narrow(
             or bool(impact.rollout_file_count)
         )
         and details.get("thread_delete_supported") is False
-        and details.get("cleanable") is False
-        and details.get("direct_database_edit_supported") is False
-        and relation_only
+        and (
+            (
+                details.get("cleanable") is False
+                and details.get("direct_database_edit_supported") is False
+                and relation_only
+            )
+            or exact_relation_writer
+        )
         and (
             details.get("child_rollout_present") is True
             or details.get("child_index_missing") is False

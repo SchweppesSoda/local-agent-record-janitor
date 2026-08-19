@@ -1,166 +1,163 @@
-# 本地 Agent 记录检测模型与安全边界
+# 本地 Agent 记录清理模型与安全边界
 
-本文档描述 Local Agent Record Janitor 的核心模型。跨引擎对象称为 local agent
-record；Codex 对象称为 thread，Pi Agent 和 Claude Code 对象称为 session，
-Cindy/AionUI 行称为 frontend reference/mapping。
+本文档描述 0.2.0 的当前实现。项目只负责找出失效或用户明确选择的本地 Agent
+记录，展示精确影响，永久删除，再确认目标已消失。它不是恢复平台、长期备份库、
+rollout 隔离区或自动数据修复器。
 
-## 核心模型
-
-Janitor 把“发现问题”和“执行删除”分开：
+## 统一执行架构
 
 ```text
-Finding（adapter 证据）
-  → Observation（发现的问题）
-  → TargetRef（native store + 完整 Codex thread ID）
-  → ConversationSummary（兼容类型名；内容是 thread 名称、项目、父子代理关系和证据指纹）
-  → CandidateAction（候选动作、风险、影响、可用性）
-  → CleanupPlan（用户明确选择的动作）
-  → ActionResult（验证后的结果）
+Driver
+  → StoreSnapshot
+  → Planner
+  → AuthorizedAction
+  → Guard
+  → Executor
+  → Verifier
 ```
 
-本节当前对应 Codex 完整性清理子系统。Finding 在兼容期仍是 adapter 输出格式，但
-不等于删除目标。稳定动作身份是
-`(storage_id, full_thread_id, action_kind)`；同一 ID 出现在不同 Codex 数据目录时必须是不同目标。
+人类入口 `scan/records/delete/clean/purge` 和 Agent 入口
+`agent doctor/plan/apply/status/verify` 都调用同一个 `CleanupService`。CLI 负责参数、
+确认和输出，不拥有另一套扫描或删除规则。
 
-每个 StorageLocation 保存稳定 ID、用户可读标签、规范化绝对路径、可选 Codex 可执行文件提示、扫描状态和仅影响该位置的错误。
+核心类型分工：
 
-## 分层状态
+- `StorageRef`：一个精确物理存储；
+- `RecordRef`：该存储中的一条逻辑记录；
+- `Evidence`：不含聊天正文的身份、状态、schema 和指纹证据；
+- `Action`：稳定 action ID、目标、影响与 mutation family；
+- `GuardToken`：执行前重验证所得的不可变授权绑定；
+- `Result`：结构化状态、计数、blocker code 与验证结果。
+
+兼容 facade 继续输出既有 JSON 字段和 `delete_conversation`、
+`repair_legacy_index` 等 action kind。自由文本只用于显示，不能参与授权决定。
+
+## 身份与物理边界
 
 ```text
-Frontend namespace -- frontend reference/mapping --> Native record
+Frontend namespace -- reference/mapping --> Native record
 Harness runtime -- operates on --> Native store -- contains --> Native record
-
-Frontend namespace: Cindy/AionUI owner + database + frontend conversation/session ID
-Harness runtime:    Codex executable path + version
-Native store:       CODEX_HOME
-Native record:      Codex thread (thread_id)
-                    ├── state_5.sqlite：thread 列表记录和关联记录
-                    └── sessions|archived_sessions：rollout 内容文件
-Optional host state: Codex Desktop local catalog + structured global UI state
 ```
 
-扫描只读取前端 SQLite 的最小必要字段、rollout 首行 `session_meta`、必要的 Codex
-thread 列表记录和关联记录，不读取聊天正文，也不修改文件或数据库。frontend
-reference 只是归属、生命周期和 live guard 证据，不能作为原生 thread 的替代身份。
+Codex thread 的身份是 `(CODEX_HOME, thread_id)`；Pi session 和 Claude session
+还绑定各自的 session/config root。相同 ID 出现在不同物理存储时必须拆成不同目标。
+认证来源、账号、登录状态和前端 owner 只属于诊断信息，不能替代物理存储身份。
 
-认证来源、登录状态、OAuth/API 凭据归属和 frontend owner 只属于诊断信息。它们不参与
-删除目标、action ID 或 fingerprint，不得代替 `CODEX_HOME + thread_id`。harness runtime
-也不是身份；认证至多绑定或授权 harness。同一 harness 可以访问不同 native store，
-不同 harness 也可能访问同一路径，执行前必须同时确认可信 runtime 与目标 store。
+一份授权计划只处理一个物理存储和一种 mutation family。前一批完成后必须重新扫描，
+新发现的动作不会被吸收到旧计划中。
 
-## 计划生成
+## 快照与计划
 
-计划生成器按 `(storage_id, full_thread_id)` 聚合 Finding，同时保留全部 Observation。它会：
+一次完整快照聚合：
 
-1. 枚举活动和归档目录中的全部同 ID 内容文件；
-2. 读取由根 thread 创建的完整关联任务 thread 闭包；
-3. 收集列表记录、活跃 frontend reference 和扫描错误；
-4. 从列表数据库、rollout 首行和旧索引名称构建统一 thread 目录，显示根 thread 和
-   完整关联任务 thread 的名称、完整项目目录、Git 来源、父 thread、子代理昵称/角色/
-   路径及元数据冲突；
-5. 为每个候选动作计算风险、影响、稳定 action ID 和快照指纹，并为当前每个内容文件计算身份、来源和 `stat` 状态指纹；
-6. 把未实现的修复动作结构化显示，并给出不可用原因。
+- Codex SQLite 列表、活动/归档 rollout 首行 metadata 和旧索引；
+- 精确关系边与完整关联任务范围；
+- Codex Desktop 可探测的 local catalog/UI 结构化引用；
+- AionUI/Cindy 当前与历史 frontend reference；
+- Pi/Claude storage-qualified session manifest；
+- 读取失败、进程归属和 identity conflict。
 
-快照覆盖 native store、完整 thread ID、问题类型、列表存在状态、已知 rollout 路径、
-关联任务 thread ID、活跃 frontend reference 状态、thread 元数据证据和逐文件状态指纹。
-thread 元数据指纹绑定规范化展示字段以及实际数据库行、rollout `session_meta`、旧索引
-名称的原始证据哈希；逐文件指纹覆盖 metadata thread ID、originator、source、工作目录、
-时间戳、活动/归档状态、规范化路径、大小和纳秒修改时间。任何范围或身份无法精确生成
-都会阻止删除。当前可执行的是 `delete_conversation`（为 JSON v1 保留的 action kind，
-语义是删除整个 Codex thread）和独立的 `repair_legacy_index`；修复列表路径、清除无效
-关系、隔离文件、清除第三方 frontend reference 等动作不会降级成直接 SQLite 或任意
-文件操作。唯一额外可执行动作是 `remove_desktop_state`：它只处理原生证据已经为空的
-Codex Desktop local 宿主残留，属于独立 `high` 风险修复器，并绑定 catalog 行、完整
-JSON 哈希、结构化精确引用、客户端关闭声明和一致备份。
+扫描只读取判定和显示所需的最小结构化字段，不读取或输出聊天正文。Planner 为每个
+action 生成完整目标、影响范围、schema/行/文件指纹、稳定 ID 和 blocker code。
+活动引用、读取失败、身份冲突或无法唯一定位只阻止受影响目标。
 
-风险定义：
+## 问题与动作
 
-- `low`：没有可恢复聊天内容，例如只有列表记录；
-- `review`：仍有聊天内容，但前端已经删除或关系明确孤立；
-- `high`：内容文件不在列表、重复、路径错位或需要内部修复；
-- `blocked`：身份冲突、范围无法计算、状态读取失败或计划已经变化。
+| 问题 | 当前动作 |
+|---|---|
+| 前端已删除、底层会话仍在 | 删除整条底层会话；前端残留作为下一独立动作 |
+| index-only、rollout-only | 删除整条 Codex thread |
+| 重复 rollout、路径错位 | 保留，或删除整条 thread 及全部已确认副本 |
+| 孤立关联任务 thread | 展示完整级联范围后删除 |
+| 只剩无效关系边 | 精确删除一条已批准关系行 |
+| 只剩旧索引/Desktop 状态 | 精确清除残留 |
+| 只剩 Cindy/AionUI 映射 | 精确清除该映射 |
+| Pi/Claude session | 删除精确文件或 manifest |
+| 同一 ID 位于多个存储 | 每个物理存储分别选择 |
+| 活动引用、读取失败、身份冲突 | 阻止该目标并返回稳定原因 |
 
-交互编号和范围（如 `1,3-5`）是当前进程内的临时选择。`all` 只选择 `low` 风险动作；自动化必须使用完整 action ID 或计划 JSON。同一 target 同时选择 `keep` 和任何其他动作属于矛盾计划，必须拒绝。
+`repair_index_path` 和 `quarantine_artifacts` 不再生成或提供。对应枚举只为读取旧
+JSON 保留；当前决定只有“保留”或“删除整条已验证记录”。
 
-## 扫描失败的作用域
+## 精确写入器
 
-带 Codex 数据目录信息的扫描失败只把对应 StorageLocation 标为失败，并阻止该位置的动作。一个独立目录读取失败，不会无条件阻止其他已完整读取的位置。
+### Codex thread
 
-无法归属到保存位置的错误会进入计划级错误并按 fail closed 处理。关系表存在但 schema
-不兼容属于读取失败，不能解释成“关联任务 thread 为零”。
+原生 thread 删除调用匹配目标 `CODEX_HOME` 的官方 `thread/delete`。同一批只启动
+一个 app-server。若官方 API 已删除 thread 但留下已批准 rollout，只有在路径位于目标
+store、是唯一链接的普通文件、thread ID 与完整指纹仍匹配且已无 index/活动引用时，
+才能作为同一动作的残留清除。任何未知残留使结果成为 `partial` 或 `unknown`。
 
-## 执行与重验证
+### AionUI
+
+只删除孤立 `acp_session` 行。当前 schema 使用完整主键；无主键的旧 schema 仅接受
+执行前重新验证的 `rowid + 完整行指纹`。无法唯一定位、schema 漂移、存在 trigger
+或影响行数不是 1 时阻止该条。
+
+### Cindy
+
+- 当前引用：只把目标 session 的 `sdk_session_id` 清为 `NULL`；
+- 历史引用：只从绑定消息 ID、消息行指纹和原始内容哈希的结构化
+  `agent_switch` JSON 中移除 `fromSdkSessionId`。
+
+历史写入保留消息行和其他 JSON 字段；重复 key、内容漂移或字段值不符都会阻止。
+
+### Codex 关系边
+
+只删除 parent、child、status、schema fingerprint 与完整 row fingerprint 全部匹配的
+一条 `thread_spawn_edges` 行。open edge、重复身份行、未知 schema 或不完整证据都
+fail closed。
+
+### 旧索引与 Desktop 状态
+
+旧索引只移除已证明没有 live thread 的原始整行。Desktop 写入只删除
+`host_id='local'` 的精确 catalog 行和结构化精确 ID 引用；正文中的相同字符串不参与
+匹配。
+
+所有共享 SQLite/JSON 写入都要求：客户端关闭、schema 白名单、事务或原子替换、
+影响范围等于预期、写后重新读取，以及临时回滚副本。
+
+## 客户端归属
+
+`ClientInspector` 由服务注入，默认单元测试不读取真实宿主进程。生产检查综合可执行
+文件、父子进程和物理 store 归属。已证明属于官方 Codex 的进程不阻止独立 Cindy
+store；Cindy 进程也不阻止已证明独立的官方 store。无法证明归属时才 fail closed。
+
+## 执行、验证与性能
+
+`plan` 做一次完整快照；`apply` 做一次完整预检和一次完整终检。N 个 action
+之间只重查本 action 涉及的数据库行、文件、活动引用和关联范围：
 
 ```text
-扫描并生成计划
-  → 用户明确选择动作
-  → 展示根 thread 及关联任务 thread 的名称、项目、完整目录、子代理身份和 frontend reference 残留影响
-  → TTY 输入明确确认词，或 --yes 跳过该提示
-  → 重新扫描并比较 action ID + 快照指纹
-  → 按保存位置启动对应 Codex app-server
-  → 捕获关联任务 thread ID、列表中存在的 thread ID、当前 rollout 路径、thread 元数据及逐文件身份/来源/stat 指纹
-  → 与每个 root 的已批准精确范围完全比较
-  → 每次请求前再次扫描所有活动前端并验证动作快照
-  → thread/delete
-  → 无论请求成功、错误或超时都执行磁盘、列表和可探测 Desktop 宿主状态验证
+一次完整扫描 + N 次定点检查 + 一次完整终检
 ```
 
-只有 stdin 和 stdout 同时为 TTY 时才进入编号及最终确认流程。最终删除计划显示 action
-ID，并完整展开每个根 thread 和将被级联删除的关联任务 thread；跨项目目录时会给出
-醒目警告。用户输入 `确认删除` 后在同一进程继续，取消或 EOF 零修改。`--yes` 只跳过
-最终确认提示，不能替代目标选择，也不能跳过重验证。非 TTY 的 `review/high` 风险动作
-还必须提供当前完整 `--plan-fingerprint`。无人值守执行没有 `--thread-id` 或完整
-`--action-id` 时会被拒绝。完整 ID 或前缀跨保存位置匹配多个目标时也会拒绝，不能
-静默扩大范围。
+中途漂移立即停止剩余动作，不在每个 action 前重扫全库。性能测试直接统计 full-scan
+调用次数；100 个 action 仍必须只有两次完整扫描。
 
-`repair_legacy_index` 使用独立确认词 `客户端已关闭并确认修复`，非交互模式同时要求 `--clients-closed` 和计划指纹。它只能单独执行；`restore-legacy-index` 也要求客户端关闭，并仅在当前文件哈希仍等于该备份对应的修复结果时恢复。修复和还原都会先为将被覆盖的当前版本再创建一份可验证备份。
+执行结果采用 `deleted/not_deleted/partial/unknown` 或 Agent
+`complete/completed_with_residuals/blocked/unknown`。API 成功响应不能代替磁盘、
+数据库和完整目标终检。
 
-`remove_desktop_state` 也只能单独执行。它在每次写入前重新证明目标没有原生 index 或
-有效 rollout，且恰好存在一条 `host_id='local'` 的已批准 catalog 行；发现多个 catalog、
-schema 变化、全局状态哈希漂移或客户端仍运行都会停止。SQLite 和 JSON 修改共用一次
-备份清单；写入后只要任一精确引用仍存在，就尝试自动还原全部宿主状态。
+## 回滚副本与 operation 数据
 
-身份和文件范围均可验证的重复文件或路径错位允许作为 `high` 风险整个 thread 删除逐项
-选择。残留关联记录只有在其指向的同 target 子 thread 仍有身份精确可验证的本地数据、
-无 source/identity 冲突时，才可提供 `high` 风险整个 thread 删除。CLI 只对同 target
-的 `duplicate_rollout`、`index_rollout_path_mismatch` 或该精确 `residual_spawn_edge`
-Observation 传递窄授权；不能授权其他类型或关联任务 thread。residual 删除会删除这条
-子 thread 及批准的关联任务范围，不是关系边修复；若子 thread 已不存在，只能显示尚未
-实现的 `remove_broken_relation`。隔离、路径修复和关系修复执行器仍未实现。
+Codex/Pi/Claude 会话和独立 rollout 永久删除，不创建备份。共享 SQLite、旧索引或
+Desktop JSON 写入前创建临时回滚副本：
 
-官方接口优于直接操作存储，因为 Codex 自己负责活动/归档路径、列表记录，以及由该
-thread 创建的关联任务 thread 的一致删除。API 语义见
-[Codex app-server API 概览](https://learn.chatgpt.com/docs/app-server#api-overview)。
+- 写入并验证成功：立即删除；
+- 自动回滚成功：立即删除；
+- partial、unknown 或回滚失败：暂时保留，直到 verify 收口。
 
-执行结果有四态：
-
-- `deleted`：计划范围内所有已知目标均不存在；
-- `not_deleted`：目标明确仍完整存在；
-- `partial`：只有部分列表记录、文件或关联任务 thread 消失；
-- `unknown`：无法完成可靠验证。
-
-请求报错但验证证明全部消失时仍是 `deleted`，同时保留请求警告。
+执行中或结果未知时保留详细 operation journal。已知终态压缩为不含正文的最小
+`receipt.json`，只记录 plan hash、action 状态、blocker code、计数和时间；最长
+七天后自动清除。回执不是备份，项目不提供 recover 命令。
 
 ## 关键不变量
 
-- 第三方前端数据库只读；不直接修改原生 `state_5.sqlite`，不直接删除 rollout 内容
-  文件。写入例外只有经独立审批和备份保护的旧聚合索引整体替换，以及原生证据为空时
-  精确限定的 Codex Desktop 私有宿主状态修复。
-- 所有问题都显示候选动作；不可执行不等于不显示。
-- 活跃引用、身份冲突、范围不明和不完整读取都会阻止相关删除动作。
-- 不跨 Codex 数据目录合并目标；技术路径和完整 ID 在 JSON 中保真。
-- 同一数据目录的可执行文件候选不一致时，规划层和执行层都 fail closed；用户必须用现存普通文件形式的 `--codex-bin PATH` 消除歧义。
-- 用户明确选择的 `keep` 是成功的 no-op，不是执行失败。
-- 删除计划、thread 名称/项目/子代理元数据、关联任务范围或活动 frontend reference
-  漂移时停止执行；每个 API 请求前都重新检查。
-- 删除请求的返回值不能替代删除后验证。
-- Desktop catalog/UI 精确引用仍存在时，原生删除结果为 `partial`，不得用 app-server
-  成功响应覆盖宿主残留证据。
-- 不以“回收空间”为理由降低证据门槛。
-
-## 已知设计风险
-
-- TOCTOU：前端恢复、后台写入或新增关联记录会使旧计划失效。
-- schema 演进：数据库不兼容必须显式失败，不能静默扩大匹配。
-- 重复 ID 或多份内容文件：不能选择“最后扫描到的文件”作为依据；必须枚举并批准全部当前文件，残留时报告 `partial`。
-- junction、symlink 和外部路径：未来隔离或修复执行器必须验证真实路径边界，并提供可恢复备份和审计。
+- 所有计划、回执和输出都不含聊天正文；
+- 不跨物理存储合并目标；
+- schema、身份、范围或客户端归属不确定时只阻止相关目标；
+- `--yes` 不能代替目标选择、客户端关闭或当前计划指纹；
+- 同一动作在结果不明时不得重复发送；
+- 删除成功必须由重新读取和完整终检证明；
+- 不以节省空间为理由降低证据门槛。

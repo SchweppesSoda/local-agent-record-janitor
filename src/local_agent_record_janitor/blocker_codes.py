@@ -18,6 +18,8 @@ SPAWN_EDGE_OPEN = "spawn_edge_open"
 STANDALONE_RELATION_CLEANUP_UNAVAILABLE = (
     "standalone_relation_cleanup_unavailable"
 )
+RELATION_EVIDENCE_INCOMPLETE = "relation_evidence_incomplete"
+RELATION_ROW_AMBIGUOUS = "relation_row_ambiguous"
 
 MALFORMED_BLOCKER_CODES = "__malformed_cleanup_blocker_codes__"
 
@@ -57,6 +59,8 @@ __all__ = [
     "LIVE_FRONTEND_REFERENCE",
     "MALFORMED_BLOCKER_CODES",
     "NO_NATIVE_ARTIFACT",
+    "RELATION_EVIDENCE_INCOMPLETE",
+    "RELATION_ROW_AMBIGUOUS",
     "SOURCE_PARENT_UNVERIFIED",
     "SPAWN_EDGE_OPEN",
     "STANDALONE_RELATION_CLEANUP_UNAVAILABLE",

@@ -194,6 +194,7 @@ class LegacyIndexRepairResult:
     new_sha256: str
     removed_thread_ids: tuple[str, ...]
     removed_line_count: int
+    temporary_backup_retained: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -331,6 +332,7 @@ def repair_legacy_index(
                 original_mode=reviewed.index_identity.mode,
                 backup_id=prepared.backup_id,
             )
+            _discard_prepared_backup(home, prepared)
         except LegacyIndexOperationError:
             raise
         except Exception as exc:
@@ -357,6 +359,7 @@ def repair_legacy_index(
             new_sha256=reviewed.expected_sha256,
             removed_thread_ids=reviewed.residual_thread_ids,
             removed_line_count=reviewed.residual_line_count,
+            temporary_backup_retained=False,
         )
 
 
@@ -933,6 +936,53 @@ def _prepare_backup(
         backup_path=backup_path,
         manifest_path=manifest_path,
     )
+
+
+def _discard_prepared_backup(home: Path, prepared: _PreparedBackup) -> None:
+    """Delete only the exact rollback files created for a verified mutation."""
+
+    backup_root = home / _CONTROL_DIRECTORY / _BACKUP_DIRECTORY
+    try:
+        if prepared.directory.parent.resolve(strict=True) != backup_root.resolve(
+            strict=True
+        ):
+            raise LegacyIndexOperationError(
+                "Temporary backup escaped its expected directory",
+                state="replaced",
+                backup_id=prepared.backup_id,
+            )
+        expected = {prepared.backup_path.name, prepared.manifest_path.name}
+        actual = {path.name for path in prepared.directory.iterdir()}
+        if actual != expected:
+            raise LegacyIndexOperationError(
+                "Temporary backup directory contains unexpected files",
+                state="replaced",
+                backup_id=prepared.backup_id,
+            )
+        for path in (prepared.backup_path, prepared.manifest_path):
+            state = _strict_lstat(path, description="temporary rollback file")
+            if not stat.S_ISREG(state.st_mode) or stat.S_ISLNK(state.st_mode):
+                raise LegacyIndexOperationError(
+                    "Temporary rollback path is not an ordinary file",
+                    state="replaced",
+                    backup_id=prepared.backup_id,
+                )
+            path.unlink()
+        prepared.directory.rmdir()
+        _fsync_directory(backup_root)
+        try:
+            backup_root.rmdir()
+            _fsync_directory(backup_root.parent)
+        except OSError:
+            pass
+    except LegacyIndexOperationError:
+        raise
+    except OSError as exc:
+        raise LegacyIndexOperationError(
+            f"Could not discard temporary rollback copy: {exc}",
+            state="replaced",
+            backup_id=prepared.backup_id,
+        ) from exc
 
 
 def _load_backup(

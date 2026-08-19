@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-agent-record-janitor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Audit storage-qualified Codex threads, Pi Agent and Claude Code sessions, and frontend references; safely clean explicitly approved local agent records."
 readme = "README.md"
 requires-python = ">=3.10"

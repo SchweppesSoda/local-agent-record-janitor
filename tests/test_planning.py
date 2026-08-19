@@ -255,16 +255,14 @@ class CleanupPlanningTests(unittest.TestCase):
             for action in plan.actions
             if action.kind is ActionKind.DELETE_CONVERSATION
         )
-        quarantine_action = next(
-            action
-            for action in plan.actions
-            if action.kind is ActionKind.QUARANTINE_ARTIFACTS
-        )
         self.assertTrue(delete_action.available)
         self.assertEqual(delete_action.risk, RiskLevel.HIGH)
         self.assertTrue(delete_action.requires_explicit_selection)
         self.assertEqual(delete_action.impact.rollout_file_count, 2)
-        self.assertFalse(quarantine_action.available)
+        self.assertNotIn(
+            ActionKind.QUARANTINE_ARTIFACTS,
+            {action.kind for action in plan.actions},
+        )
 
     def test_verified_path_mismatch_delete_is_available_high_and_explicit(
         self,
@@ -316,15 +314,13 @@ class CleanupPlanningTests(unittest.TestCase):
             for action in plan.actions
             if action.kind is ActionKind.DELETE_CONVERSATION
         )
-        repair_action = next(
-            action
-            for action in plan.actions
-            if action.kind is ActionKind.REPAIR_INDEX_PATH
-        )
         self.assertTrue(delete_action.available)
         self.assertEqual(delete_action.risk, RiskLevel.HIGH)
         self.assertTrue(delete_action.requires_explicit_selection)
-        self.assertFalse(repair_action.available)
+        self.assertNotIn(
+            ActionKind.REPAIR_INDEX_PATH,
+            {action.kind for action in plan.actions},
+        )
 
     def test_integrity_soft_reason_with_extra_tail_remains_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -582,11 +578,11 @@ class CleanupPlanningTests(unittest.TestCase):
             if action.target.thread_id == "parent"
             and action.kind is ActionKind.DELETE_CONVERSATION
         )
-        child_quarantine = next(
+        child_delete = next(
             action
             for action in plan.actions
             if action.target.thread_id == "child"
-            and action.kind is ActionKind.QUARANTINE_ARTIFACTS
+            and action.kind is ActionKind.DELETE_CONVERSATION
         )
         child_observation = next(
             observation
@@ -604,8 +600,8 @@ class CleanupPlanningTests(unittest.TestCase):
             parent_delete.snapshot_fingerprint,
             baseline_parent_delete.snapshot_fingerprint,
         )
-        self.assertFalse(child_quarantine.available)
-        self.assertEqual(child_quarantine.risk, RiskLevel.HIGH)
+        self.assertFalse(child_delete.available)
+        self.assertEqual(child_delete.risk, RiskLevel.BLOCKED)
 
     def test_descendant_integrity_anomaly_requires_independent_approval(
         self,
@@ -1375,7 +1371,7 @@ class CleanupPlanningTests(unittest.TestCase):
             if action.kind is ActionKind.REMOVE_BROKEN_RELATION
         )
         self.assertFalse(relation_action.available)
-        self.assertIn("backup", relation_action.unavailable_reason or "")
+        self.assertIn("not approved", relation_action.unavailable_reason or "")
 
     def test_residual_relation_with_exact_child_artifact_offers_delete(
         self,
@@ -2001,17 +1997,10 @@ class CleanupPlanningTests(unittest.TestCase):
         by_target = {}
         for action in plan.actions:
             by_target.setdefault(action.target.thread_id, {})[action.kind] = action
-        self.assertIn(ActionKind.QUARANTINE_ARTIFACTS, by_target["duplicate"])
         self.assertIn(ActionKind.DELETE_CONVERSATION, by_target["duplicate"])
-        self.assertFalse(
-            by_target["duplicate"][ActionKind.QUARANTINE_ARTIFACTS].available
-        )
-        self.assertEqual(
-            by_target["duplicate"][ActionKind.QUARANTINE_ARTIFACTS].risk,
-            RiskLevel.HIGH,
-        )
-        self.assertIn(ActionKind.REPAIR_INDEX_PATH, by_target["path"])
-        self.assertFalse(by_target["path"][ActionKind.REPAIR_INDEX_PATH].available)
+        self.assertNotIn(ActionKind.QUARANTINE_ARTIFACTS, by_target["duplicate"])
+        self.assertNotIn(ActionKind.REPAIR_INDEX_PATH, by_target["path"])
+        self.assertIn(ActionKind.DELETE_CONVERSATION, by_target["path"])
 
     def test_impact_and_snapshot_cover_all_associated_task_conversations(self) -> None:
         with tempfile.TemporaryDirectory() as root:

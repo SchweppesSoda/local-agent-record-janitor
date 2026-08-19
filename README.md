@@ -2,8 +2,8 @@
 
 `local-agent-record-janitor` 是本项目统一使用的仓库名、发行包名和 CLI 命令；Python
 模块名统一为 `local_agent_record_janitor`。它是一个本地、保守的多引擎 Agent 记录检查
-和清理工具：处理 Codex thread、Pi Agent session 和 Claude Code session，并把
-Cindy/AionUI 数据库中的行作为只读 frontend reference，而不是另一份 native record。
+和清理工具：处理 Codex thread、Pi Agent session 和 Claude Code session，也能精确清除
+Cindy/AionUI 中已经失效的 frontend reference；前端映射不是另一份 native record。
 
 ### 命名迁移
 
@@ -29,17 +29,17 @@ Cindy/AionUI 数据库中的行作为只读 frontend reference，而不是另一
 则以 `--yes --clients-closed` 作为整批授权，只纳入当前完整扫描中可执行的 Codex 异常
 动作。两条路径都会在每次修改前重新扫描和重验证。
 
-Codex `delete` 的目标是 `(CODEX_HOME, thread_id)`，原生 thread 删除只调用官方
-Codex `thread/delete`。Cindy/AionUI 数据库在该路径中始终只读：输出会明确列出仍
-保留的 frontend reference，它们在 Codex thread 删除后可能成为前端孤立映射。
+Codex `delete` 的目标是 `(CODEX_HOME, thread_id)`，原生 thread 删除优先调用官方
+Codex `thread/delete`。这个动作不会顺带修改 Cindy/AionUI 数据库；失效的 frontend
+reference 会成为另一份独立授权、独立事务和独立验证的精确清理动作。
 
 Codex Desktop 还可能维护一层宿主目录/UI 状态。它不是公开 app-server 数据契约；
 本工具只通过结构探测读取，并把“原生 thread 已不存在、但 `host_id='local'` 的宿主
 目录行仍存在”报告为 `desktop_state_orphan`。这类记录不能再次发送给
 `thread/delete`。只有单独选择 `remove_desktop_state` 高风险动作，或通过专用 `purge`
-整批授权，并在关闭相关客户端、通过完整状态指纹重验证、创建一致备份后，工具才
+整批授权，并在关闭相关客户端、通过完整状态指纹重验证、创建临时回滚副本后，工具才
 精确删除该目录行及 JSON 中的结构化精确 ID 引用；提示历史正文中仅仅包含该 ID 的
-普通字符串会保留。
+普通字符串会保留。验证成功后临时副本立即删除，不形成长期备份。
 
 ### 术语与身份边界
 
@@ -98,23 +98,24 @@ OpenAI 稳定 API。
 
 | 范围 | 检查依据 | 当前候选动作 |
 |---|---|---|
-| AionUI | 前端对话已不存在，但 `acp_session` reference 仍在；并要求 Codex backend/originator 证据 | 删除整个 Codex thread；frontend reference 清理会结构化显示但尚不可执行 |
-| Cindy | `agent_kind='codex'`、`status='deleted'` 且存在 `sdk_session_id` | 删除整个 Codex thread；frontend reference 清理会结构化显示但尚不可执行 |
+| AionUI | 前端对话已不存在，但 `acp_session` reference 仍在；并要求 Codex backend/originator 证据 | Codex thread 与精确映射分成独立动作；映射仅以主键或重验证的 `rowid + 完整行指纹` 删除 |
+| Cindy | 已失效的当前 `sdk_session_id`，或历史 `agent_switch` 中的 `fromSdkSessionId` | 当前引用只清空该字段；历史引用只移除绑定消息 ID 与内容哈希的该 JSON 字段 |
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
 | Codex：rollout-only | rollout 内容文件存在，但 thread 列表记录不存在 | 删除整个 thread，属于 `high`，必须明确选择 |
-| Codex：重复内容文件 | 同一 thread ID 有多份可验证 rollout 内容文件 | 隔离动作尚未实现；删除整个 thread 为 `high`，只能逐项明确选择并批准精确范围 |
-| Codex：路径错位 | thread 列表路径与实际 rollout 内容文件不一致，但文件身份可验证 | 路径修复尚未实现；删除整个 thread 为 `high`，只能逐项明确选择并批准精确范围 |
+| Codex：重复内容文件 | 同一 thread ID 有多份可验证 rollout 内容文件 | 保留，或把全部已确认副本作为整条 thread 的 `high` 风险删除范围；不提供隔离动作 |
+| Codex：路径错位 | thread 列表路径与实际 rollout 内容文件不一致，但文件身份可验证 | 保留，或删除整条 thread；不提供猜测性的路径修复 |
 | Codex：孤立关联任务 thread | 明确 subagent 证据，父 thread 的列表记录和 rollout 内容文件均缺失 | 删除整个 thread；必须展示它创建的其他关联任务 thread |
-| Codex：残留关联记录 | thread 关联记录的一端不存在 | 单独清除关联记录尚未实现；若记录指向的子 thread 仍有身份精确可验证的本地数据且无来源冲突，可逐项选择 `high` 风险删除该子 thread |
-| Codex：旧版聚合索引残留 | `session_index.jsonl` 中的 ID 经严格 SQLite 与活动/归档 rollout 清单证明已无 live thread | 修复文件；`high` 风险、逐项选择、先持久备份，可按 backup ID 受保护还原 |
-| Codex Desktop：宿主状态孤儿 | `local_thread_catalog` 中 `host_id='local'` 的精确 ID 仍存在，但 `state_5.sqlite` 和有效 rollout 均不存在 | `remove_desktop_state`；`high` 风险、逐项选择、客户端关闭、完整指纹、SQLite 一致备份和 JSON 原子替换 |
+| Codex：残留关联记录 | thread 关联记录的一端不存在 | 按 parent、child、status、schema 与完整行指纹精确删除一条关系边；不唯一或仍 open 时阻止该条 |
+| Codex：旧版聚合索引残留 | `session_index.jsonl` 中的 ID 经严格 SQLite 与活动/归档 rollout 清单证明已无 live thread | 精确移除已证明失效的原始整行；写入前临时备份，验证成功后立即删除 |
+| Codex Desktop：宿主状态孤儿 | `local_thread_catalog` 中 `host_id='local'` 的精确 ID 仍存在，但 `state_5.sqlite` 和有效 rollout 均不存在 | `remove_desktop_state`；客户端关闭、完整指纹、SQLite/JSON 原子写入和临时回滚保护 |
 
-所有发现都会成为 Observation，并显示一个或多个 CandidateAction。当前可执行的是
-`delete_conversation`（这是为 JSON v1 兼容保留的 action kind，语义为删除整个 Codex
-thread）和严格受保护的 `repair_legacy_index`；修复列表路径、隔离文件、清除关系或
-frontend reference 等动作仍只结构化显示，并附带不可用原因。
+所有发现都会成为 Observation，并显示一个或多个 CandidateAction。可执行 mutation
+包括整条 Codex thread 删除、旧索引残留清除、Desktop 宿主残留清除、精确关系边删除、
+AionUI/Cindy 引用清理，以及 Pi/Claude 的精确 session 删除。`repair_index_path` 和
+`quarantine_artifacts` 只保留旧 JSON 枚举兼容，不再生成或提供；异常记录只能保留，
+或在身份与完整范围均可验证时删除整条记录。
 
 ## 平台与 Shell
 
@@ -190,11 +191,12 @@ local-agent-record-janitor scan
 local-agent-record-janitor purge --yes --clients-closed
 ```
 
-`purge` 不会删除正常对话，也不会触碰 Pi 或 Claude Code 会话。它按 mutation kind 和
-Codex 数据目录拆批，顺序处理 thread 删除、旧索引修复和 Desktop 宿主残留；每批绑定
-当次完整计划指纹，执行前重扫，执行后再次扫描。旧索引和 Desktop 状态仍创建可验证
-备份。任何完整扫描失败、计划漂移或执行错误都会立即停止后续批次；确实受阻或尚未
-实现的动作保留并计数，并以退出码 `3` 和 `goal_satisfied=false` 明确表示目标未完成，
+`purge` 不会删除正常对话，也不会触碰 Pi 或 Claude Code 会话。它按物理存储和 mutation
+kind 拆成不可变批次，依次处理 thread、旧索引、Desktop 状态、关系边和前端引用；每批
+绑定当次完整计划指纹，执行前完整重扫，执行中只做定点 guard，执行后再完整扫描。
+共享 SQLite/JSON 写入前只创建临时回滚副本，验证成功后立即删除。任何完整扫描失败、
+计划漂移或执行错误都会停止后续批次；受阻动作保留并计数，并以退出码 `3` 和
+`goal_satisfied=false` 明确表示目标未完成，
 不会再显示为成功。可用 `--platform native|cindy|aionui` 把候选范围缩小到单一
 来源，但所有已发现前端仍参与 live-reference 安全检查。
 
@@ -203,8 +205,8 @@ Codex 数据目录拆批，顺序处理 thread 删除、旧索引修复和 Deskt
 ```powershell
 local-agent-record-janitor agent doctor --platform native --codex-home 'D:\exact\CODEX_HOME'
 local-agent-record-janitor agent plan --operation purge --platform native `
-  --codex-home 'D:\exact\CODEX_HOME' --out '.\janitor-plan.json'
-local-agent-record-janitor agent apply --plan '.\janitor-plan.json' `
+  --codex-home 'D:\exact\CODEX_HOME'
+local-agent-record-janitor agent apply --plan '<plan 输出中的 plan_path>' `
   --authorized-plan-sha256 '<plan-sha256>' --clients-closed
 local-agent-record-janitor agent status --operation-id '<operation-id>' `
   --codex-home 'D:\exact\CODEX_HOME'
@@ -212,9 +214,10 @@ local-agent-record-janitor agent verify --operation-id '<operation-id>' `
   --codex-home 'D:\exact\CODEX_HOME'
 ```
 
-Agent 命令只输出 JSON、不读取 stdin；计划只授权一个不可变动作批次。`apply` 在触发
-修改前持久化 mutation gate，结果为 `unknown` 时会拒绝重复发送删除，只能通过
-`status`/`verify` 收口。完整约定见 [AGENTS.md](AGENTS.md) 和
+Agent 命令只输出 JSON、不读取 stdin；计划只授权一个不可变动作批次。省略 `--out`
+时，计划写入用户状态目录而不是项目根目录；显式指定的计划文件由调用方管理。`apply`
+在触发修改前持久化 mutation gate，结果为 `unknown` 时会拒绝重复发送删除，只能通过
+`status`/`verify` 收口。已知终态只保留最长 7 天、无正文的最小回执。完整约定见 [AGENTS.md](AGENTS.md) 和
 [Agent automation protocol](docs/agent-automation.md)。
 
 列出全部正常/异常 Codex thread 及 Cindy/AionUI frontend reference：
@@ -296,7 +299,7 @@ local-agent-record-janitor delete --platform pi --session-id 完整Pi会话ID `
   --plan-fingerprint 完整所选计划指纹 --clients-closed --yes --json
 ```
 
-TTY 可在 Pi 清单显示后输入一个临时编号；不支持 `all`。默认还须输入 `Pi 客户端已关闭并确认永久删除`；只有同时显式提供 `--yes`、明确目标和 `--clients-closed` 才会跳过该提示。若继承的 `PI_SESSION_FILE` 标记目标为活动会话，或文件状态在预览后变化、目标不是常规 `.jsonl` 会话文件，命令会停止；其他仍在运行的 Pi 进程需由操作者通过 `--clients-closed` 或 TTY 确认保证已关闭。请先备份整个 Pi session 目录。
+TTY 可在 Pi 清单显示后输入一个临时编号；不支持 `all`。默认还须输入 `Pi 客户端已关闭并确认永久删除`；只有同时显式提供 `--yes`、明确目标和 `--clients-closed` 才会跳过该提示。若继承的 `PI_SESSION_FILE` 标记目标为活动会话，或文件状态在预览后变化、目标不是常规 `.jsonl` 会话文件，命令会停止；其他仍在运行的 Pi 进程需由操作者通过 `--clients-closed` 或 TTY 确认保证已关闭。工具不会为 Pi session 创建备份。
 
 仅扫描一个来源：
 
@@ -346,7 +349,7 @@ local-agent-record-janitor clean --json
 local-agent-record-janitor clean --action-id delete_conversation-完整动作ID
 ```
 
-确认备份、目标和影响范围无误后才执行：
+确认目标和影响范围无误后才执行：
 
 ```powershell
 local-agent-record-janitor clean --thread-id 0198abcd --yes
@@ -362,16 +365,18 @@ local-agent-record-janitor clean --action-id delete_conversation-完整动作ID 
 
 旧版聚合索引是文件资源，不是虚构的 Codex thread ID，不能用 `--thread-id` 选择、
 不能被 `all` 纳入，也不能与 thread 删除混跑。关闭使用同一数据目录的 Codex、
-AionUI 和 Cindy 后，可用计划中的修复 action ID 执行；结果会返回 backup ID：
+AionUI 和 Cindy 后，可用计划中的兼容 action kind `repair_legacy_index` 精确移除已证明
+失效的原始整行：
 
 ```powershell
 local-agent-record-janitor clean --platform native --json
 local-agent-record-janitor clean --action-id repair_legacy_index-完整动作ID `
   --plan-fingerprint 完整计划指纹 --clients-closed --yes
-
-local-agent-record-janitor restore-legacy-index --codex-home 'D:\CodexData' `
-  --backup-id 完整备份ID --clients-closed --yes
 ```
+
+写入前会创建临时回滚副本；写入和重新读取均验证成功后立即删除。0.2.0 不提供
+`restore-legacy-index` 或长期备份库。执行结果为 `partial`/`unknown` 或自动回滚失败时，
+副本才暂时保留，等待 `verify` 收口。
 
 原生记录已经消失、但 Codex Desktop 侧栏/目录状态仍残留时，先完全退出
 Codex/ChatGPT Desktop、AionUI、Cindy，再从外部 PowerShell 获取高风险动作和计划
@@ -387,11 +392,9 @@ local-agent-record-janitor clean `
   --clients-closed --yes --json
 ```
 
-执行会在 `<CODEX_HOME>/.local-agent-record-janitor/desktop-state-backups/<backup-id>/`
-创建 Desktop catalog、全局状态文件和 manifest 的一致备份。任何写入或执行后验证
-失败都会尝试自动还原；备份不会自动删除。
-
-还原只有在当前索引哈希仍等于该次修复产生的哈希时才会进行；还原本身也会先创建新的备份，避免覆盖后续合法变化。
+执行会先创建 Desktop catalog 与全局状态文件的一致临时回滚副本。任何写入或执行后
+验证失败都会尝试自动还原；成功写入或成功自动回滚后副本立即删除。只有结果仍不明或
+回滚失败时才暂时保留，并在错误中报告精确路径。
 
 非 TTY 中，`clean` 不传 `--yes` 时只预览计划且不会修改数据；有可执行动作进入计划时以退出码 `2` 表示“需要显式确认”。只有 stdin 和 stdout 同时为 TTY 时才会进入上述同进程选择与确认流程。`--yes` 不能替代 `--thread-id`、完整 `--action-id` 或当前进程中的交互编号，也不能跳过删除前重验证。无人值守执行没有选择器时会被拒绝；无人值守预览没有选择器时最多默认计划允许批量纳入的 `low` 风险删除动作，不会纳入标记为“必须逐项选择”的动作。
 
@@ -412,9 +415,8 @@ local-agent-record-janitor clean --platform native --codex-home 'D:\CodexData' `
 
 ## 删除是怎样完成的
 
-本工具不会直接 `DELETE` 原生 `state_5.sqlite` 行，也不会直接删除 Codex rollout
-JSONL。可安全处理的原生 Codex thread 会按各自的 `CODEX_HOME` 启动对应 harness
-runtime：
+本工具不会用手写 SQL 代替官方 Codex thread 删除。可安全处理的原生 Codex thread
+会按各自的 `CODEX_HOME` 启动对应 harness runtime：
 
 ```text
 initialize → initialized → thread/delete → 删除后验证
@@ -438,12 +440,14 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
   规范化路径、大小和纳秒修改时间；
 - 启动 app-server 后、任何删除请求前会再次捕获完整范围；每个根目标在发送请求的
   最后一刻还会重查 native record 身份范围和全部活跃 frontend reference，漂移会停止后续请求；
-- 经验证的重复文件或路径错位可以作为 `high` 风险整个 thread 删除逐项选择；修复和
-  隔离动作仍未实现，删除后任何已知残留都会使结果成为 `partial`；
+- 经验证的重复文件或路径错位可以作为 `high` 风险整个 thread 删除逐项选择；不提供
+  路径修复或可恢复隔离，删除后任何已知残留都会使结果成为 `partial`；
 - 残留关联记录仅在记录指向的子 thread 仍有精确可验证的列表记录或 rollout 内容文件、
   来源无冲突时，才可提供窄范围 `high` 风险整个 thread 删除；这会删除该子 thread
-  及其批准的关联任务范围，不是单独删除关系边。若子 thread 本身已不存在，只能选择
-  尚未实现的 `remove_broken_relation`；
+  及其批准的关联任务范围。若只剩无效关系边，则 `remove_broken_relation` 只在
+  parent、child、status、schema 与完整行指纹仍完全匹配时删除该一行；
+- AionUI/Cindy 引用和关系边写入按一个物理数据库拆批，要求客户端关闭、schema 白名单、
+  事务、精确影响行数、写后重读及临时回滚保护；
 - Cindy 的 `deleted` 是前端软删除状态，但一旦对应 Codex thread 被硬删除，就不能靠
   恢复 Cindy 状态找回 Codex 正文。
 
@@ -485,7 +489,7 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 
 | 退出码 | 含义 |
 |---:|---|
-| `0` | 扫描/记录清单成功，或所选删除、旧索引修复/还原成功 |
+| `0` | 扫描/记录清单成功，或所选删除/精确残留清理成功 |
 | `1` | 扫描、选择、重验证、执行或执行后验证发生错误 |
 | `2` | 非 TTY 的修改命令未传 `--yes`，仅预览计划，没有修改 |
 
@@ -501,9 +505,11 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 - `scan` 是时间点快照。扫描后重新打开、恢复或继续某个 Codex thread 会使结果过期；
   清理前必须重新扫描。
 - 不跨不同 `CODEX_HOME` 合并状态。同一个 thread ID 在不同保存位置下被视为不同目标。
-- 路径错位、重复文件和残留关联记录不应通过手工“删一个文件”解决；单独关系修复等动作目前只显示、不执行。唯一直接文件替换例外是旧版聚合索引：严格清单只移除已证明无 live 会话的原始整行，并要求独占锁、审批快照、备份清单、原子替换和受保护还原。
+- 路径错位和重复文件不应通过手工“删一个文件”解决；工具只允许保留或删除整条已确认记录。旧版聚合索引只移除已证明无 live 会话的原始整行；无效关系边只删除指纹完全匹配的一行。两者都要求审批快照、客户端关闭、原子/事务写入、写后验证和临时回滚保护。
 - 扫描失败按 Codex 数据目录归属，只阻止受影响位置；无法归属到保存位置的错误按 fail closed 处理。
-- 工具不清理 AionUI/Cindy 自身的消息表或软删除记录；它只处理经确认的 Codex 侧残留。
+- 工具不删除 AionUI/Cindy 的对话正文或软删除记录；它只删除精确 AionUI 孤立映射、
+  清空精确 Cindy `sdk_session_id`，或从绑定消息 ID 和内容哈希的 `agent_switch` JSON
+  中移除 `fromSdkSessionId`，其他字段和消息行保持不变。
 - `scan` 与 `clean` 目前不处理 Pi/Claude；显式传入对应 platform 会返回不支持错误，而 `--platform all` 保持 Codex 原有行为。
 
 更多说明：

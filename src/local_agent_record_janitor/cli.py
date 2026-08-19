@@ -53,13 +53,12 @@ from .models import Finding
 from .path_identity import canonical_existing_path_key
 from .rendering import safe_single_line
 from .execution import ExecutionError
+from .relation_cleanup import RelationCleanupError
 from .legacy_index import (
     LegacyIndexError,
     LegacyIndexOperationError,
     LegacyIndexRepairResult,
-    LegacyIndexRestoreResult,
     repair_legacy_index,
-    restore_legacy_index,
 )
 
 
@@ -82,9 +81,7 @@ _RISK_LABELS = {
 _ACTION_LABELS = {
     "delete_conversation": "永久删除整条对话",
     "remove_broken_relation": "清除无效的对话关联记录",
-    "repair_index_path": "修复对话列表路径",
     "repair_legacy_index": "修复旧版聚合索引",
-    "quarantine_artifacts": "隔离对话数据",
     "remove_frontend_reference": "清除前端残留引用",
     "remove_desktop_state": "清除 Codex Desktop 宿主残留状态",
     "keep": "保留，不做更改",
@@ -103,19 +100,7 @@ _PROBLEM_LABELS = {
         "原生 thread 已删除，但 Codex Desktop 目录/UI 状态仍残留"
     ),
 }
-_UNIMPLEMENTED_ACTION_REASONS = {
-    "remove_broken_relation": (
-        "单独清除无效对话关联尚未实现；执行前需要可验证的数据库备份、"
-        "结构检查和事务保护"
-    ),
-    "repair_index_path": (
-        "修复对话列表路径尚未实现；执行前必须重新验证内容身份并准备"
-        "可恢复的数据库备份"
-    ),
-    "quarantine_artifacts": (
-        "隔离对话数据尚未实现；需要可恢复的隔离清单和还原流程"
-    ),
-}
+_UNIMPLEMENTED_ACTION_REASONS: dict[str, str] = {}
 _BLOCKED_REASON_LABELS = (
     (
         "could not be assigned to a codex data directory",
@@ -156,7 +141,7 @@ _BLOCKED_REASON_LABELS = (
     ),
     (
         "requires quarantine or manual identity review",
-        "该问题需要先隔离数据或人工核验身份，已阻止删除",
+        "该问题需要人工核验身份；请保留，或在范围完整可验证时明确选择删除整条记录",
     ),
     (
         "scope could not be verified for this target",
@@ -571,11 +556,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     clean = subparsers.add_parser(
         "clean",
-        help="生成动作计划，清理原生 thread 或经验证的 Desktop 宿主残留",
+        help="生成动作计划，清理经验证的本地 Agent 异常残留",
         description=(
-            "生成保守的动作计划，并通过官方 Codex app-server "
-            "清理明确选择且重验证通过的对话；原生记录已消失但 "
-            "Desktop 宿主目录仍残留时，使用独立的高风险精确清理动作。"
+            "生成保守的动作计划，清理明确选择且重验证通过的 Codex "
+            "thread、旧索引、Desktop 状态、关系边或前端引用；每种物理"
+            "存储和变更类型都使用独立授权批次。"
         ),
     )
     _add_common_arguments(clean)
@@ -711,9 +696,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_plan.add_argument(
         "--out",
         type=Path,
-        required=True,
         metavar="PLAN.json",
-        help="新计划文件路径；为防止授权混淆，绝不覆盖现有文件",
+        help=(
+            "新计划文件路径；省略时写入用户状态目录。为防止授权混淆，"
+            "绝不覆盖现有文件"
+        ),
     )
 
     agent_apply = agent_subparsers.add_parser(
@@ -782,41 +769,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="总核验时限（默认：180）",
     )
 
-    restore = subparsers.add_parser(
-        "restore-legacy-index",
-        help="从 Janitor 的可验证备份还原旧版聚合索引",
-        description=(
-            "仅当当前文件仍是对应修复产生的版本时，才从指定备份还原；"
-            "还原前也会创建新的可验证备份。"
-        ),
-    )
-    restore.add_argument(
-        "--backup-id",
-        required=True,
-        metavar="BACKUP_ID",
-        help="repair_legacy_index 结果中的完整备份 ID",
-    )
-    restore.add_argument(
-        "--codex-home",
-        type=Path,
-        metavar="PATH",
-        help="备份所属 Codex 数据目录（默认使用 CODEX_HOME 或 ~/.codex）",
-    )
-    restore.add_argument(
-        "--yes",
-        action="store_true",
-        help="跳过 TTY 最终确认提示并执行",
-    )
-    restore.add_argument(
-        "--clients-closed",
-        action="store_true",
-        help="确认使用同一数据目录的相关客户端均已关闭",
-    )
-    restore.add_argument(
-        "--json",
-        action="store_true",
-        help="输出机器可读 JSON",
-    )
     return parser
 
 
@@ -911,6 +863,27 @@ def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
     return _create_default_adapters(args)
 
 
+def _configure_standard_stream_utf8(stream: TextIO) -> None:
+    """Use a stable UTF-8 byte contract for redirected Windows output."""
+
+    if os.name != "nt":
+        return
+    reconfigure = getattr(stream, "reconfigure", None)
+    if not callable(reconfigure):
+        return
+    encoding = str(getattr(stream, "encoding", "") or "").lower().replace(
+        "-", ""
+    )
+    if encoding in {"utf8", "utf8sig"}:
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="strict")
+    except (AttributeError, OSError, ValueError):
+        # Embedded callers can provide immutable standard streams. Explicit
+        # stdout/stderr arguments remain the supported override in that case.
+        return
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -927,6 +900,10 @@ def main(
     client_inspector: ClientInspector | None = None,
     cleanup_service: CleanupService | None = None,
 ) -> int:
+    if stdout is None:
+        _configure_standard_stream_utf8(sys.stdout)
+    if stderr is None:
+        _configure_standard_stream_utf8(sys.stderr)
     input_stream = stdin or sys.stdin
     output = stdout or sys.stdout
     error_output = stderr or sys.stderr
@@ -1000,14 +977,6 @@ def main(
         scanner=scan_adapters,
         client_inspector=client_inspector,
     )
-
-    if args.command == "restore-legacy-index":
-        return _run_legacy_index_restore(
-            args,
-            stdin=input_stream,
-            stdout=output,
-            stderr=error_output,
-        )
 
     unsupported_engine = _explicit_unsupported_scan_engine(args.platform)
     if args.command in {"scan", "clean", "purge"} and unsupported_engine:
@@ -1569,6 +1538,24 @@ def _next_purge_action_batch(
                 for action in matching
                 if str(action.target.storage_id) == storage_id
             ]
+        elif mutation_kind in {
+            "remove_frontend_reference",
+            "remove_broken_relation",
+        }:
+            attribute = (
+                "frontend_database_paths"
+                if mutation_kind == "remove_frontend_reference"
+                else "relation_database_paths"
+            )
+            by_database: dict[str, list[Any]] = {}
+            for action in matching:
+                paths = tuple(
+                    str(value)
+                    for value in getattr(action.impact, attribute, ())
+                )
+                database = paths[0] if len(paths) == 1 else ""
+                by_database.setdefault(database, []).append(action)
+            matching = by_database[min(by_database)]
         return (
             mutation_kind,
             tuple(sorted(str(action.action_id) for action in matching)),
@@ -1694,41 +1681,11 @@ def _run_records(
 
 
 def _build_pi_catalog(args: argparse.Namespace, builder: Any | None = None) -> Any:
-    """Call Pi's public catalog builder; CLI never parses transcripts itself."""
+    """Build Pi inventory through the shared session catalog factory."""
 
-    if builder is not None:
-        # Preserve the original injected-builder call contract.
-        return builder(
-            agent_dir=args.pi_agent_dir,
-            session_root=args.pi_session_dir,
-        )
+    from .session_catalog_factory import build_pi_catalog
 
-    from .pi_sessions import (
-        build_pi_root_qualified_catalog,
-        build_pi_session_inventory,
-    )
-
-    appdata = (args.appdata or default_appdata()).expanduser()
-    cindy_profiles = resolve_cindy_profiles(
-        appdata,
-        root=args.cindy_root,
-        database=args.cindy_db,
-        codex_home=args.cindy_codex_home,
-    )
-
-    if args.pi_agent_dir is not None or args.pi_session_dir is not None:
-        # Explicit path options deliberately limit the view to one user-chosen
-        # Pi storage rather than unexpectedly adding Cindy roots.  They do not
-        # bypass ownership qualification when that one root belongs to Cindy.
-        return build_pi_root_qualified_catalog(
-            agent_dir=args.pi_agent_dir,
-            session_root=args.pi_session_dir,
-            cindy_profiles=cindy_profiles,
-        )
-    return build_pi_session_inventory(
-        standalone_options={},
-        cindy_profiles=cindy_profiles,
-    )
+    return build_pi_catalog(args, builder)
 
 
 def _pi_catalog_payload(catalog: Any) -> dict[str, Any]:
@@ -1745,164 +1702,11 @@ def _pi_catalog_payload(catalog: Any) -> dict[str, Any]:
 
 
 def _build_claude_catalog(args: argparse.Namespace, builder: Any | None = None) -> Any:
-    """Build Claude's root-qualified inventory without parsing transcripts here."""
+    """Build Claude inventory through the shared session catalog factory."""
 
-    if builder is not None:
-        return builder(claude_config_dir=args.claude_config_dir)
+    from .session_catalog_factory import build_claude_catalog
 
-    from .cindy_references import (
-        CindyReferenceFailure,
-        build_cindy_reference_catalog,
-    )
-    from .claude_sessions import (
-        build_claude_multi_root_catalog,
-        resolve_claude_paths,
-    )
-    from .discovery import CindyProfile
-
-    effective = resolve_claude_paths(config_dir=args.claude_config_dir)
-    roots: list[Path] = [effective.config_dir]
-    explicit_root = args.claude_config_dir is not None
-    appdata = (args.appdata or default_appdata()).expanduser()
-    profiles: list[Any] = list(
-        resolve_cindy_profiles(
-            appdata,
-            root=args.cindy_root,
-            database=args.cindy_db,
-            codex_home=args.cindy_codex_home,
-        )
-    )
-    if (
-        args.cindy_root is None
-        and args.cindy_db is None
-        and args.cindy_codex_home is None
-    ):
-        known_profile_roots = {
-            _path_identity(profile.root) for profile in profiles
-        }
-        for brand in ("CindyGlobal", "Cindy", "CindyDev", "xdt-maker"):
-            root = appdata / brand
-            if _path_identity(root) in known_profile_roots:
-                continue
-            try:
-                has_claude_home = (root / "claude-home").is_dir()
-            except OSError:
-                has_claude_home = False
-            if has_claude_home:
-                # Keep a surviving dedicated Claude store visible even if the
-                # frontend DB and codex-home have already been removed.
-                profiles.append(
-                    CindyProfile(
-                        root=root,
-                        database=root / "cindy-local-v1.db",
-                        codex_home=root / "codex-home",
-                    )
-                )
-
-    default_root = Path.home() / ".claude"
-    qualified_references: list[dict[str, Any]] = []
-    reference_failures: list[Any] = []
-    seen_databases: set[str] = set()
-    for profile in profiles:
-        database_key = _path_identity(profile.database)
-        if database_key in seen_databases:
-            continue
-        seen_databases.add(database_key)
-        reference_catalog = build_cindy_reference_catalog(
-            profile.database, profile_root=profile.root
-        )
-        cc_references = tuple(reference_catalog.for_backend("claude"))
-        dedicated_root = profile.root / "claude-home"
-        try:
-            dedicated_exists = dedicated_root.is_dir()
-        except OSError as exc:
-            dedicated_exists = False
-            reference_failures.append(
-                CindyReferenceFailure(
-                    profile.database,
-                    profile.root,
-                    type(exc).__name__,
-                    "Could not inspect Cindy Claude storage root",
-                )
-            )
-
-        if dedicated_exists and not explicit_root:
-            # A surviving dedicated store is inventory-worthy even when it is
-            # stale.  It does not, by itself, decide where production Cindy's
-            # references belong.
-            roots.append(dedicated_root)
-
-        target_root: Path | None
-        production_profile = profile.root.name.casefold() in {"cindyglobal", "cindy"}
-        if production_profile and effective.config_dir_source in {"default", "environment"}:
-            # Production Cindy always uses Claude's ordinary default root.
-            # The inherited CLAUDE_CONFIG_DIR, when present, is the effective
-            # shared root.  A stale profile/claude-home must never steal refs.
-            target_root = effective.config_dir
-            if cc_references and not explicit_root:
-                roots.append(target_root)
-        elif production_profile and _path_identity(effective.config_dir) == _path_identity(default_root):
-            # An explicitly supplied literal default root is still uniquely
-            # attributable to production Cindy.
-            target_root = default_root
-        elif production_profile:
-            target_root = None
-            if cc_references:
-                reference_failures.append(
-                    CindyReferenceFailure(
-                        profile.database,
-                        profile.root,
-                        "AmbiguousStorageRoot",
-                        "Explicit Claude config root cannot be uniquely attributed to production Cindy",
-                    )
-                )
-        elif dedicated_exists:
-            target_root = dedicated_root
-        else:
-            target_root = None
-            if cc_references:
-                reference_failures.append(
-                    CindyReferenceFailure(
-                        profile.database,
-                        profile.root,
-                        "AmbiguousStorageRoot",
-                        "Cindy Claude references have no unique Claude config root",
-                    )
-                )
-
-        for failure in reference_catalog.failures:
-            if target_root is None:
-                reference_failures.append(failure)
-            else:
-                reference_failures.append(
-                    {
-                        **failure.to_dict(),
-                        "config_dir": str(target_root),
-                    }
-                )
-        if target_root is None:
-            continue
-        if explicit_root and _path_identity(target_root) != _path_identity(effective.config_dir):
-            # A user-limited single root must not be decorated with evidence
-            # belonging to another config directory.
-            continue
-        for reference in cc_references:
-            qualified = reference.to_dict()
-            qualified["claude_config_dir"] = str(target_root)
-            qualified_references.append(qualified)
-
-    unique_roots: list[Path] = []
-    seen_roots: set[str] = set()
-    for root in roots:
-        key = _path_identity(root)
-        if key not in seen_roots:
-            seen_roots.add(key)
-            unique_roots.append(root)
-    return build_claude_multi_root_catalog(
-        unique_roots,
-        frontend_references=qualified_references,
-        reference_errors=reference_failures,
-    )
+    return build_claude_catalog(args, builder)
 
 
 def _claude_catalog_payload(catalog: Any) -> dict[str, Any]:
@@ -3438,91 +3242,6 @@ def _emit_manual_delete_result(
     )
 
 
-def _run_legacy_index_restore(
-    args: argparse.Namespace,
-    *,
-    stdin: TextIO,
-    stdout: TextIO,
-    stderr: TextIO,
-) -> int:
-    codex_home = (args.codex_home or default_codex_home()).expanduser()
-    tty = (
-        not args.json
-        and bool(getattr(stdin, "isatty", lambda: False)())
-        and bool(getattr(stdout, "isatty", lambda: False)())
-    )
-    if not args.yes:
-        if args.json:
-            _write_json(
-                {
-                    "command": "restore-legacy-index",
-                    "confirmation_required": True,
-                    "codex_home": str(codex_home),
-                    "backup_id": str(args.backup_id),
-                },
-                stdout,
-            )
-            return EXIT_CONFIRMATION_REQUIRED
-        stdout.write(
-            "还原预览：\n"
-            "  Codex 数据目录："
-            f"{_display_value(codex_home, max_width=220)}\n"
-            "  备份 ID："
-            f"{_display_value(args.backup_id, max_width=None)}\n"
-            "  条件：当前索引哈希必须仍等于该备份记录的修复后哈希；"
-            "还原前会再创建一份备份。\n"
-        )
-        if not tty:
-            stdout.write(
-                "未做任何更改。关闭相关客户端后，使用同一命令加上 "
-                "--clients-closed --yes 执行。\n"
-            )
-            return EXIT_CONFIRMATION_REQUIRED
-        stdout.write(
-            "请输入“客户端已关闭并确认还原”继续，输入其他内容取消："
-        )
-        stdout.flush()
-        confirmation = stdin.readline()
-        if confirmation.strip() != "客户端已关闭并确认还原":
-            stdout.write("已取消；未做任何更改。\n")
-            return EXIT_OK
-    elif not args.clients_closed:
-        error = LegacyIndexError(
-            "--yes restore requires --clients-closed after all related clients are closed"
-        )
-        return _emit_legacy_index_error(
-            command="restore-legacy-index",
-            error=error,
-            action=None,
-            plan=None,
-            json_output=args.json,
-            stdout=stdout,
-            stderr=stderr,
-        )
-
-    try:
-        result = restore_legacy_index(
-            codex_home,
-            backup_id=args.backup_id,
-        )
-    except LegacyIndexError as exc:
-        return _emit_legacy_index_error(
-            command="restore-legacy-index",
-            error=exc,
-            action=None,
-            plan=None,
-            json_output=args.json,
-            stdout=stdout,
-            stderr=stderr,
-        )
-    _emit_legacy_restore_result(
-        result,
-        json_output=args.json,
-        stdout=stdout,
-    )
-    return EXIT_OK
-
-
 def _run_planned_cleanup(
     args: argparse.Namespace,
     *,
@@ -3669,6 +3388,7 @@ def _run_planned_cleanup(
             "repair_legacy_index",
             "remove_desktop_state",
             "remove_frontend_reference",
+            "remove_broken_relation",
             "keep",
         }
     ]
@@ -3753,6 +3473,7 @@ def _run_planned_cleanup(
             "repair_legacy_index",
             "remove_desktop_state",
             "remove_frontend_reference",
+            "remove_broken_relation",
         }
     ]
     mutation_kinds = {
@@ -3762,8 +3483,8 @@ def _run_planned_cleanup(
     if len(mutation_kinds) > 1:
         return _emit_action_selection_error(
             ActionSelectionError(
-                "原生 thread 删除、旧版聚合索引修复、Desktop 宿主残留"
-                "清理和前端引用清理不能混在同一执行中；"
+                "原生 thread 删除、旧版聚合索引清理、Desktop 宿主残留、"
+                "关系边和前端引用清理不能混在同一执行中；"
                 "请分别复核和执行。",
                 kind="mixed_mutation_kinds",
                 matches=[
@@ -3790,6 +3511,11 @@ def _run_planned_cleanup(
         action
         for action in mutation_actions
         if _enum_value(action.kind) == "remove_frontend_reference"
+    ]
+    relation_actions = [
+        action
+        for action in mutation_actions
+        if _enum_value(action.kind) == "remove_broken_relation"
     ]
     if len(legacy_actions) > 1:
         return _emit_action_selection_error(
@@ -3843,6 +3569,28 @@ def _run_planned_cleanup(
             stdout=stdout,
             stderr=stderr,
         )
+    if relation_actions and len(
+        {
+            path
+            for action in relation_actions
+            for path in getattr(
+                action.impact,
+                "relation_database_paths",
+                (),
+            )
+        }
+    ) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "一次关系边清理只能处理一个物理数据库；请按数据库分别执行。",
+                kind="multiple_relation_storages",
+                matches=[str(action.action_id) for action in relation_actions],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
     if not interactive:
         if not (args.json and args.yes and mutation_actions):
             _emit_plan_catalog(
@@ -3869,13 +3617,15 @@ def _run_planned_cleanup(
                 stdout.write("没有动作进入执行计划；未做任何更改。\n")
         return EXIT_OK
     if (
-        legacy_actions or desktop_actions or frontend_actions
+        legacy_actions or desktop_actions or frontend_actions or relation_actions
     ) and args.yes and not args.clients_closed:
         mutation_label = (
             "清理 Codex Desktop 宿主残留"
             if desktop_actions
             else "清理前端残留引用"
             if frontend_actions
+            else "清理无效关系边"
+            if relation_actions
             else "修复旧版聚合索引"
         )
         return _emit_action_selection_error(
@@ -3886,7 +3636,10 @@ def _run_planned_cleanup(
                 matches=[
                     str(action.action_id)
                     for action in (
-                        legacy_actions or desktop_actions or frontend_actions
+                        legacy_actions
+                        or desktop_actions
+                        or frontend_actions
+                        or relation_actions
                     )
                 ],
             ),
@@ -3900,14 +3653,16 @@ def _run_planned_cleanup(
             if legacy_actions:
                 stdout.write(
                     "\n请先关闭使用同一数据目录的 Codex、AionUI 和 Cindy。"
-                    "修复会创建可验证备份。请输入“客户端已关闭并确认修复”继续，"
+                    "修复期间会创建临时回滚副本，验证成功后立即删除。"
+                    "请输入“客户端已关闭并确认修复”继续，"
                     "输入其他内容取消："
                 )
                 required_confirmation = "客户端已关闭并确认修复"
             elif desktop_actions:
                 stdout.write(
                     "\n请先关闭使用同一数据目录的 Codex/ChatGPT Desktop、"
-                    "AionUI 和 Cindy。清理会创建可验证备份。请输入"
+                    "AionUI 和 Cindy。清理期间会创建临时回滚副本，"
+                    "验证成功后立即删除。请输入"
                     "“客户端已关闭并确认清理桌面残留”继续，输入其他内容取消："
                 )
                 required_confirmation = "客户端已关闭并确认清理桌面残留"
@@ -3918,6 +3673,13 @@ def _run_planned_cleanup(
                     "继续，输入其他内容取消："
                 )
                 required_confirmation = "客户端已关闭并确认清理前端引用"
+            elif relation_actions:
+                stdout.write(
+                    "\n请先关闭使用该数据目录的 Codex 客户端。清理只会移除"
+                    "已批准且指纹仍匹配的单条关系边。请输入"
+                    "“客户端已关闭并确认清理关系边”继续，输入其他内容取消："
+                )
+                required_confirmation = "客户端已关闭并确认清理关系边"
             else:
                 stdout.write(
                     "\n删除不可恢复。请输入“确认删除”继续，"
@@ -3949,6 +3711,12 @@ def _run_planned_cleanup(
                 elif frontend_actions:
                     stdout.write(
                         "未做任何更改。复核前端数据库、精确行/字段和计划指纹后，"
+                        "关闭相关客户端，再使用同一 action ID、计划指纹、"
+                        "--clients-closed 与 --yes 执行。\n"
+                    )
+                elif relation_actions:
+                    stdout.write(
+                        "未做任何更改。复核关系端点、状态、行指纹和计划指纹后，"
                         "关闭相关客户端，再使用同一 action ID、计划指纹、"
                         "--clients-closed 与 --yes 执行。\n"
                     )
@@ -4080,6 +3848,14 @@ def _run_planned_cleanup(
             stdout=stdout,
             stderr=stderr,
         )
+    except RelationCleanupError as exc:
+        return _emit_fatal_error(
+            "clean",
+            exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     if outcome.legacy_repair is not None:
         _emit_legacy_repair_result(
@@ -4101,7 +3877,7 @@ def _run_planned_cleanup(
                 f"{len(desktop_result.thread_ids)} 个 task，"
                 f"{desktop_result.deleted_catalog_rows} 条目录记录，"
                 f"{desktop_result.removed_global_state_references} 条精确 UI 引用。\n"
-                f"可验证备份：{desktop_result.backup_directory}\n"
+                "临时回滚副本已删除。\n"
             )
         return EXIT_OK
 
@@ -4113,6 +3889,18 @@ def _run_planned_cleanup(
             stdout.write(
                 "前端残留引用已精确清理："
                 f"{frontend_result.removed_reference_count} 条；"
+                "临时回滚副本已删除。\n"
+            )
+        return EXIT_OK
+
+    if outcome.relation_cleanup is not None:
+        relation_result = outcome.relation_cleanup
+        if args.json:
+            _write_json(outcome.audit_payload(), stdout)
+        else:
+            stdout.write(
+                "无效关系边已精确清理："
+                f"{relation_result.removed_relation_count} 条；"
                 "临时回滚副本已删除。\n"
             )
         return EXIT_OK
@@ -4268,6 +4056,27 @@ def _residual_delete_approval_is_narrow(
         details,
         STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
     )
+    relation_evidence = details.get("relation_evidence")
+    relation_expected = (
+        relation_evidence.get("expected")
+        if isinstance(relation_evidence, Mapping)
+        else None
+    )
+    exact_relation_writer = bool(
+        details.get("cleanable") is True
+        and details.get("direct_database_edit_supported") is True
+        and exact_blocker_codes(details)
+        and isinstance(relation_evidence, Mapping)
+        and relation_evidence.get("schema_version") == 1
+        and relation_evidence.get("table") == "thread_spawn_edges"
+        and isinstance(relation_evidence.get("schema_fingerprint"), str)
+        and isinstance(relation_evidence.get("row_fingerprint"), str)
+        and isinstance(relation_expected, Mapping)
+        and relation_expected.get("child_thread_id") == target_thread_id
+        and relation_expected.get("parent_thread_id")
+        == details.get("parent_thread_id")
+        and relation_expected.get("status") == details.get("edge_status")
+    )
     impact = action.impact
     has_exact_target_artifact = bool(
         impact.index_record_count or impact.rollout_file_count
@@ -4321,9 +4130,14 @@ def _residual_delete_approval_is_narrow(
             or bool(impact.rollout_file_count)
         )
         and details.get("thread_delete_supported") is False
-        and details.get("cleanable") is False
-        and details.get("direct_database_edit_supported") is False
-        and relation_only
+        and (
+            (
+                details.get("cleanable") is False
+                and details.get("direct_database_edit_supported") is False
+                and relation_only
+            )
+            or exact_relation_writer
+        )
         and (
             details.get("child_rollout_present") is True
             or details.get("child_index_missing") is False
@@ -5235,12 +5049,7 @@ def _emit_legacy_repair_result(
         f"{_display_value(action.action_id, max_width=None)}\n"
         "  文件："
         f"{_display_value(result.index_path, max_width=220)}\n"
-        "  备份 ID："
-        f"{_display_value(result.backup_id, max_width=None)}\n"
-        "  备份文件："
-        f"{_display_value(result.backup_path, max_width=220)}\n"
-        "  清单："
-        f"{_display_value(result.manifest_path, max_width=220)}\n"
+        "  临时回滚副本：验证成功后已删除\n"
     )
     stdout.write("  已移除的残留 ID：\n")
     for thread_id in result.removed_thread_ids:
@@ -5248,35 +5057,6 @@ def _emit_legacy_repair_result(
             "    - "
             f"{_display_value(thread_id, max_width=None)}\n"
         )
-
-
-def _emit_legacy_restore_result(
-    result: LegacyIndexRestoreResult,
-    *,
-    json_output: bool,
-    stdout: TextIO,
-) -> None:
-    if json_output:
-        _write_json(
-            {
-                "command": "restore-legacy-index",
-                "status": "restored",
-                "restore": result.to_dict(),
-            },
-            stdout,
-        )
-        return
-    stdout.write(
-        "旧版聚合索引已还原。\n"
-        "  文件："
-        f"{_display_value(result.index_path, max_width=220)}\n"
-        "  来源备份 ID："
-        f"{_display_value(result.source_backup_id, max_width=None)}\n"
-        "  还原前新备份 ID："
-        f"{_display_value(result.restore_backup_id, max_width=None)}\n"
-        "  还原前备份文件："
-        f"{_display_value(result.restore_backup_path, max_width=220)}\n"
-    )
 
 
 def _emit_planned_cleanup_result(

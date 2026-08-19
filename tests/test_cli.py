@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -90,6 +93,33 @@ class NumberSelectionTests(unittest.TestCase):
         purge_help = command_action.choices["purge"].format_help()
         self.assertIn("原生 Codex、Cindy 和 AionUI", purge_help)
         self.assertIn("--clients-closed", purge_help)
+
+    def test_module_help_uses_utf8_bytes_on_windows_redirects(self) -> None:
+        environment = os.environ.copy()
+        source_root = Path(__file__).resolve().parents[1] / "src"
+        existing = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            value for value in (str(source_root), existing) if value
+        )
+        environment["PYTHONIOENCODING"] = (
+            "gbk" if os.name == "nt" else "utf-8"
+        )
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "local_agent_record_janitor",
+                "--help",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rendered = completed.stdout.decode("utf-8", errors="strict")
+        self.assertIn("用法：", rendered)
+        self.assertIn("检查前端残留", rendered)
 
     def test_invalid_explicit_codex_binary_is_rejected_before_scan(
         self,
@@ -1169,7 +1199,7 @@ class MainFlowTests(unittest.TestCase):
                 / ".local-agent-record-janitor"
                 / "legacy-index-backups"
             )
-            self.assertTrue(any(backup_root.iterdir()))
+            self.assertFalse(backup_root.exists())
 
     def test_cindy_codex_home_override_keeps_all_sibling_namespace_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1443,7 +1473,7 @@ class MainFlowTests(unittest.TestCase):
             "approval_binding_required",
         )
 
-    def test_legacy_repair_and_restore_flow(self) -> None:
+    def test_legacy_repair_discards_temporary_backup_and_has_no_restore_command(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             codex_home = Path(root) / "codex-home"
             create_thread_index(codex_home, [])
@@ -1505,31 +1535,10 @@ class MainFlowTests(unittest.TestCase):
             repair_payload = json.loads(repair_output.getvalue())
             self.assertEqual(repair_payload["status"], "repaired")
             self.assertEqual(legacy_path.read_text(encoding="utf-8"), "")
-            backup_id = repair_payload["repair"]["backup_id"]
-
-            restore_output = StringIO()
-            restore_exit = main(
-                (
-                    "restore-legacy-index",
-                    "--json",
-                    "--yes",
-                    "--clients-closed",
-                    "--codex-home",
-                    str(codex_home),
-                    "--backup-id",
-                    backup_id,
-                ),
-                stdin=StringIO(),
-                stdout=restore_output,
-                stderr=StringIO(),
-            )
-            self.assertEqual(restore_exit, EXIT_OK)
-            restore_payload = json.loads(restore_output.getvalue())
-            self.assertEqual(restore_payload["status"], "restored")
-            self.assertEqual(
-                legacy_path.read_text(encoding="utf-8"),
-                original,
-            )
+            repair = repair_payload["repair"]
+            self.assertFalse(repair["temporary_backup_retained"])
+            self.assertFalse(Path(repair["backup_path"]).exists())
+            self.assertNotIn("restore-legacy-index", build_parser().format_help())
 
     def test_json_yes_without_selector_is_one_complete_document(self) -> None:
         output = StringIO()

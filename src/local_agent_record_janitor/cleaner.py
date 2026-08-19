@@ -635,8 +635,8 @@ def clean_findings(
     ``index_rollout_path_mismatch`` and ``residual_spawn_edge`` are
     recognized, and an exact ``expected_scopes`` entry for the same target is
     mandatory. This narrow authorization only removes those adapters'
-    built-in recoverability/manual-review or standalone-relation soft
-    blockers; all identity, ownership, live-reference, schema, quarantine and
+    built-in whole-record/manual-review or standalone-relation soft blockers;
+    all identity, ownership, live-reference, schema, manual-review and
     scope blockers remain enforced. It never edits a relationship directly.
     """
 
@@ -720,8 +720,8 @@ def cleanup_block_reason(
             )
         if details.get("needs_quarantine") is True:
             return (
-                "The finding requires quarantine/manual review; this release "
-                "never moves or removes artifacts directly."
+                "The finding requires manual identity review; keep it unless "
+                "the complete verified conversation is explicitly selected."
             )
         if (
             details.get("requires_explicit_selection") is True
@@ -1564,6 +1564,28 @@ def _without_integrity_soft_blockers(
         if finding_type == "residual_spawn_edge"
         else INTEGRITY_REVIEW_REQUIRED
     )
+    if finding_type == "residual_spawn_edge":
+        relation = sanitized.get("relation_evidence")
+        expected = relation.get("expected") if isinstance(relation, Mapping) else None
+        exact_writer_contract = bool(
+            sanitized.get("cleanable") is True
+            and sanitized.get("direct_database_edit_supported") is True
+            and not cleanup_blocker_codes(sanitized)
+            and isinstance(relation, Mapping)
+            and relation.get("schema_version") == 1
+            and relation.get("table") == "thread_spawn_edges"
+            and isinstance(relation.get("schema_fingerprint"), str)
+            and isinstance(relation.get("row_fingerprint"), str)
+            and isinstance(expected, Mapping)
+            and expected.get("child_thread_id")
+            == sanitized.get("child_thread_id")
+            and expected.get("parent_thread_id")
+            == sanitized.get("parent_thread_id")
+            and expected.get("status") == sanitized.get("edge_status")
+        )
+        if exact_writer_contract:
+            sanitized["thread_delete_supported"] = True
+            return sanitized
     if not exact_blocker_codes(sanitized, expected_code):
         return sanitized
 

@@ -101,6 +101,7 @@ class DesktopCleanupResult:
     removed_global_state_references: int
     backup_id: str
     backup_directory: Path
+    temporary_backup_retained: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +114,7 @@ class DesktopCleanupResult:
             ),
             "backup_id": self.backup_id,
             "backup_directory": str(self.backup_directory),
+            "temporary_backup_retained": self.temporary_backup_retained,
             "verification": {
                 "remaining_catalog_rows": 0,
                 "remaining_exact_global_state_references": 0,
@@ -338,14 +340,28 @@ def execute_desktop_state_cleanup(
                 f"Desktop cleanup failed ({exc}); automatic restore also failed "
                 f"({restore_error}). Backup: {backup_directory}"
             ) from exc
+        discard_error = _discard_backup(snapshot, backup_directory)
+        if discard_error is not None:
+            raise DesktopStateError(
+                f"Desktop cleanup failed ({exc}); all changed files were "
+                "restored, but the temporary rollback copy could not be "
+                f"removed ({discard_error}): {backup_directory}"
+            ) from exc
         if isinstance(exc, DesktopStateError):
             raise DesktopStateError(
-                f"{exc}; all changed Desktop files were restored from {backup_id}"
+                f"{exc}; all changed Desktop files were restored"
             ) from exc
         raise DesktopStateError(
             f"Desktop cleanup failed ({exc}); all changed Desktop files were "
-            f"restored from {backup_id}"
+            "restored"
         ) from exc
+
+    discard_error = _discard_backup(snapshot, backup_directory)
+    if discard_error is not None:
+        raise DesktopStateError(
+            "Desktop cleanup was verified, but its temporary rollback copy "
+            f"could not be removed ({discard_error}): {backup_directory}"
+        )
 
     return DesktopCleanupResult(
         codex_home=home,
@@ -354,6 +370,7 @@ def execute_desktop_state_cleanup(
         removed_global_state_references=removed_references,
         backup_id=backup_id,
         backup_directory=backup_directory,
+        temporary_backup_retained=False,
     )
 
 
@@ -988,6 +1005,30 @@ def _restore_backup(
             shutil.copy2(backup_directory / state_path.name, state_path)
     except Exception as exc:
         return str(exc)
+    return None
+
+
+def _discard_backup(
+    snapshot: DesktopStateSnapshot,
+    backup_directory: Path,
+) -> str | None:
+    expected_root = (
+        snapshot.codex_home
+        / ".local-agent-record-janitor"
+        / "desktop-state-backups"
+    )
+    try:
+        if backup_directory.parent.resolve(strict=True) != expected_root.resolve(
+            strict=True
+        ):
+            return "temporary backup escaped its expected directory"
+        shutil.rmtree(backup_directory)
+        try:
+            expected_root.rmdir()
+        except OSError:
+            pass
+    except Exception as exc:
+        return str(exc) or repr(exc)
     return None
 
 

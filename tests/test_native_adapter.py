@@ -689,8 +689,12 @@ class NativeIntegrityAdapterTests(unittest.TestCase):
         )
         residual = self.by_type(findings, "residual_spawn_edge")
         self.assertEqual(len(residual), 1)
-        self.assertFalse(residual[0].details["cleanable"])
+        self.assertTrue(residual[0].details["cleanable"])
         self.assertFalse(residual[0].details["thread_delete_supported"])
+        self.assertTrue(
+            residual[0].details["direct_database_edit_supported"]
+        )
+        self.assertIsInstance(residual[0].details["relation_evidence"], dict)
 
     def test_detects_spawn_edge_whose_child_endpoint_is_gone(self) -> None:
         parent_id = "healthy-parent"
@@ -716,7 +720,7 @@ class NativeIntegrityAdapterTests(unittest.TestCase):
         self.assertEqual(len(residuals), 1)
         self.assertTrue(residuals[0].details["child_index_missing"])
         self.assertTrue(residuals[0].has_codex_artifacts)
-        self.assertFalse(
+        self.assertTrue(
             residuals[0].details["direct_database_edit_supported"]
         )
 

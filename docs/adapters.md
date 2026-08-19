@@ -41,14 +41,19 @@ Finding 的 `details` 应包含平台状态、originator 证据和 adapter 判�
 details = {
     "thread_delete_supported": True,
     "cleanable": True,
-    "needs_quarantine": False,
+    "needs_quarantine": False,  # legacy compatibility: manual review needed
     "cleanup_blocked_reason": None,
 }
 ```
 
 这些字段描述的是“当前这条 Finding”而不是平台的永久能力。它们是计划生成器的证据输入，不会直接成为 CLI 删除目标。存在活跃引用、冲突证据或不完整关系时，应将 `cleanable` 设为 `False` 并给出阻断理由。
 
-Adapter 不负责决定最终风险或动作。核心层会按 `(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整关联任务范围，并生成 `delete_conversation`、修复、隔离、清除引用或 `keep` 等 CandidateAction。当前可执行整条对话删除；旧聚合索引可通过独立文件级修复器处理；核心还提供唯一、严格限定的 Codex Desktop 宿主状态修复器。第三方 frontend reference、其他修复和隔离动作仍只展示。
+Adapter 不负责决定最终风险或动作，也永远不直接写库。核心层会按
+`(storage_id, full_thread_id)` 聚合全部 Observation，枚举列表记录和内容文件，读取完整
+关联任务范围，并生成整条记录删除、精确关系边清理、精确 frontend reference 清理、
+旧索引/Desktop 残留清理或 `keep`。共享数据库写入由独立 writer 在重新验证 adapter
+提供的 schema、行定位和完整指纹后执行。`repair_index_path` 和
+`quarantine_artifacts` 不再生成；旧 `needs_quarantine` 字段只表示需要人工身份复核。
 
 ## 判定模板
 

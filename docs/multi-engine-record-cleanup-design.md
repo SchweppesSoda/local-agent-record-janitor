@@ -1,5 +1,9 @@
 # 多引擎本地 Agent 记录清理设计
 
+> 历史说明：本文是多引擎清单与选择性删除的实施基线。0.2.0 已把 Pi/Claude 纳入
+> 统一 CleanupService，并增加独立授权的 AionUI/Cindy 精确引用清理；当前安全边界以
+> [design.md](design.md) 为准。
+
 状态：实施基线
 
 ## 1. 目标

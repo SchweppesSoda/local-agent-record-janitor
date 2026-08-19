@@ -167,6 +167,8 @@ class ActionImpact:
     desktop_global_state_reference_count: int = 0
     desktop_database_paths: tuple[str, ...] = ()
     desktop_global_state_paths: tuple[str, ...] = ()
+    relation_database_paths: tuple[str, ...] = ()
+    relation_evidence: tuple[Mapping[str, Any], ...] = ()
     external_engine: str | None = None
     external_storage_root: str | None = None
     external_artifact_paths: tuple[str, ...] = ()
@@ -202,6 +204,10 @@ class ActionImpact:
             ),
             "desktop_database_paths": list(self.desktop_database_paths),
             "desktop_global_state_paths": list(self.desktop_global_state_paths),
+            "relation_database_paths": list(self.relation_database_paths),
+            "relation_evidence": [
+                _json_value(value) for value in self.relation_evidence
+            ],
             "external_engine": self.external_engine,
             "external_storage_root": self.external_storage_root,
             "external_artifact_count": len(self.external_artifact_paths),
@@ -255,6 +261,12 @@ class CandidateAction:
                 "target": self.target.to_dict(),
                 "storage_root": self.impact.external_storage_root,
                 "artifact_paths": list(self.impact.external_artifact_paths),
+            }
+        elif self.resource_kind == "relation":
+            resource = {
+                "kind": "relation",
+                "target": self.target.to_dict(),
+                "database_paths": list(self.impact.relation_database_paths),
             }
         elif self.resource_kind == "legacy_index":
             resource = {
@@ -1117,7 +1129,11 @@ def _candidate_actions(
     include_frontend_actions = (
         ActionKind.REMOVE_FRONTEND_REFERENCE in kinds
     )
+    include_relation_actions = (
+        ActionKind.REMOVE_BROKEN_RELATION in kinds
+    )
     kinds.discard(ActionKind.REMOVE_FRONTEND_REFERENCE)
+    kinds.discard(ActionKind.REMOVE_BROKEN_RELATION)
     if (
         any(
             observation.finding_type == "residual_spawn_edge"
@@ -1450,6 +1466,139 @@ def _candidate_actions(
                 unscoped_reason=unscoped_reason,
             )
         )
+    if include_relation_actions:
+        actions.extend(
+            _relation_actions(
+                target,
+                observations,
+                evidence,
+                unscoped_reason=unscoped_reason,
+            )
+        )
+    return actions
+
+
+def _relation_actions(
+    target: TargetRef,
+    observations: Sequence[Observation],
+    storage_evidence: _StorageEvidence,
+    *,
+    unscoped_reason: str | None,
+) -> list[CandidateAction]:
+    actions: list[CandidateAction] = []
+    for observation in observations:
+        if observation.finding_type != "residual_spawn_edge":
+            continue
+        raw = observation.details.get("relation_evidence")
+        relation = dict(raw) if isinstance(raw, Mapping) else None
+        database = (
+            str(relation.get("database") or "")
+            if relation is not None
+            else str(observation.platform_db or "")
+        )
+        expected = (
+            relation.get("expected")
+            if relation is not None
+            else None
+        )
+        parent_id = (
+            str(expected.get("parent_thread_id") or "")
+            if isinstance(expected, Mapping)
+            else str(observation.details.get("parent_thread_id") or "")
+        )
+        child_id = (
+            str(expected.get("child_thread_id") or "")
+            if isinstance(expected, Mapping)
+            else str(observation.details.get("child_thread_id") or "")
+        )
+        unavailable_reason = unscoped_reason
+        if unavailable_reason is None and storage_evidence.errors:
+            unavailable_reason = (
+                "Cleanup is blocked for this Codex data directory because "
+                "current state could not be read completely: "
+                + "; ".join(storage_evidence.errors)
+            )
+        if unavailable_reason is None and (
+            observation.details.get("cleanable") is not True
+            or observation.details.get("direct_database_edit_supported")
+            is not True
+        ):
+            unavailable_reason = str(
+                observation.details.get("cleanup_blocked_reason")
+                or "The residual relation is not approved for exact cleanup."
+            )
+        if unavailable_reason is None and (
+            relation is None
+            or relation.get("schema_version") != 1
+            or relation.get("table") != "thread_spawn_edges"
+            or not database
+            or not parent_id
+            or not child_id
+            or not isinstance(relation.get("schema_fingerprint"), str)
+            or not isinstance(relation.get("row_fingerprint"), str)
+        ):
+            unavailable_reason = (
+                "The residual relation lacks a complete schema and row fingerprint."
+            )
+        affected = tuple(
+            dict.fromkeys(
+                value
+                for value in (target.thread_id, parent_id, child_id)
+                if value
+            )
+        )
+        impact = ActionImpact(
+            affected_thread_ids=affected,
+            relation_database_paths=((database,) if database else ()),
+            relation_evidence=((relation,) if relation is not None else ()),
+        )
+        snapshot = _fingerprint(
+            {
+                "storage_path": normalize_storage_path(storage_evidence.path),
+                "observation_id": observation.observation_id,
+                "relation_evidence": relation,
+            }
+        )
+        action_id = (
+            f"{ActionKind.REMOVE_BROKEN_RELATION.value}-"
+            + hashlib.sha256(
+                json.dumps(
+                    {
+                        "storage_id": target.storage_id,
+                        "database": database,
+                        "parent": parent_id,
+                        "child": child_id,
+                        "row_fingerprint": (
+                            relation.get("row_fingerprint")
+                            if relation is not None
+                            else None
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        actions.append(
+            CandidateAction(
+                action_id=action_id,
+                kind=ActionKind.REMOVE_BROKEN_RELATION,
+                target=target,
+                risk=(
+                    RiskLevel.HIGH
+                    if unavailable_reason is None
+                    else RiskLevel.BLOCKED
+                ),
+                available=unavailable_reason is None,
+                unavailable_reason=unavailable_reason,
+                impact=impact,
+                snapshot_fingerprint=snapshot,
+                observation_ids=(observation.observation_id,),
+                requires_explicit_selection=True,
+                resource_kind="relation",
+            )
+        )
     return actions
 
 
@@ -1595,17 +1744,14 @@ def _action_kinds_for_observation(
     if finding_type == "rollout_missing_index":
         return {ActionKind.DELETE_CONVERSATION}
     if finding_type == "duplicate_rollout":
-        return {
-            ActionKind.QUARANTINE_ARTIFACTS,
-            ActionKind.DELETE_CONVERSATION,
-        }
+        return {ActionKind.DELETE_CONVERSATION}
     if finding_type == "index_rollout_path_mismatch":
-        return {
-            ActionKind.REPAIR_INDEX_PATH,
-            ActionKind.DELETE_CONVERSATION,
-        }
+        return {ActionKind.DELETE_CONVERSATION}
     if finding_type == "index_rollout_metadata_mismatch":
-        return {ActionKind.QUARANTINE_ARTIFACTS}
+        # Keep the target visible as a blocked whole-record decision.  The
+        # identity conflict prevents execution, but must not disappear from
+        # purge/status merely because path repair was removed from the product.
+        return {ActionKind.DELETE_CONVERSATION}
     if finding_type == "orphaned_subagent_thread":
         return {ActionKind.DELETE_CONVERSATION}
     if finding_type == "residual_spawn_edge":
@@ -1628,17 +1774,15 @@ def _action_kinds_for_observation(
 
 
 _UNIMPLEMENTED_REASONS = {
-    ActionKind.REMOVE_BROKEN_RELATION: (
-        "Removing an invalid conversation relation is not implemented; it "
-        "requires a verified database backup, schema check and transaction."
-    ),
     ActionKind.REPAIR_INDEX_PATH: (
-        "Repairing a conversation list path is not implemented; metadata "
-        "identity and a recoverable database backup must be revalidated."
+        "The legacy repair_index_path action kind is retained only for JSON "
+        "compatibility and is not offered. Keep the record or explicitly "
+        "delete the whole verified conversation."
     ),
     ActionKind.QUARANTINE_ARTIFACTS: (
-        "Artifact quarantine is not implemented; a recoverable quarantine "
-        "manifest and restore workflow are required."
+        "The legacy quarantine_artifacts action kind is retained only for "
+        "JSON compatibility and is not offered. Keep the record or explicitly "
+        "delete the whole verified conversation."
     ),
 }
 
@@ -1810,6 +1954,17 @@ def _unavailable_reason(
                 evidence,
             )
         )
+        residual_relation_separate = (
+            observation.finding_type == "residual_spawn_edge"
+            and _exact_relation_writer_contract(
+                details,
+                target_thread_id=target.thread_id,
+            )
+            and _target_has_exact_native_artifact(
+                observation.target,
+                evidence,
+            )
+        )
         integrity_soft_reason = (
             integrity_delete
             and observation.platform.lower() == "native"
@@ -1817,7 +1972,12 @@ def _unavailable_reason(
             and exact_blocker_codes(details, INTEGRITY_REVIEW_REQUIRED)
         )
         if explicit is not None or blocker_codes:
-            if cascade_only or residual_relation_only or integrity_soft_reason:
+            if (
+                cascade_only
+                or residual_relation_only
+                or residual_relation_separate
+                or integrity_soft_reason
+            ):
                 pass
             else:
                 return explicit or (
@@ -1825,7 +1985,10 @@ def _unavailable_reason(
                     + ", ".join(sorted(blocker_codes))
                 )
         capability_exception = (
-            cascade_only or residual_relation_only or integrity_soft_reason
+            cascade_only
+            or residual_relation_only
+            or residual_relation_separate
+            or integrity_soft_reason
         )
         if (
             capability_blocker is None
@@ -2197,7 +2360,7 @@ def _residual_delete_contract_issue(
         return "current child artifact state differs from the observation"
 
     edge_status = details.get("edge_status")
-    if not (
+    legacy_relation_contract = (
         isinstance(edge_status, str)
         and edge_status.lower() == "closed"
         and details.get("thread_delete_supported") is False
@@ -2207,11 +2370,40 @@ def _residual_delete_contract_issue(
             STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
         )
         and details.get("direct_database_edit_supported") is False
-    ):
+    )
+    writer_relation_contract = _exact_relation_writer_contract(
+        details,
+        target_thread_id=target.thread_id,
+    )
+    if not (legacy_relation_contract or writer_relation_contract):
         return "the edge or relation-only cleanup contract is not exact"
     if not _target_has_exact_native_artifact(target, evidence):
         return "no exact native child artifact is currently available"
     return None
+
+
+def _exact_relation_writer_contract(
+    details: Mapping[str, Any],
+    *,
+    target_thread_id: str,
+) -> bool:
+    evidence = details.get("relation_evidence")
+    expected = evidence.get("expected") if isinstance(evidence, Mapping) else None
+    return bool(
+        details.get("cleanable") is True
+        and details.get("direct_database_edit_supported") is True
+        and details.get("thread_delete_supported") is False
+        and not cleanup_blocker_codes(details)
+        and isinstance(evidence, Mapping)
+        and evidence.get("schema_version") == 1
+        and evidence.get("table") == "thread_spawn_edges"
+        and isinstance(evidence.get("schema_fingerprint"), str)
+        and isinstance(evidence.get("row_fingerprint"), str)
+        and isinstance(expected, Mapping)
+        and expected.get("child_thread_id") == target_thread_id
+        and expected.get("parent_thread_id") == details.get("parent_thread_id")
+        and expected.get("status") == details.get("edge_status")
+    )
 
 
 def _current_subagent_evidence(

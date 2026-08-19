@@ -15,15 +15,22 @@ from ..blocker_codes import (
     INTEGRITY_REVIEW_REQUIRED,
     LEGACY_INDEX_NOT_THREAD_TARGET,
     NO_NATIVE_ARTIFACT,
+    RELATION_EVIDENCE_INCOMPLETE,
+    RELATION_ROW_AMBIGUOUS,
     SOURCE_PARENT_UNVERIFIED,
     SPAWN_EDGE_OPEN,
-    STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
 )
 from ..codex_state import _read_rollout_meta
 from ..discovery import discover_path_codex
 from ..models import Finding, RolloutRecord
 from ..path_identity import canonical_existing_path_key
 from ..sqlite_utils import connect_readonly, table_exists
+from ..sqlite_identity import (
+    quote_identifier,
+    row_fingerprint,
+    schema_fingerprint,
+    table_schema,
+)
 from .base import FrontendAdapter
 
 
@@ -265,28 +272,93 @@ class NativeIntegrityAdapter(FrontendAdapter):
 
                 edges: list[dict[str, Any]] = []
                 if table_exists(connection, "thread_spawn_edges"):
-                    edge_columns = _table_columns(connection, "thread_spawn_edges")
+                    edge_schema = table_schema(
+                        connection,
+                        "thread_spawn_edges",
+                    )
+                    edge_columns = {
+                        str(item["name"]) for item in edge_schema
+                    }
                     required = {"parent_thread_id", "child_thread_id"}
-                    if required.issubset(edge_columns):
-                        status_projection = (
-                            "status" if "status" in edge_columns else "NULL AS status"
+                    missing = sorted(required - edge_columns)
+                    if missing:
+                        raise NativeIntegrityError(
+                            "Codex thread_spawn_edges table is missing required "
+                            f"column(s): {', '.join(missing)}"
                         )
-                        edge_rows = connection.execute(
-                            """
-                            SELECT parent_thread_id, child_thread_id,
-                                   %s
-                            FROM thread_spawn_edges
-                            """
-                            % status_projection
-                        ).fetchall()
-                        edges = [
-                            dict(row)
-                            for row in edge_rows
-                            if isinstance(row["parent_thread_id"], str)
-                            and row["parent_thread_id"]
-                            and isinstance(row["child_thread_id"], str)
-                            and row["child_thread_id"]
-                        ]
+                    ordered_columns = tuple(
+                        str(item["name"])
+                        for item in edge_schema
+                    )
+                    projection = ", ".join(
+                        quote_identifier(column)
+                        for column in ordered_columns
+                    )
+                    edge_rows = connection.execute(
+                        f"SELECT {projection} FROM thread_spawn_edges"
+                    ).fetchall()
+                    valid_rows = [
+                        row
+                        for row in edge_rows
+                        if isinstance(row["parent_thread_id"], str)
+                        and row["parent_thread_id"]
+                        and isinstance(row["child_thread_id"], str)
+                        and row["child_thread_id"]
+                    ]
+                    identities: dict[tuple[str, str, Any], int] = defaultdict(int)
+                    for row in valid_rows:
+                        identities[
+                            (
+                                row["parent_thread_id"],
+                                row["child_thread_id"],
+                                row["status"] if "status" in edge_columns else None,
+                            )
+                        ] += 1
+                    edge_schema_fingerprint = schema_fingerprint(edge_schema)
+                    for row in valid_rows:
+                        status = (
+                            row["status"] if "status" in edge_columns else None
+                        )
+                        identity = (
+                            row["parent_thread_id"],
+                            row["child_thread_id"],
+                            status,
+                        )
+                        unique = identities[identity] == 1
+                        edges.append(
+                            {
+                                "parent_thread_id": row["parent_thread_id"],
+                                "child_thread_id": row["child_thread_id"],
+                                "status": status,
+                                "relation_row_unique": unique,
+                                "relation_evidence": (
+                                    {
+                                        "schema_version": 1,
+                                        "database": str(self.database),
+                                        "table": "thread_spawn_edges",
+                                        "schema_fingerprint": (
+                                            edge_schema_fingerprint
+                                        ),
+                                        "columns": list(ordered_columns),
+                                        "row_fingerprint": row_fingerprint(
+                                            row,
+                                            ordered_columns,
+                                        ),
+                                        "expected": {
+                                            "parent_thread_id": row[
+                                                "parent_thread_id"
+                                            ],
+                                            "child_thread_id": row[
+                                                "child_thread_id"
+                                            ],
+                                            "status": status,
+                                        },
+                                    }
+                                    if unique
+                                    else None
+                                ),
+                            }
+                        )
         except NativeIntegrityError:
             raise
         except (OSError, sqlite3.Error) as exc:
@@ -741,6 +813,32 @@ class NativeIntegrityAdapter(FrontendAdapter):
             rollout = (
                 _preferred_rollout(child_records) if child_records else None
             )
+            relation_evidence = edge.get("relation_evidence")
+            edge_status = edge.get("status")
+            edge_open = (
+                isinstance(edge_status, str)
+                and edge_status.casefold() == "open"
+            )
+            safely_deletable = (
+                isinstance(relation_evidence, dict)
+                and edge.get("relation_row_unique") is True
+                and not edge_open
+            )
+            blocker_codes: list[str] = []
+            blocked_reasons: list[str] = []
+            if edge_open:
+                blocker_codes.append(SPAWN_EDGE_OPEN)
+                blocked_reasons.append("The residual spawn edge is still open.")
+            if edge.get("relation_row_unique") is not True:
+                blocker_codes.append(RELATION_ROW_AMBIGUOUS)
+                blocked_reasons.append(
+                    "The residual spawn edge does not identify exactly one row."
+                )
+            elif not isinstance(relation_evidence, dict):
+                blocker_codes.append(RELATION_EVIDENCE_INCOMPLETE)
+                blocked_reasons.append(
+                    "The residual spawn edge has no complete row fingerprint."
+                )
             findings.append(
                 self._finding(
                     platform_session_id=f"{parent_id}->{child_id}",
@@ -756,7 +854,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                         "finding_type": "residual_spawn_edge",
                         "parent_thread_id": parent_id,
                         "child_thread_id": child_id,
-                        "edge_status": edge.get("status"),
+                        "edge_status": edge_status,
                         "parent_index_missing": parent_index_missing,
                         "child_index_missing": child_index_missing,
                         "parent_rollout_present": parent_rollout_present,
@@ -766,20 +864,19 @@ class NativeIntegrityAdapter(FrontendAdapter):
                         "source_parent_ids": sorted(source_parents),
                         "source_conflict": source_conflict,
                         "subagent_evidence": sorted(set(evidence)),
-                        # There is no supported thread/delete target for a
-                        # dangling relationship itself.  Never mutate the DB.
+                        "relation_evidence": relation_evidence,
                         "thread_delete_supported": False,
                         "needs_quarantine": False,
-                        "cleanable": False,
+                        "cleanable": safely_deletable,
+                        "requires_explicit_selection": safely_deletable,
                         "cleanup_blocked_reason": (
-                            "thread/delete does not expose a standalone spawn-edge "
-                            "cleanup operation."
+                            None
+                            if safely_deletable
+                            else " ".join(blocked_reasons)
                         ),
-                        "cleanup_blocker_codes": [
-                            STANDALONE_RELATION_CLEANUP_UNAVAILABLE
-                        ],
-                        "manual_review_required": True,
-                        "direct_database_edit_supported": False,
+                        "cleanup_blocker_codes": sorted(set(blocker_codes)),
+                        "manual_review_required": not safely_deletable,
+                        "direct_database_edit_supported": safely_deletable,
                         "diagnostic_artifact_present": True,
                     },
                 )

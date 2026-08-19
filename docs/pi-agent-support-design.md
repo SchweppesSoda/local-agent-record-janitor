@@ -51,7 +51,9 @@ Pi 的相对 `sessionDir` 依照上游 settings manager 相对于本次调用的
 
 操作者须控制 Pi session root 且在删除前关闭 Pi；本地恶意进程能在枚举和删除间替换文件时，任何纯用户态工具都无法完全消除风险。实现以目录边界、普通文件与 reparse/symlink 拒绝、精确 canonical path、header ID、`stat`/内容指纹和执行前再读取降低该风险。发现变化、损坏 header、越界路径、重复/歧义 selector 或读取失败一律停止。
 
-删除是不可恢复的。UI 应反复说明只删除一份批准 JSONL、不修改 auth/settings（settings 仅只读解析 `sessionDir`），但该 JSONL 可能含聊天正文。建议先备份整个 session root；输出也不得泄露正文。
+删除是不可恢复的。UI 应反复说明只删除一份批准 JSONL、不修改 auth/settings（settings
+仅只读解析 `sessionDir`），但该 JSONL 可能含聊天正文。Janitor 不为它创建备份，输出
+也不得泄露正文。
 
 ## 验收矩阵
 

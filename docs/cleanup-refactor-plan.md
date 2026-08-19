@@ -1,242 +1,84 @@
-# 清理功能重构方案
+# 0.2.0 清理核心重构
 
-## 1. 目标
+状态：已实施，等待发布矩阵验收。
 
-清理功能不再把扫描结果简单分成“可清理”和“只读报告”，而是明确区分：
+## 目标
 
-1. **发现的问题（Observation）**：当前数据为什么不一致。
-2. **操作目标（Target）**：哪个 Codex 数据目录中的哪条对话、文件或关系记录。
-3. **候选动作（Action）**：删除整条对话、修复记录、隔离文件、清除残留引用或保留。
-4. **影响范围（Impact）**：将影响多少列表记录、内容文件和关联任务对话。
-5. **执行计划（Plan）**：用户明确选择并确认的动作集合。
-6. **执行结果（Result）**：已清理、未清理、部分清理或无法确认。
+项目只负责：
 
-所有扫描结果都可以在交互界面中被选中和查看，但只有目标、范围和验证方式均明确的动作才可以执行。
+> 找出失效或用户明确选择的本地 Agent 记录，展示精确影响，永久删除，然后确认删干净。
 
-## 2. 用户用语
+非目标包括数据恢复平台、长期备份库、rollout 隔离区、路径修复器，以及根据不完整
+证据自动推测关联关系。重复 rollout 或路径错位只允许保留，或删除整条记录和全部已
+批准副本。旧的 `repair_index_path`、`quarantine_artifacts` 枚举仅用于读取旧 JSON，
+不会出现在新计划中。
 
-人类输出统一使用以下词语：
+## 架构结果
 
-| 内部术语 | 用户用语 |
+```text
+Driver → StoreSnapshot → Planner → AuthorizedAction → Guard → Executor → Verifier
+```
+
+- 人类 CLI 与 Agent CLI 共用唯一 `CleanupService`；
+- `StorageRef/RecordRef/Evidence/Action/GuardToken/Result` 明确分离身份、证据、
+  授权和结果；
+- 一份计划只授权一个物理存储和一种 mutation family；
+- blocker code 和类型化状态决定是否允许执行，自由文本只负责显示；
+- `ClientInspector` 按可执行文件、进程关系和物理 store 归属判断，未知才 fail closed。
+
+## 已实施动作
+
+| Mutation family | 精确语义 |
 |---|---|
-| thread | 对话 |
-| rollout | 对话内容文件 |
-| threads/index row | 对话列表记录 |
-| 旧版内部关系称呼 | 由该对话创建的关联任务对话 |
-| Codex home/store | Codex 数据目录 / 保存位置 |
-| spawn edge | 对话关联记录 |
+| `delete_conversation` | 官方 `thread/delete`，同批单 app-server；仅对严格匹配的 API 残留 rollout 做受限清除 |
+| `remove_broken_relation` | 删除 parent、child、status、schema 与行指纹完全匹配的一条关系边 |
+| `repair_legacy_index` | 兼容 action kind；实际只删除已证明失效的原始索引整行 |
+| `remove_desktop_state` | 删除精确 local catalog 行和结构化 UI 引用 |
+| `remove_frontend_reference` | AionUI 精确行删除；Cindy 精确字段清理 |
+| `delete_pi_session` | 删除一份 storage-qualified Pi JSONL |
+| `delete_claude_session` | 删除一份批准的 Claude manifest |
 
-技术术语和完整路径只出现在详情及 JSON 输出中。
+AionUI 无主键旧 schema 只接受重验证的 `rowid + 完整行指纹`。Cindy 当前引用只清空
+`sdk_session_id`；历史引用只移除绑定消息 ID 和内容哈希的
+`agent_switch.fromSdkSessionId`，其他 JSON 字段和消息行保持不变。
 
-## 3. 身份与存储位置
+## 回滚与 operation 生命周期
 
-一条操作目标的稳定身份必须是：
+- 会话、独立 rollout、Pi JSONL 和 Claude manifest 永久删除，不创建备份；
+- 共享 SQLite、旧索引与 Desktop JSON 使用临时回滚副本；
+- 成功写入或成功自动回滚后立即删除副本；
+- partial、unknown 或回滚失败时暂时保留，等待 verify；
+- 结果未知时保留详细 journal；
+- 已知终态压缩成无正文最小回执，最长保留七天；
+- 没有公开 recover/restore 命令。
 
-```text
-(storage_id, full_thread_id, action_kind)
-```
+## 性能约束
 
-其中 `storage_id` 根据规范化后的 Codex 数据目录生成。相同 `thread_id` 出现在不同目录时必须显示为不同目标，不得静默合并。
+`plan` 一次完整快照；`apply` 一次完整预检、N 次 action-local guard 和一次完整终检。
+同一 Codex 删除批次只启动一个 app-server。发现漂移后停止剩余动作，不重新扫描整个
+store。100 个 action 的性能测试必须固定为两次 full scan。
 
-每个存储位置至少包含：
+## 分阶段提交
 
-- 稳定 `storage_id`；
-- 用户可读标签，例如“Codex 默认数据目录”“Cindy 专用数据目录”；
-- 规范化绝对路径；
-- 可选 Codex 可执行文件提示；
-- 扫描状态及只影响该位置的错误。
+1. 基线稳定：修正 store 归属、blocker code、测试与匿名指标；
+2. 统一类型和服务：引入 typed core 与 `CleanupService`，保留兼容 facade；
+3. Codex 执行路径：合并重复编排、单 app-server、定点 guard、逐 action 状态；
+4. 前端引用：AionUI/Cindy 精确写入器与回滚测试；
+5. Pi/Claude：接入统一计划和 operation 状态并保持 storage 隔离；
+6. 旧架构收口：精确关系写入器、最小回执、临时备份生命周期、依赖方向测试、
+   文档与版本 0.2.0。
 
-## 4. 领域模型
+每个阶段是独立提交并要求当时测试全绿，可单独回滚。
 
-第一阶段新增独立的计划模块，保留现有 `Finding` 作为 adapter 证据格式，避免一次性重写所有 adapter。
+## 发布验收
 
-建议的核心类型：
-
-```text
-StorageLocation
-TargetRef
-Observation
-CandidateAction
-ActionImpact
-CleanupPlan
-PlannedAction
-ActionResult
-```
-
-`Finding.details.cleanable` 和 `thread_delete_supported` 在兼容期仍可读取，但不能继续作为 CLI 的唯一分区依据。计划生成器负责根据所有 Observation、已知内容文件、列表记录、关联关系、活跃引用和扫描错误决定动作是否可执行。
-
-### 4.1 动作类型
-
-至少定义：
-
-- `delete_conversation`：通过官方 `thread/delete` 永久删除整条对话。
-- `remove_broken_relation`：清除明确无效的对话关联记录。
-- `repair_index_path`：把列表记录修复到唯一且 metadata 匹配的实际内容文件。
-- `quarantine_artifacts`：把身份明确但官方接口未完全处理的文件移入可恢复隔离区。
-- `remove_frontend_reference`：清除 AionUI/Cindy 的无效映射或残留记录。
-- `keep`：不改变数据。
-
-第一阶段允许仅实现 `delete_conversation` 的执行器，但其他动作必须进入结构化候选动作和 JSON，而不是继续显示为笼统的“不可清理”。未实现的动作应带明确的 `unavailable_reason`。
-
-### 4.2 风险级别
-
-- `low`：没有可恢复聊天内容，例如只有列表记录、内容已经不存在。
-- `review`：仍有聊天内容，但前端已经删除或关系明确孤立。
-- `high`：内容文件不在列表中、重复文件、路径错位或需要内部记录修复。
-- `blocked`：身份冲突、影响范围无法计算、相关位置无法读取或状态已经变化。
-
-“全部选择”只能包含 `low` 动作。其余动作必须逐项选择。
-
-## 5. 问题到动作的映射
-
-| 问题 | 候选动作 | 执行要求 |
-|---|---|---|
-| 前端已删除，Codex 对话仍存在 | 删除整条对话；清除前端残留引用 | 分开选择；仍有内容时为 `review` |
-| 列表记录存在，内容文件不存在 | 删除无效对话记录 | 可通过 `thread/delete`，`low` |
-| 内容文件存在，列表记录不存在 | 保留、恢复或删除整条对话 | 删除为 `high`，逐项确认 |
-| 同一对话发现多份内容文件 | 隔离重复文件或删除整条对话 | 必须枚举全部同 ID 文件并验证 |
-| 列表路径与实际文件路径不一致 | 修复路径或删除整条对话 | metadata 必须属于同一 ID |
-| 列表路径指向其他对话的文件 | 隔离/人工处理 | 身份冲突时禁止删除 |
-| 孤立的关联任务对话 | 删除该对话 | 显示它创建的其他关联任务对话 |
-| 无效对话关联记录 | 清除关联记录；或删除记录指向且仍存在的子对话 | 单独清除关系尚未实现；若子对话身份、来源和精确范围均可验证，可逐项选择 `high` 风险整条删除 |
-| 同一 ID 位于多个数据目录 | 每个目录分别提供动作 | 用户可选择一个或多个目录 |
-| 无法自动判断数据目录 | 先由用户明确数据目录，再重新生成动作 | 使用公开的 `--codex-home PATH`，不得猜测目录 |
-| 只剩前端残留记录 | 清除前端残留引用 | 不生成虚假的 Codex 删除目标 |
-| 旧版聚合索引残留 | 修复旧索引 | 作为独立文件资源逐行清点；不能把聚合 Finding 当作 thread ID，需客户端关闭、计划指纹、锁和持久备份 |
-
-## 6. 计划生成
-
-计划生成器必须：
-
-1. 将原始 Findings 按 `(storage_id, thread_id)` 聚合，但保留全部 Observation。
-2. 收集活动及归档目录中的全部同 ID 内容文件。
-3. 读取完整的关联任务闭包；表存在但结构不兼容时必须报错，不能当作“没有关联任务”。
-4. 把仍被任何前端活跃引用的对话及其上游删除目标标为阻止执行。
-5. 将扫描失败限制在受影响的数据目录和依赖范围，不能无条件阻止其他独立目录。
-6. 为每个动作生成稳定 action ID 和快照指纹。
-7. 构建 storage-qualified 的会话摘要目录，展示名称、项目、完整 cwd、父对话和子代理身份。
-8. 计算并展示根对话及所有会被连带删除的关联任务对话，而不只统计根目标。
-
-快照指纹至少覆盖：
-
-- 数据目录；
-- 完整 thread ID；
-- Finding 类型集合；
-- 当前列表存在状态；
-- 已知内容文件规范化路径集合；
-- 当前内容文件的身份、来源和文件状态指纹；
-- 会话名称、项目目录、父子代理身份及其原始元数据证据哈希；
-- 已知关联任务 thread ID 集合；
-- 活跃引用状态。
-
-## 7. 交互流程
-
-默认交互流程：
-
-1. 扫描并按数据目录显示问题。
-2. 每条问题显示编号、问题、保存位置、仍存在的数据和可选动作。
-3. 用户输入编号或范围，例如 `1,3-5`。
-4. 对存在多个动作的目标继续选择具体动作。
-5. 展示最终计划：
-   - 删除目标；
-   - 保存位置；
-   - 列表记录数量；
-   - 内容文件数量；
-   - 将一同删除的关联任务对话数量及 ID；
-   - 前端残留是否保留。
-6. 删除前重新扫描并比较指纹。
-7. 计划发生变化则停止并重新展示。
-8. 用户输入明确确认词后执行。
-
-交互界面的临时编号只能在同一个进程和同一次扫描中使用。自动化必须使用完整 action ID 或计划 JSON，不能把编号保存后再次解析。
-
-兼容现有参数：
-
-- `scan` 仍保持只读。
-- `--thread-id` 仍支持完整 ID 或唯一前缀，但跨数据目录匹配多条时拒绝。
-- `--yes` 只跳过最终确认，不能跳过显式目标选择、删除前重验证和范围检查。
-- 无选择器的非交互执行不得默认删除所有 `review/high` 动作。
-
-## 8. 执行与验证
-
-`delete_conversation` 执行器必须：
-
-1. 按数据目录分组，使用匹配的 Codex executable 和环境启动 app-server。
-2. 执行前重新读取关联任务闭包、列表记录、内容文件路径和文件状态指纹，并与计划完全比较。
-3. 对每个根目标逐条调用 `thread/delete`。
-4. 收集 `thread/deleted` 通知（若有），但通知不能替代磁盘及列表验证。
-5. 无论请求返回成功、协议错误还是超时，都执行删除后验证。
-6. 验证所有已知活动/归档内容文件、列表记录及计划中的额外路径。
-7. 输出：
-   - `deleted`：所有已知目标和关联任务均不存在；
-   - `not_deleted`：明确仍然完整存在；
-   - `partial`：部分目标已消失、部分仍存在；
-   - `unknown`：无法完成验证。
-
-请求错误但验证证明数据已经全部消失时，结果应为 `deleted`，同时保留请求警告。不能简单报告失败。
-
-## 9. 内部修复安全边界
-
-直接修复 SQLite、旧索引或移动内容文件必须与普通对话删除分离，并满足：
-
-- 用户逐项选择；
-- 相关前端/Codex 进程已关闭；
-- schema 和目标行重新校验；
-- 使用 SQLite backup API 或文件级可恢复备份；
-- 在事务中执行；
-- 严格检查受影响行数；
-- 执行后重新读取验证；
-- 写入本地审计清单；
-- 支持从隔离区恢复文件。
-
-在这些保护实现并测试前，候选动作可以显示，但执行状态必须明确为未实现，不能退化为未经验证的直接删除。
-
-## 10. 实现拆分
-
-### 工作包 A：领域模型与计划生成
-
-文件边界：
-
-- 新增 `planning.py`；
-- 必要时扩展 `models.py`；
-- 新增 `tests/test_planning.py`；
-- 不修改 CLI 和执行器。
-
-验收重点：多目录身份、观察聚合、问题动作映射、风险级别、稳定 action ID、影响范围及快照指纹。
-
-### 工作包 B：执行安全
-
-文件边界：
-
-- `cleaner.py`；
-- `codex_state.py`；
-- `codex_app_server.py`（仅必要接口）；
-- 新增 `tests/test_cleaner.py`，扩展 `tests/test_codex_state.py`；
-- 不修改 CLI 和计划模块。
-
-验收重点：不兼容关系 schema fail closed、删除错误后仍验证、部分/未知结果、关联任务范围漂移时停止。
-
-### 工作包 C：CLI 选择与输出
-
-文件边界：
-
-- `cli.py`；
-- 新增 `tests/test_cli.py`；
-- 不修改 adapter、计划模块和执行器。
-
-验收重点：分类展示、编号/范围解析、跨目录歧义、只批量选择低风险项、明确关联任务文案、非交互安全性。
-
-## 11. 发布验收
-
-合并前必须证明：
-
-- 现有 adapter 测试全部通过；
-- 新增 planning、cleaner、CLI 测试；
-- 相同 thread ID 位于两个目录时不会扩大删除范围；
-- 关系表结构不兼容时不能显示“关联任务 0 条”并继续删除；
-- 请求超时但实际已删除时，经验证报告 `deleted`；
-- 只删除一部分时报告 `partial`；
-- 扫描一个独立数据目录失败不会无条件阻止另一个目录；
-- 无选择器的无人值守命令不会删除仍有内容的高风险目标；
-- 人类输出只使用“由该对话创建的关联任务对话”等清楚表述；
-- JSON 保留完整目录、完整 thread ID、action ID、风险、影响和阻断理由。
+- Windows、macOS、Linux × Python 3.10/3.12 测试矩阵通过；
+- 默认单元测试不读取真实宿主进程；
+- 所有确定且精确的问题有删除动作，不确定项只返回明确 blocker；
+- AionUI/Cindy 只改变批准行或字段；
+- 100 个 action 的 apply 只有两次完整扫描；
+- 崩溃/超时后的未知动作不会重复发送；
+- 成功后没有长期备份、隔离文件或完整 journal；
+- 新扫描显示真实零目标或剩余未授权目标；
+- 计划、回执和输出不含聊天正文；
+- Windows 中文输出和既有 PowerShell/CMD/sh 调用方式继续有效。

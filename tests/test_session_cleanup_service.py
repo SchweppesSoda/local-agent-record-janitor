@@ -141,9 +141,9 @@ class SessionCleanupServiceTests(unittest.TestCase):
         self.assertEqual(document["counts"]["artifact_count"], 1)
         self.assertNotIn("SECRET_SELECTED_PI", plan_path.read_text(encoding="utf-8"))
 
-        from local_agent_record_janitor import cli as cli_module
+        from local_agent_record_janitor import session_catalog_factory
 
-        original_builder = cli_module._build_pi_catalog
+        original_builder = session_catalog_factory.build_pi_catalog
         full_scans = 0
 
         def counted_builder(*args: object, **kwargs: object) -> object:
@@ -151,7 +151,11 @@ class SessionCleanupServiceTests(unittest.TestCase):
             full_scans += 1
             return original_builder(*args, **kwargs)
 
-        with patch.object(cli_module, "_build_pi_catalog", side_effect=counted_builder):
+        with patch.object(
+            session_catalog_factory,
+            "build_pi_catalog",
+            side_effect=counted_builder,
+        ):
             code, result, rendered = self.invoke(
                 [
                     "agent",
@@ -181,7 +185,10 @@ class SessionCleanupServiceTests(unittest.TestCase):
             / "operations"
             / operation_id
         )
-        self.assertTrue((operation / "result.json").is_file())
+        self.assertEqual(
+            {path.name for path in operation.iterdir()},
+            {"receipt.json"},
+        )
         self.assertFalse((sessions / ".local-agent-record-janitor").exists())
         for path in operation.iterdir():
             if path.is_file():

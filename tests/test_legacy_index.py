@@ -234,7 +234,7 @@ class LegacyIndexTests(unittest.TestCase):
                         inventory_legacy_index(self.codex_home)
                 sidecar.unlink(missing_ok=True)
 
-    def test_repair_removes_only_approved_residual_lines_and_restores(self) -> None:
+    def test_repair_removes_only_approved_lines_and_discards_rollback_copy(self) -> None:
         raw = (
             b'{"id":"live","thread_name":"first"}\r\n'
             b"not json\n"
@@ -258,36 +258,10 @@ class LegacyIndexTests(unittest.TestCase):
         self.assertEqual(index.read_bytes(), expected)
         self.assertEqual(result.removed_thread_ids, ("gone",))
         self.assertEqual(result.removed_line_count, 2)
-        self.assertEqual(result.backup_path.read_bytes(), raw)
-        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["state"], "prepared")
-        self.assertEqual(manifest["operation"], "repair")
-        self.assertEqual(manifest["original_sha256"], hashlib.sha256(raw).hexdigest())
-        self.assertEqual(manifest["new_sha256"], hashlib.sha256(expected).hexdigest())
-
-        restored = restore_legacy_index(
-            self.codex_home,
-            backup_id=result.backup_id,
-        )
-        self.assertEqual(index.read_bytes(), raw)
-        self.assertEqual(restored.source_backup_id, result.backup_id)
-        self.assertEqual(restored.restore_backup_path.read_bytes(), expected)
-        restore_manifest = json.loads(
-            restored.restore_backup_path.with_name("manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        self.assertEqual(restore_manifest["operation"], "restore")
-        self.assertEqual(restore_manifest["source_backup_id"], result.backup_id)
-
-        # The restore operation's own pre-restore backup makes restore
-        # reversible without weakening the current-hash guard.
-        undo = restore_legacy_index(
-            self.codex_home,
-            backup_id=restored.restore_backup_id,
-        )
-        self.assertEqual(index.read_bytes(), expected)
-        self.assertEqual(undo.restored_sha256, hashlib.sha256(expected).hexdigest())
+        self.assertFalse(result.temporary_backup_retained)
+        self.assertFalse(result.backup_path.exists())
+        self.assertFalse(result.manifest_path.exists())
+        self.assertFalse(result.backup_path.parent.exists())
 
     def test_snapshot_drift_blocks_before_backup_or_replacement(self) -> None:
         original = b'{"id":"gone"}\n'
@@ -317,7 +291,7 @@ class LegacyIndexTests(unittest.TestCase):
                 approved_snapshot_fingerprint="",
             )
 
-    def test_restore_refuses_to_overwrite_subsequent_changes(self) -> None:
+    def test_successful_repair_backup_is_not_available_for_restore(self) -> None:
         self._write_index(b'{"id":"gone"}\n')
         approved = inventory_legacy_index(self.codex_home)
         repaired = repair_legacy_index(
@@ -327,7 +301,7 @@ class LegacyIndexTests(unittest.TestCase):
         changed = b'{"id":"new-live"}\n'
         (self.codex_home / "session_index.jsonl").write_bytes(changed)
 
-        with self.assertRaises(LegacyIndexSnapshotMismatch):
+        with self.assertRaises(LegacyIndexSafetyError):
             restore_legacy_index(self.codex_home, backup_id=repaired.backup_id)
 
         self.assertEqual(
@@ -338,25 +312,16 @@ class LegacyIndexTests(unittest.TestCase):
         with self.assertRaises(LegacyIndexManifestError):
             restore_legacy_index(self.codex_home, backup_id="../outside")
 
-    def test_tampered_manifest_or_backup_is_rejected(self) -> None:
+    def test_successful_repair_leaves_no_manifest_or_backup_payload(self) -> None:
         self._write_index(b'{"id":"gone"}\n')
         approved = inventory_legacy_index(self.codex_home)
         repaired = repair_legacy_index(
             self.codex_home,
             approved_snapshot_fingerprint=approved.snapshot_fingerprint,
         )
-        manifest_bytes = repaired.manifest_path.read_bytes()
-
-        manifest = json.loads(manifest_bytes)
-        manifest["storage_path"] = "different-storage"
-        repaired.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        with self.assertRaises(LegacyIndexManifestError):
-            restore_legacy_index(self.codex_home, backup_id=repaired.backup_id)
-
-        repaired.manifest_path.write_bytes(manifest_bytes)
-        repaired.backup_path.write_bytes(b"tampered")
-        with self.assertRaises(LegacyIndexManifestError):
-            restore_legacy_index(self.codex_home, backup_id=repaired.backup_id)
+        self.assertFalse(repaired.manifest_path.exists())
+        self.assertFalse(repaired.backup_path.exists())
+        self.assertFalse(repaired.temporary_backup_retained)
 
     def test_all_rollout_first_line_failures_block_residual_proof(self) -> None:
         cases = {

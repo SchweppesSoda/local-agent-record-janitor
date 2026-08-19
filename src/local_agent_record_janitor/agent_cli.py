@@ -275,6 +275,11 @@ def _run_plan(
     cleanup_service: CleanupService,
 ) -> int:
     operation_id = new_operation_id()
+    output_path = (
+        Path(args.out).expanduser()
+        if args.out is not None
+        else _default_plan_path(operation_id)
+    )
     try:
         context = _scan_context(
             args,
@@ -309,7 +314,7 @@ def _run_plan(
             scan_options=scan_options,
             additional_blockers=context.get("selection_blockers", ()),
         )
-        write_new_json(Path(args.out).expanduser(), document)
+        write_new_json(output_path, document)
         _write_document(
             {
                 "schema_version": "larj.agent-plan-summary.v1",
@@ -321,7 +326,7 @@ def _run_plan(
                 "operation": "purge",
                 "operation_id": operation_id,
                 "plan_sha256": document["plan_sha256"],
-                "plan_path": str(Path(args.out).expanduser().resolve()),
+                "plan_path": str(output_path.resolve()),
                 "authorization_required": bool(selected_actions),
                 "mutation_kind": mutation_kind,
                 "selected_action_ids": [
@@ -349,7 +354,7 @@ def _run_plan(
                 "blockers": [
                     structured_blocker(
                         "plan_output_exists"
-                        if Path(args.out).expanduser().exists()
+                        if output_path.exists()
                         else "plan_write_failed",
                         scope="plan_file",
                         retryable=False,
@@ -362,6 +367,24 @@ def _run_plan(
             stdout,
         )
         return EXIT_UNKNOWN
+
+
+def _default_plan_path(operation_id: str) -> Path:
+    """Return a per-user state path, never the current project directory."""
+
+    if os.name == "nt":
+        root = Path(
+            os.environ.get("LOCALAPPDATA")
+            or (Path.home() / "AppData" / "Local")
+        )
+    else:
+        configured = os.environ.get("XDG_STATE_HOME")
+        root = (
+            Path(configured).expanduser()
+            if configured
+            else Path.home() / ".local" / "state"
+        )
+    return root / "local-agent-record-janitor" / "plans" / f"{operation_id}.json"
 
 
 def _run_apply(
@@ -412,6 +435,10 @@ def _run_apply(
     store = OperationStore(target_home, operation_id)
     try:
         store.accept_plan(plan)
+        if store.lock_exists():
+            raise OperationLockedError(
+                "Operation apply lock already exists; status is unknown"
+            )
         existing_result = store.read_result()
         if existing_result is not None:
             _write_document(existing_result, stdout)
@@ -745,7 +772,7 @@ def _apply_locked(
                 "blockers": preflight_blockers,
             }
         )
-        store.write_result(result)
+        _persist_operation_result(store, result)
         _write_document(result, stdout)
         return _exit_for_result(result)
 
@@ -842,7 +869,7 @@ def _apply_locked(
         store.append_event(
             {"event": "operation_finished", "goal_status": goal}
         )
-        store.write_result(result)
+        _persist_operation_result(store, result)
         _write_document(result, stdout)
         return _exit_for_result(result)
 
@@ -1061,7 +1088,7 @@ def _apply_locked(
             "execution_result": execution_result,
         }
     )
-    store.write_result(result)
+    _persist_operation_result(store, result)
     _write_document(result, stdout)
     return _exit_for_result(result)
 
@@ -1070,8 +1097,14 @@ def _run_status(args: argparse.Namespace, stdout: TextIO) -> int:
     try:
         store = OperationStore(_status_home(args), str(args.operation_id))
         if store.lock_exists():
-            plan = store.read_plan()
-            state = store.read_state() or {}
+            try:
+                plan = store.read_plan()
+            except OperationStoreError:
+                plan = {}
+            try:
+                state = store.read_state() or {}
+            except OperationStoreError:
+                state = {}
             document = result_document(
                 subcommand="status",
                 operation_id=store.operation_id,
@@ -1152,6 +1185,14 @@ def _run_verify(
     store: OperationStore | None = None
     try:
         store = OperationStore(_status_home(args), str(args.operation_id))
+        if not store.lock_exists():
+            existing = store.read_result()
+            if existing is not None and existing.get("compacted") is True:
+                document = dict(existing)
+                document["source_subcommand"] = document.get("subcommand")
+                document["subcommand"] = "verify"
+                _write_document(document, stdout)
+                return _exit_for_result(document)
         with store.mutation_lock():
             plan = store.read_plan()
             state = store.read_state() or {}
@@ -1257,7 +1298,7 @@ def _run_verify(
                     ),
                 }
             )
-            store.write_result(result)
+            _persist_operation_result(store, result)
             _write_document(result, stdout)
             return _exit_for_result(result)
     except Exception as exc:
@@ -1293,6 +1334,17 @@ def _run_verify(
         return EXIT_UNKNOWN
 
 
+def _persist_operation_result(
+    store: OperationStore,
+    result: Mapping[str, Any],
+) -> None:
+    """Persist recovery detail only while an outcome remains unknown."""
+
+    store.write_result(result)
+    if str(result.get("goal_status") or "") != "unknown":
+        store.compact_completed(result)
+
+
 def _scan_context(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
@@ -1309,13 +1361,16 @@ def _scan_context(
                 "Pi/Claude Agent operations must target exactly one engine."
             )
         engine = next(iter(session_platforms))
-        from .cli import _build_claude_catalog, _build_pi_catalog
+        from .session_catalog_factory import (
+            build_claude_catalog,
+            build_pi_catalog,
+        )
         from .session_cleanup import select_session_context
 
         if engine == "pi":
-            catalog_builder = lambda: _build_pi_catalog(args)
+            catalog_builder = lambda: build_pi_catalog(args)
         else:
-            catalog_builder = lambda: _build_claude_catalog(args)
+            catalog_builder = lambda: build_claude_catalog(args)
         catalog = catalog_builder()
         target_root = _session_target_root(args, engine, catalog)
         prepared = cleanup_service.prepare_session_catalog(
@@ -1613,14 +1668,22 @@ def _next_frozen_batch(actions: Sequence[Any]) -> tuple[str | None, list[Any]]:
             continue
         if family == "repair_legacy_index":
             matches = [min(matches, key=lambda value: str(value.action_id))]
-        if family == "remove_frontend_reference":
+        if family in {
+            "remove_frontend_reference",
+            "remove_broken_relation",
+        }:
             by_database: dict[str, list[Any]] = {}
             for action in matches:
+                attribute = (
+                    "frontend_database_paths"
+                    if family == "remove_frontend_reference"
+                    else "relation_database_paths"
+                )
                 paths = tuple(
                     str(value)
                     for value in getattr(
                         action.impact,
-                        "frontend_database_paths",
+                        attribute,
                         (),
                     )
                 )

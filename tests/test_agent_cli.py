@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from local_agent_record_janitor.codex_desktop_state import DesktopStateError
 from local_agent_record_janitor.operation_store import (
     OperationStore,
     OperationStoreError,
+    _receipt_sha256,
     plan_sha256,
 )
 
@@ -380,6 +382,31 @@ class AgentCliTests(unittest.TestCase):
                 parsed = parser.parse_args(example)
                 self.assertEqual(parsed.command, "agent")
 
+    def test_agent_plan_defaults_to_user_state_directory(self) -> None:
+        state_root = self.root / "user-state"
+        environment = (
+            {"LOCALAPPDATA": str(state_root)}
+            if os.name == "nt"
+            else {"XDG_STATE_HOME": str(state_root)}
+        )
+        with patch.dict(os.environ, environment, clear=False):
+            code, summary, _ = self.invoke(
+                (
+                    "agent",
+                    "plan",
+                    "--platform",
+                    "native",
+                    "--codex-home",
+                    str(self.codex_home),
+                )
+            )
+
+        self.assertEqual(code, 0)
+        path = Path(summary["plan_path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent, state_root / "local-agent-record-janitor" / "plans")
+        self.assertNotEqual(path.parent, Path.cwd())
+
     def test_apply_requires_hash_and_clients_closed_without_mutation(self) -> None:
         plan_path, document, rollout = self.make_plan()
 
@@ -485,19 +512,19 @@ class AgentCliTests(unittest.TestCase):
             / "operations"
             / operation_id
         )
-        for name in ("plan.json", "events.jsonl", "state.json", "result.json"):
-            self.assertTrue((operation_dir / name).is_file())
-            self.assertNotIn(
-                "SECRET_CHAT_BODY_7f9030",
-                (operation_dir / name).read_text(encoding="utf-8"),
-            )
-        sequences = [
-            json.loads(line)["sequence"]
-            for line in (operation_dir / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        self.assertEqual(sequences, list(range(1, len(sequences) + 1)))
+        self.assertEqual(
+            {path.name for path in operation_dir.iterdir()},
+            {"receipt.json"},
+        )
+        receipt_path = operation_dir / "receipt.json"
+        self.assertLess(receipt_path.stat().st_size, 8192)
+        receipt_text = receipt_path.read_text(encoding="utf-8")
+        self.assertNotIn("SECRET_CHAT_BODY_7f9030", receipt_text)
+        self.assertNotIn("execution_result", receipt_text)
+        receipt = json.loads(receipt_text)
+        self.assertEqual(receipt["schema_version"], "larj.agent-receipt.v1")
+        self.assertEqual(receipt["goal_status"], "complete")
+        self.assertEqual(len(receipt["action_statuses"]), 1)
 
     def test_verify_resolves_unknown_without_resending_mutation(self) -> None:
         thread_id = "agent-unknown"
@@ -524,6 +551,14 @@ class AgentCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["goal_status"], "unknown")
         self.assertEqual(server.deleted_thread_ids, [thread_id])
+        unknown_files = {
+            path.name for path in self.operation_directory(document).iterdir()
+        }
+        self.assertTrue(
+            {"plan.json", "events.jsonl", "state.json", "result.json"}
+            <= unknown_files
+        )
+        self.assertNotIn("receipt.json", unknown_files)
 
         code, repeated, _ = self.invoke(argv, server=server)
         self.assertEqual(code, 1)
@@ -544,6 +579,58 @@ class AgentCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(verified["goal_status"], "complete")
         self.assertEqual(server.deleted_thread_ids, [thread_id])
+        self.assertEqual(
+            {
+                path.name
+                for path in self.operation_directory(document).iterdir()
+            },
+            {"receipt.json"},
+        )
+
+    def test_expired_minimal_receipt_is_removed_non_recursively(self) -> None:
+        plan_path, document, rollout = self.make_plan("expired-receipt")
+        server = _MutatingServer(lambda _thread_id: rollout.unlink())
+        code, _result, _ = self.invoke(
+            (
+                "agent",
+                "apply",
+                "--plan",
+                str(plan_path),
+                "--authorized-plan-sha256",
+                str(document["plan_sha256"]),
+                "--clients-closed",
+                "--verify-timeout",
+                "0",
+            ),
+            server=server,
+        )
+        self.assertEqual(code, 0)
+        operation = self.operation_directory(document)
+        receipt_path = operation / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        now = datetime.now(timezone.utc)
+        receipt["completed_at"] = (now - timedelta(days=8)).isoformat()
+        receipt["receipt_expires_at"] = (now - timedelta(days=1)).isoformat()
+        receipt["receipt_sha256"] = _receipt_sha256(receipt)
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+        code, status, _ = self.invoke(
+            (
+                "agent",
+                "status",
+                "--operation-id",
+                str(document["operation_id"]),
+                "--codex-home",
+                str(self.codex_home),
+            )
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            status["blockers"][0]["blocker_code"],
+            "operation_not_found",
+        )
+        self.assertFalse(operation.exists())
 
     def test_agent_argument_errors_are_one_json_document_and_never_exit_two(
         self,
@@ -598,7 +685,7 @@ class AgentCliTests(unittest.TestCase):
             1,
         )
 
-    def test_legacy_agent_result_and_event_retain_backup_evidence(self) -> None:
+    def test_legacy_agent_discards_temporary_backup_and_compacts_receipt(self) -> None:
         (self.codex_home / "session_index.jsonl").write_text(
             json.dumps({"id": "legacy-backup-target"}) + "\n",
             encoding="utf-8",
@@ -640,19 +727,14 @@ class AgentCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         repair = result["execution_result"]["repair"]
         self.assertTrue(repair["backup_id"])
-        self.assertTrue(Path(repair["backup_path"]).is_file())
-        events = [
-            json.loads(line)
-            for line in (
-                self.operation_directory(document) / "events.jsonl"
-            ).read_text(encoding="utf-8").splitlines()
-        ]
+        self.assertFalse(Path(repair["backup_path"]).exists())
+        self.assertFalse(repair["temporary_backup_retained"])
         self.assertEqual(
-            events[-1]["execution_result"]["repair"]["backup_id"],
-            repair["backup_id"],
+            {path.name for path in self.operation_directory(document).iterdir()},
+            {"receipt.json"},
         )
 
-    def test_desktop_agent_result_and_event_retain_backup_evidence(self) -> None:
+    def test_desktop_agent_discards_temporary_backup_and_compacts_receipt(self) -> None:
         thread_id = "desktop-backup-target"
         self.install_desktop_orphan(thread_id)
         plan_path = self.root / "desktop-plan.json"
@@ -680,16 +762,11 @@ class AgentCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         cleanup = result["execution_result"]["result"]
         self.assertTrue(cleanup["backup_id"])
-        self.assertTrue(Path(cleanup["backup_directory"]).is_dir())
-        events = [
-            json.loads(line)
-            for line in (
-                self.operation_directory(document) / "events.jsonl"
-            ).read_text(encoding="utf-8").splitlines()
-        ]
+        self.assertFalse(Path(cleanup["backup_directory"]).exists())
+        self.assertFalse(cleanup["temporary_backup_retained"])
         self.assertEqual(
-            events[-1]["execution_result"]["result"]["backup_id"],
-            cleanup["backup_id"],
+            {path.name for path in self.operation_directory(document).iterdir()},
+            {"receipt.json"},
         )
 
     def test_forged_result_cannot_make_status_or_apply_complete(self) -> None:
@@ -708,8 +785,8 @@ class AgentCliTests(unittest.TestCase):
         )
         code, _result, _ = self.invoke(apply_argv, server=server)
         self.assertEqual(code, 0)
-        result_path = self.operation_directory(document) / "result.json"
-        result_path.write_text(
+        receipt_path = self.operation_directory(document) / "receipt.json"
+        receipt_path.write_text(
             json.dumps({"goal_status": "complete"}),
             encoding="utf-8",
         )
@@ -733,14 +810,21 @@ class AgentCliTests(unittest.TestCase):
 
     def test_state_cannot_contradict_durable_mutation_event(self) -> None:
         plan_path, document, rollout = self.make_plan("forged-state")
-        server = _MutatingServer(lambda _thread_id: rollout.unlink())
+
+        class TimeoutServer(_MutatingServer):
+            def delete_thread(self, current_id: str) -> None:
+                self.deleted_thread_ids.append(current_id)
+                raise TimeoutError("ambiguous request outcome")
+
+        server = TimeoutServer(lambda _thread_id: None)
         apply_argv = (
             "agent", "apply", "--plan", str(plan_path),
             "--authorized-plan-sha256", str(document["plan_sha256"]),
             "--clients-closed", "--verify-timeout", "0",
         )
         code, _result, _ = self.invoke(apply_argv, server=server)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
+        self.assertTrue(rollout.is_file())
         operation_directory = self.operation_directory(document)
         (operation_directory / "result.json").unlink()
         state_path = operation_directory / "state.json"
@@ -776,7 +860,7 @@ class AgentCliTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         operation_directory = self.operation_directory(document)
-        result_path = operation_directory / "result.json"
+        result_path = operation_directory / "receipt.json"
         trusted_result = result_path.read_bytes()
         (operation_directory / "apply.lock").write_text("{}\n", encoding="utf-8")
 
@@ -1023,6 +1107,9 @@ class AgentCliTests(unittest.TestCase):
         self.assertEqual(full_scan_calls, 2)
         self.assertEqual(len(server.deleted_thread_ids), 100)
         self.assertEqual(server.enter_count, 1)
+        receipt = self.operation_directory(document) / "receipt.json"
+        self.assertTrue(receipt.is_file())
+        self.assertLess(receipt.stat().st_size, 16384)
 
     def test_five_roots_and_132_descendants_count_as_137_threads(self) -> None:
         descendant_counts = (27, 27, 26, 26, 26)

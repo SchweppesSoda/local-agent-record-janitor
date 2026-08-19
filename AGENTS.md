@@ -9,11 +9,13 @@ software agents. Use it instead of driving the human `clean`/`purge` prompts.
    ChatGPT Desktop, use `--platform native` and the official native
    `CODEX_HOME`; do not substitute a Cindy or AionUI store.
 2. Run `agent doctor` and resolve every structured blocker.
-3. Run `agent plan --operation purge --out ...`. A plan authorizes at most one
-   immutable mutation batch. Review its target, counts, blockers, root actions,
-   affected thread IDs, and `plan_sha256` without reading or exposing chat
-   bodies. Treat an empty plan as a snapshot only; `apply` still re-scans the
-   complete target before reporting success.
+3. Run `agent plan --operation purge`. A plan authorizes at most one immutable
+   mutation batch for one physical store and one mutation family. Review its
+   target, counts, blockers, root actions, affected thread IDs, and
+   `plan_sha256` without reading or exposing chat bodies. `--out` is optional;
+   without it, use the returned `plan_path` in the user state directory. Treat
+   an empty plan as a snapshot only; `apply` still re-scans the complete target
+   before reporting success.
 4. Call `agent apply` only when the cleanup is within the user's authorization
    and the clients for that exact store are closed. Pass the plan's exact
    `plan_sha256`; never invent or assume `--clients-closed`.
@@ -31,8 +33,7 @@ local-agent-record-janitor agent doctor `
   --platform native --codex-home 'D:\exact\CODEX_HOME'
 
 local-agent-record-janitor agent plan --operation purge `
-  --platform native --codex-home 'D:\exact\CODEX_HOME' `
-  --out '.\janitor-plan.json'
+  --platform native --codex-home 'D:\exact\CODEX_HOME'
 
 local-agent-record-janitor agent apply `
   --plan '.\janitor-plan.json' `
@@ -58,4 +59,14 @@ All agent subcommands emit JSON only and never read stdin. Exit codes are:
 Operation evidence is stored under
 `<CODEX_HOME>/.local-agent-record-janitor/operations/<operation-id>/`. Do not
 delete an `apply.lock`, edit a plan, or repair an operation journal in place.
-See `docs/agent-automation.md` for the JSON and recovery contract.
+An `unknown` result retains the detailed recovery evidence. A known terminal
+result is compacted to a body-free `receipt.json`; the receipt expires after at
+most seven days and must never be treated as a backup. See
+`docs/agent-automation.md` for the JSON and verification contract.
+
+Shared SQLite/JSON mutations use temporary rollback copies only. Exact frontend
+reference and relation-edge actions require a closed owning client, a supported
+schema, immutable row evidence, an exact affected-row count, and post-write
+verification. Successful verification deletes the temporary copy immediately.
+Never offer `repair_index_path` or `quarantine_artifacts`: keep the record, or
+delete the whole verified record and every approved copy.
