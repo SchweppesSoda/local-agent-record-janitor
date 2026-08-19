@@ -203,7 +203,12 @@ class OperationStore:
         atomic_write_json(self.state_path, dict(state))
         self._assert_safe()
 
-    def append_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
+    def append_event(
+        self,
+        event: Mapping[str, Any],
+        *,
+        state_updates: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self._assert_safe()
         current_state = self.read_state() or {}
         plan = self.read_plan()
@@ -236,6 +241,8 @@ class OperationStore:
             raise OperationStoreError(
                 f"Could not append operation event: {exc}"
             ) from exc
+        if state_updates is not None:
+            current_state.update(dict(state_updates))
         current_state["next_event_sequence"] = sequence + 1
         current_state["updated_at"] = utc_now()
         self.write_state(current_state)

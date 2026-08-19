@@ -13,6 +13,7 @@ from typing import Any, TextIO
 
 from .adapters import AionUIAdapter, CindyAdapter
 from .adapters.base import FrontendAdapter
+from .adapter_factory import create_default_adapters as _create_default_adapters
 from .blocker_codes import (
     STANDALONE_RELATION_CLEANUP_UNAVAILABLE,
     exact_blocker_codes,
@@ -36,7 +37,7 @@ from .cleaner import (
     select_findings,
 )
 from .codex_app_server import CodexAppServer
-from .codex_desktop_state import ClientInspector
+from .codex_desktop_state import ClientInspector, DesktopStateError
 from .conversation_metadata import (
     read_conversation_summaries,
     read_legacy_thread_names,
@@ -51,6 +52,7 @@ from .discovery import (
 from .models import Finding
 from .path_identity import canonical_existing_path_key
 from .rendering import safe_single_line
+from .execution import ExecutionError
 from .legacy_index import (
     LegacyIndexError,
     LegacyIndexOperationError,
@@ -882,69 +884,7 @@ def _add_common_arguments(
 
 
 def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
-    appdata = (args.appdata or default_appdata()).expanduser()
-    native_codex_home = (args.codex_home or default_codex_home()).expanduser()
-    codex_bin = args.codex_bin.expanduser() if args.codex_bin else None
-    selected = _selected_platforms(args.platform)
-    adapters: list[FrontendAdapter] = []
-
-    if "aionui" in selected:
-        aionui_home = args.aionui_codex_home or native_codex_home
-        aionui_databases = (
-            (args.aionui_db,)
-            if args.aionui_db is not None
-            else discover_aionui_databases(appdata)
-        )
-        if not aionui_databases:
-            # Keep a missing current path visible as an inventory diagnostic.
-            aionui_databases = (appdata / "AionUi" / "aionui" / "aionui.db",)
-        for aionui_db in aionui_databases:
-            adapters.append(
-                AionUIAdapter(
-                    database=aionui_db,
-                    codex_home=aionui_home,
-                    codex_bin_hint=codex_bin,
-                )
-            )
-
-    if "cindy" in selected:
-        cindy_profiles = resolve_cindy_profiles(
-            appdata,
-            root=args.cindy_root,
-            database=args.cindy_db,
-            codex_home=args.cindy_codex_home,
-        )
-        if not cindy_profiles:
-            root = appdata / "CindyGlobal"
-            cindy_profiles = resolve_cindy_profiles(
-                appdata,
-                root=root,
-                codex_home=root / "codex-home",
-            )
-        for profile in cindy_profiles:
-            adapters.append(
-                CindyAdapter(
-                    database=profile.database,
-                    codex_home=profile.codex_home,
-                    cindy_root=profile.root,
-                    codex_bin_hint=codex_bin,
-                )
-            )
-
-    if "native" in selected:
-        try:
-            from .adapters import NativeIntegrityAdapter
-        except ImportError as exc:
-            raise RuntimeError(
-                "The native integrity adapter is unavailable in this build"
-            ) from exc
-        adapters.append(
-            NativeIntegrityAdapter(
-                codex_home=native_codex_home,
-                codex_bin_hint=codex_bin,
-            )
-        )
-    return adapters
+    return _create_default_adapters(args)
 
 
 def main(
@@ -3974,132 +3914,68 @@ def _run_planned_cleanup(
             stderr=stderr,
         )
 
-    fresh_legacy_actions = [
-        action
-        for action in fresh_actions
-        if _enum_value(action.kind) == "repair_legacy_index"
-    ]
-    if fresh_legacy_actions:
-        action = fresh_legacy_actions[0]
-        storage = next(
-            (
-                current
-                for current in revalidated_plan.storages
-                if str(current.storage_id)
-                == str(action.target.storage_id)
+    try:
+        outcome = service.execute(
+            revalidated_context,
+            fresh_actions,
+            timeout=args.timeout,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+            # Keep these compatibility seams while third-party callers and
+            # tests migrate to the shared execution module.
+            finding_mapper=_findings_for_actions,
+            integrity_approval_builder=_integrity_delete_approvals,
+            desktop_fingerprint_resolver=(
+                _desktop_state_snapshot_fingerprint
             ),
-            None,
+            cleaner=clean_findings,
         )
-        if storage is None:
-            return _emit_action_selection_error(
-                ActionSelectionError(
-                    "无法把旧版索引修复动作映射回其数据目录，已停止执行。",
-                    kind="evidence_changed",
-                    matches=[str(action.action_id)],
-                ),
-                plan=revalidated_plan,
-                json_output=args.json,
-                stdout=stdout,
-                stderr=stderr,
-            )
-        try:
-            repair_result = repair_legacy_index(
-                Path(storage.path),
-                approved_snapshot_fingerprint=(
-                    action.snapshot_fingerprint
-                ),
-            )
-        except LegacyIndexError as exc:
-            return _emit_legacy_index_error(
-                command="clean",
-                error=exc,
-                action=action,
-                plan=revalidated_plan,
-                json_output=args.json,
-                stdout=stdout,
-                stderr=stderr,
-            )
-        _emit_legacy_repair_result(
-            repair_result,
+    except ExecutionError as exc:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                str(exc),
+                kind=exc.kind,
+                matches=list(exc.matches),
+            ),
+            plan=revalidated_plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except LegacyIndexError as exc:
+        action = fresh_actions[0] if fresh_actions else None
+        return _emit_legacy_index_error(
+            command="clean",
+            error=exc,
             action=action,
+            plan=revalidated_plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except DesktopStateError as exc:
+        return _emit_fatal_error(
+            "clean",
+            exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    if outcome.legacy_repair is not None:
+        _emit_legacy_repair_result(
+            outcome.legacy_repair,
+            action=fresh_actions[0],
             plan=revalidated_plan,
             json_output=args.json,
             stdout=stdout,
         )
         return EXIT_OK
 
-    fresh_desktop_actions = [
-        action
-        for action in fresh_actions
-        if _enum_value(action.kind) == "remove_desktop_state"
-    ]
-    if fresh_desktop_actions:
-        from .codex_desktop_state import (
-            DesktopStateError,
-            execute_desktop_state_cleanup,
-        )
-
-        storage_id = str(fresh_desktop_actions[0].target.storage_id)
-        storage = next(
-            (
-                current
-                for current in revalidated_plan.storages
-                if str(current.storage_id) == storage_id
-            ),
-            None,
-        )
-        if storage is None:
-            return _emit_action_selection_error(
-                ActionSelectionError(
-                    "无法把 Desktop 宿主残留动作映射回其数据目录，已停止执行。",
-                    kind="evidence_changed",
-                    matches=[
-                        str(action.action_id)
-                        for action in fresh_desktop_actions
-                    ],
-                ),
-                plan=revalidated_plan,
-                json_output=args.json,
-                stdout=stdout,
-                stderr=stderr,
-            )
-        try:
-            approved_desktop_snapshots = {
-                str(action.target.thread_id): (
-                    _desktop_state_snapshot_fingerprint(
-                        action,
-                        revalidated_plan,
-                    )
-                )
-                for action in fresh_desktop_actions
-            }
-            desktop_result = execute_desktop_state_cleanup(
-                Path(storage.path),
-                approved_desktop_snapshots,
-                client_inspector=service.client_inspector,
-            )
-        except (ActionSelectionError, DesktopStateError) as exc:
-            return _emit_fatal_error(
-                "clean",
-                exc,
-                json_output=args.json,
-                stdout=stdout,
-                stderr=stderr,
-            )
+    if outcome.desktop_cleanup is not None:
+        desktop_result = outcome.desktop_cleanup
         if args.json:
-            _write_json(
-                {
-                    "command": "clean",
-                    "mutation_kind": "remove_desktop_state",
-                    "selected_action_ids": [
-                        str(action.action_id)
-                        for action in fresh_desktop_actions
-                    ],
-                    "result": desktop_result.to_dict(),
-                    "plan_fingerprint": revalidated_plan.plan_fingerprint,
-                },
-                stdout,
-            )
+            _write_json(outcome.audit_payload(), stdout)
         else:
             stdout.write(
                 "Codex Desktop 宿主残留已清理："
@@ -4110,117 +3986,8 @@ def _run_planned_cleanup(
             )
         return EXIT_OK
 
-    selected_findings = _findings_for_actions(
-        fresh_actions,
-        revalidated_plan,
-        revalidated_report.findings,
-    )
-    if len(selected_findings) != len(fresh_actions):
-        return _emit_action_selection_error(
-            ActionSelectionError(
-                "无法把重新验证的动作唯一映射回扫描证据，已停止执行。",
-                kind="evidence_changed",
-            ),
-            plan=revalidated_plan,
-            json_output=args.json,
-            stdout=stdout,
-            stderr=stderr,
-        )
-    expected_scopes = {
-        finding_key(finding): ExpectedDeletionScope(
-            descendant_thread_ids=tuple(
-                action.impact.descendant_thread_ids
-            ),
-            indexed_thread_ids=tuple(
-                getattr(action.impact, "indexed_thread_ids", ())
-            ),
-            rollout_paths=tuple(action.impact.rollout_paths),
-            rollout_state_fingerprints=tuple(
-                action.impact.rollout_state_fingerprints
-            ),
-            conversation_metadata_fingerprints=(
-                tuple(raw_metadata_fingerprints)
-                if (
-                    raw_metadata_fingerprints := getattr(
-                        action.impact,
-                        "conversation_metadata_fingerprints",
-                        None,
-                    )
-                )
-                is not None
-                else None
-            ),
-        )
-        for finding, action in zip(selected_findings, fresh_actions, strict=True)
-    }
-    approved_integrity_deletes = _integrity_delete_approvals(
-        selected_findings,
-        fresh_actions,
-        revalidated_plan,
-    )
-    expected_actions_by_id = {
-        str(action.action_id): action
-        for action in fresh_actions
-    }
-
-    def validate_live_references_before_delete(finding: Finding) -> None:
-        latest_adapters = (
-            list(adapter_builder())
-            if adapter_builder is not None
-            else active_adapters
-        )
-        latest_context = service.prepare(
-            latest_adapters,
-            platforms=args.platform,
-            adapter_builder=adapter_builder,
-        )
-        latest_plan = latest_context.plan
-        expected_action = next(
-            (
-                action
-                for action in expected_actions_by_id.values()
-                if str(action.target.thread_id) == finding.thread_id
-                and next(
-                    (
-                        normalize_storage_path(storage.path)
-                        for storage in revalidated_plan.storages
-                        if str(storage.storage_id)
-                        == str(action.target.storage_id)
-                    ),
-                    "",
-                )
-                == normalize_storage_path(finding.codex_home)
-            ),
-            None,
-        )
-        if expected_action is None:
-            raise RuntimeError(
-                "the selected target could not be rebound to live guard evidence"
-            )
-        latest = {
-            str(action.action_id): action
-            for action in latest_plan.actions
-        }.get(str(expected_action.action_id))
-        if (
-            latest is None
-            or not latest.available
-            or latest.snapshot_fingerprint
-            != expected_action.snapshot_fingerprint
-        ):
-            raise RuntimeError(
-                "frontend/native evidence changed after app-server startup"
-            )
-
-    cleanup_report = clean_findings(
-        selected_findings,
-        timeout=args.timeout,
-        app_server_factory=app_server_factory,
-        binary_resolver=binary_resolver,
-        explicit_selection=True,
-        expected_scopes=expected_scopes,
-        approved_integrity_deletes=approved_integrity_deletes,
-        pre_delete_validator=validate_live_references_before_delete,
-    )
+    cleanup_report = outcome.cleanup_report
+    assert cleanup_report is not None
     _emit_planned_cleanup_result(
         cleanup_report,
         selected_actions=fresh_actions,

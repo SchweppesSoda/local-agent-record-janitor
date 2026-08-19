@@ -15,6 +15,8 @@ from unittest.mock import patch
 from local_agent_record_janitor.adapters.native import NativeIntegrityAdapter
 from local_agent_record_janitor.agent_cli import _verify_with_retry
 from local_agent_record_janitor.agent_operations import plan_counts
+from local_agent_record_janitor.cleaner import scan_adapters
+from local_agent_record_janitor.cleanup_service import CleanupService
 from local_agent_record_janitor.cli import build_parser, main
 from local_agent_record_janitor.codex_desktop_state import DesktopStateError
 from local_agent_record_janitor.operation_store import (
@@ -38,8 +40,10 @@ class _MutatingServer:
     def __init__(self, callback: object) -> None:
         self.callback = callback
         self.deleted_thread_ids: list[str] = []
+        self.enter_count = 0
 
     def __enter__(self) -> _MutatingServer:
+        self.enter_count += 1
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -66,6 +70,7 @@ class AgentCliTests(unittest.TestCase):
         *,
         server: _MutatingServer | None = None,
         client_probe: tuple[str, ...] | BaseException = (),
+        cleanup_service: CleanupService | None = None,
     ) -> tuple[int, dict[str, object], str]:
         output = StringIO()
         errors = StringIO()
@@ -90,6 +95,7 @@ class AgentCliTests(unittest.TestCase):
                     else (lambda **_kwargs: self.fail("app server was not expected"))
                 ),
                 binary_resolver=lambda _hint: Path("codex"),
+                cleanup_service=cleanup_service,
             )
         rendered = output.getvalue()
         self.assertEqual(errors.getvalue(), "")
@@ -867,13 +873,14 @@ class AgentCliTests(unittest.TestCase):
         ):
             code, result, _ = self.invoke(argv, server=server)
 
-        self.assertEqual(code, 1)
-        self.assertEqual(result["goal_status"], "unknown")
-        self.assertTrue(result["mutation_started"])
+        self.assertEqual(code, 3)
+        self.assertEqual(result["goal_status"], "blocked")
+        self.assertFalse(result["mutation_started"])
         self.assertEqual(server.deleted_thread_ids, [])
         code, repeated, _ = self.invoke(argv, server=server)
-        self.assertEqual(code, 1)
-        self.assertEqual(repeated["goal_status"], "unknown")
+        self.assertEqual(code, 3)
+        self.assertEqual(repeated["goal_status"], "blocked")
+        self.assertFalse(repeated["mutation_started"])
         self.assertEqual(server.deleted_thread_ids, [])
 
     def test_operation_symlink_is_rejected_before_any_mutation(self) -> None:
@@ -944,8 +951,8 @@ class AgentCliTests(unittest.TestCase):
             ),
             patch(
                 "local_agent_record_janitor.agent_cli._verify_full_target_scope",
-                side_effect=[OSError("transient"), full],
-            ),
+                side_effect=OSError("transient"),
+            ) as full_scan,
             patch("local_agent_record_janitor.agent_cli.time.sleep"),
         ):
             verification = _verify_with_retry(
@@ -956,8 +963,66 @@ class AgentCliTests(unittest.TestCase):
             )
 
         self.assertEqual(verification[0], exact)
-        self.assertEqual(verification[1], full)
+        self.assertIsNone(verification[1])
+        self.assertEqual(verification[3], "transient")
         self.assertEqual(verification[4], 2)
+        full_scan.assert_called_once()
+
+    def test_one_hundred_actions_use_two_full_scans_and_one_server(self) -> None:
+        rollouts = {
+            thread_id: write_rollout(
+                self.codex_home,
+                thread_id,
+                originator="test",
+            )
+            for thread_id in (
+                f"performance-root-{index:03d}" for index in range(100)
+            )
+        }
+        plan_path = self.root / "hundred-actions.json"
+        code, summary, _ = self.invoke(
+            (
+                "agent", "plan", "--operation", "purge", "--platform",
+                "native", "--codex-home", str(self.codex_home), "--out",
+                str(plan_path),
+            )
+        )
+        self.assertEqual(code, 0)
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            document["counts"]["root_action_count"],
+            100,
+        )
+
+        full_scan_calls = 0
+
+        def counting_scanner(*args: object, **kwargs: object) -> object:
+            nonlocal full_scan_calls
+            full_scan_calls += 1
+            return scan_adapters(*args, **kwargs)
+
+        service = CleanupService(
+            scanner=counting_scanner,
+            client_inspector=lambda _home: (),
+        )
+        server = _MutatingServer(
+            lambda thread_id: rollouts[thread_id].unlink()
+        )
+        code, result, _ = self.invoke(
+            (
+                "agent", "apply", "--plan", str(plan_path),
+                "--authorized-plan-sha256", str(summary["plan_sha256"]),
+                "--clients-closed", "--verify-timeout", "0",
+            ),
+            server=server,
+            cleanup_service=service,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(result["goal_status"], "complete")
+        self.assertEqual(full_scan_calls, 2)
+        self.assertEqual(len(server.deleted_thread_ids), 100)
+        self.assertEqual(server.enter_count, 1)
 
     def test_five_roots_and_132_descendants_count_as_137_threads(self) -> None:
         descendant_counts = (27, 27, 26, 26, 26)

@@ -21,6 +21,8 @@ from .blocker_codes import (
 from .codex_app_server import CodexAppServer
 from .codex_state import (
     find_thread_rollouts,
+    iter_rollouts,
+    read_rollouts_at_paths,
     read_spawn_edge_records,
     read_spawn_edges,
     read_spawn_descendants,
@@ -36,7 +38,7 @@ from .conversation_metadata import (
     read_legacy_thread_names,
 )
 from .discovery import choose_codex_binary
-from .models import Finding
+from .models import Finding, RolloutRecord
 from .path_identity import canonical_existing_path_key
 
 
@@ -201,6 +203,7 @@ AppServerFactory = Callable[..., _AppServerContext]
 BinaryResolver = Callable[[Path | None], Path | None]
 FindingVerifier = Callable[[Finding], VerificationResult]
 PreDeleteValidator = Callable[[Finding], None]
+ActionStateCallback = Callable[[str, Finding, CleanupResult | None], None]
 CleanupTargetKey = tuple[str, str] | str
 ApprovedDescendants = Mapping[CleanupTargetKey, Iterable[str]]
 ApprovedIntegrityDeletes = Mapping[CleanupTargetKey, Iterable[str]]
@@ -488,18 +491,21 @@ def verify_finding_deleted(finding: Finding) -> VerificationResult:
     )
     remaining_thread_ids: set[str] = set()
     try:
-        if finding.rollout is not None and finding.rollout.path.exists():
-            remaining.append(str(finding.rollout.path))
-            remaining_thread_ids.add(finding.thread_id)
-
-        for thread_id in checked_thread_ids:
-            for current_rollout in find_thread_rollouts(
-                finding.codex_home, thread_id
-            ):
-                current_path = str(current_rollout.path)
-                if current_path not in remaining:
-                    remaining.append(current_path)
-                remaining_thread_ids.add(thread_id)
+        known_paths = _detail_paths(finding.details)
+        if finding.rollout is not None:
+            known_paths.append(finding.rollout.path)
+        current_rollouts = read_rollouts_at_paths(
+            finding.codex_home,
+            known_paths,
+            strict=True,
+        )
+        for current_rollout in current_rollouts:
+            if current_rollout.thread_id not in checked_thread_ids:
+                continue
+            current_path = str(current_rollout.path)
+            if current_path not in remaining:
+                remaining.append(current_path)
+            remaining_thread_ids.add(current_rollout.thread_id)
 
         indexed = read_thread_index(
             finding.codex_home,
@@ -517,6 +523,7 @@ def verify_finding_deleted(finding: Finding) -> VerificationResult:
             finding.codex_home,
             checked_thread_ids,
             strict=True,
+            rollout_records=current_rollouts,
         )
         for parent, child in sorted(current_edges):
             edge_marker = _edge_artifact_marker(parent, child)
@@ -600,6 +607,7 @@ def clean_findings(
     expected_scopes: ExpectedDeletionScopes | None = None,
     approved_integrity_deletes: ApprovedIntegrityDeletes | None = None,
     pre_delete_validator: PreDeleteValidator | None = None,
+    action_state_callback: ActionStateCallback | None = None,
 ) -> CleanupReport:
     """Delete findings through Codex app-server and verify every target.
 
@@ -663,6 +671,7 @@ def clean_findings(
             expected_scopes=expected_scopes,
             approved_integrity_deletes=approved_integrity_deletes,
             pre_delete_validator=pre_delete_validator,
+            action_state_callback=action_state_callback,
             selected_binary_hints=binary_hints_by_home.get(
                 home_key,
                 (),
@@ -813,6 +822,7 @@ def _clean_group(
     expected_scopes: ExpectedDeletionScopes | None,
     approved_integrity_deletes: ApprovedIntegrityDeletes | None,
     pre_delete_validator: PreDeleteValidator | None,
+    action_state_callback: ActionStateCallback | None,
     selected_binary_hints: Sequence[Path],
 ) -> None:
     codex_home = findings[0].codex_home
@@ -1132,6 +1142,22 @@ def _clean_group(
             timeout=timeout,
         )
         with context as server:
+            # Build native rollout/source identity once for the whole batch.
+            # Individual actions below re-read only their approved paths and
+            # targeted database rows.
+            post_start_rollouts = tuple(iter_rollouts(codex_home))
+            post_start_rollouts_by_thread: dict[
+                str,
+                list[RolloutRecord],
+            ] = defaultdict(list)
+            for record in post_start_rollouts:
+                post_start_rollouts_by_thread[record.thread_id].append(record)
+            post_start_descendants = read_spawn_descendants(
+                codex_home,
+                (finding.thread_id for finding, _ in cascade_safe),
+                strict=True,
+                rollout_records=post_start_rollouts,
+            )
             captured_scopes: list[
                 tuple[Finding, set[str], Finding]
             ] = []
@@ -1161,6 +1187,13 @@ def _clean_group(
                             expected_scope is not None
                             and expected_scope.conversation_metadata_fingerprints
                             is not None
+                        ),
+                        rollout_records_by_thread=(
+                            post_start_rollouts_by_thread
+                        ),
+                        current_descendants=post_start_descendants.get(
+                            finding.thread_id,
+                            set(),
                         ),
                     )
                 except Exception as exc:
@@ -1216,12 +1249,37 @@ def _clean_group(
                 descendants,
                 verification_finding,
             ) in enumerate(captured_scopes):
-                if expected_scopes is not None:
-                    expected_scope, expected_present = (
-                        resolved_expected_scopes[finding_key(finding)]
-                    )
-                    assert expected_present and expected_scope is not None
-                    try:
+                try:
+                    if action_state_callback is not None:
+                        action_state_callback(
+                            "guard_started",
+                            finding,
+                            None,
+                        )
+                    if expected_scopes is not None:
+                        expected_scope, expected_present = (
+                            resolved_expected_scopes[finding_key(finding)]
+                        )
+                        assert expected_present and expected_scope is not None
+                        immediate_rollouts = read_rollouts_at_paths(
+                            finding.codex_home,
+                            expected_scope.rollout_paths,
+                            strict=True,
+                        )
+                        immediate_rollouts_by_thread: dict[
+                            str,
+                            list[RolloutRecord],
+                        ] = defaultdict(list)
+                        for record in immediate_rollouts:
+                            immediate_rollouts_by_thread[
+                                record.thread_id
+                            ].append(record)
+                        immediate_descendants = read_spawn_descendants(
+                            finding.codex_home,
+                            [finding.thread_id],
+                            strict=True,
+                            rollout_records=immediate_rollouts,
+                        ).get(finding.thread_id, set())
                         immediate_finding = _with_verification_scope(
                             finding,
                             descendants,
@@ -1239,6 +1297,10 @@ def _clean_group(
                                 expected_scope.conversation_metadata_fingerprints
                                 is not None
                             ),
+                            rollout_records_by_thread=(
+                                immediate_rollouts_by_thread
+                            ),
+                            current_descendants=immediate_descendants,
                         )
                         immediate_scope = _captured_deletion_scope(
                             immediate_finding,
@@ -1258,33 +1320,42 @@ def _clean_group(
                             )
                         if pre_delete_validator is not None:
                             pre_delete_validator(finding)
-                    except Exception as exc:
-                        error = (
-                            "Cleanup was blocked by the immediate pre-delete "
-                            f"scope check for {finding.thread_id}; no further "
-                            f"deletion request was sent: {str(exc) or repr(exc)}."
+                    if action_state_callback is not None:
+                        # Persist this checkpoint before the irreversible
+                        # request.  A persistence failure must prevent the
+                        # request from being sent.
+                        action_state_callback(
+                            "mutation_started",
+                            finding,
+                            None,
                         )
-                        report.results.extend(
-                            CleanupResult(
-                                finding=pending_finding,
-                                status="unknown",
-                                error=error,
-                                impacted_thread_ids=tuple(
-                                    sorted(
-                                        {
-                                            pending_finding.thread_id,
-                                            *pending_descendants,
-                                        }
-                                    )
-                                ),
-                            )
-                            for (
-                                pending_finding,
-                                pending_descendants,
-                                _pending_verification,
-                            ) in captured_scopes[capture_index:]
+                except Exception as exc:
+                    error = (
+                        "Cleanup was blocked by the immediate pre-delete "
+                        f"scope check for {finding.thread_id}; no further "
+                        f"deletion request was sent: {str(exc) or repr(exc)}."
+                    )
+                    report.results.extend(
+                        CleanupResult(
+                            finding=pending_finding,
+                            status="unknown",
+                            error=error,
+                            impacted_thread_ids=tuple(
+                                sorted(
+                                    {
+                                        pending_finding.thread_id,
+                                        *pending_descendants,
+                                    }
+                                )
+                            ),
                         )
-                        break
+                        for (
+                            pending_finding,
+                            pending_descendants,
+                            _pending_verification,
+                        ) in captured_scopes[capture_index:]
+                    )
+                    break
                 request_error: str | None = None
                 try:
                     server.delete_thread(finding.thread_id)
@@ -1318,18 +1389,23 @@ def _clean_group(
                         or request_error
                         or "Deletion could not be verified"
                     )
-                report.results.append(
-                    CleanupResult(
-                        finding=finding,
-                        status=status,
-                        error=error,
-                        request_error=request_error,
-                        remaining_artifacts=verification.remaining_artifacts,
-                        impacted_thread_ids=tuple(
-                            sorted({finding.thread_id, *descendants})
-                        ),
-                    )
+                cleanup_result = CleanupResult(
+                    finding=finding,
+                    status=status,
+                    error=error,
+                    request_error=request_error,
+                    remaining_artifacts=verification.remaining_artifacts,
+                    impacted_thread_ids=tuple(
+                        sorted({finding.thread_id, *descendants})
+                    ),
                 )
+                report.results.append(cleanup_result)
+                if action_state_callback is not None:
+                    action_state_callback(
+                        "verified",
+                        finding,
+                        cleanup_result,
+                    )
     except Exception as exc:
         attempted = {finding_key(item.finding) for item in report.results}
         error = str(exc) or repr(exc)
@@ -1816,6 +1892,12 @@ def _with_verification_scope(
     approved_integrity_types: frozenset[str] | set[str] = frozenset(),
     capture_rollout_state_fingerprints: bool = False,
     capture_conversation_metadata_fingerprints: bool = False,
+    rollout_records_by_thread: Mapping[
+        str,
+        Sequence[RolloutRecord],
+    ]
+    | None = None,
+    current_descendants: set[str] | None = None,
 ) -> Finding:
     details = dict(finding.details)
     thread_ids = {
@@ -1826,11 +1908,22 @@ def _with_verification_scope(
         thread_ids - {finding.thread_id}
     )
 
-    current_descendants = read_spawn_descendants(
-        finding.codex_home,
-        [finding.thread_id],
-        strict=True,
-    ).get(finding.thread_id, set())
+    supplied_rollout_records = (
+        tuple(
+            record
+            for records in rollout_records_by_thread.values()
+            for record in records
+        )
+        if rollout_records_by_thread is not None
+        else None
+    )
+    if current_descendants is None:
+        current_descendants = read_spawn_descendants(
+            finding.codex_home,
+            [finding.thread_id],
+            strict=True,
+            rollout_records=supplied_rollout_records,
+        ).get(finding.thread_id, set())
     approved_descendants = thread_ids - {finding.thread_id}
     if current_descendants != approved_descendants:
         raise RuntimeError(
@@ -1842,10 +1935,19 @@ def _with_verification_scope(
         thread_ids,
         strict=True,
     )
-    records_by_thread = {
-        thread_id: find_thread_rollouts(finding.codex_home, thread_id)
-        for thread_id in thread_ids
-    }
+    records_by_thread = (
+        {
+            thread_id: list(
+                rollout_records_by_thread.get(thread_id, ())
+            )
+            for thread_id in thread_ids
+        }
+        if rollout_records_by_thread is not None
+        else {
+            thread_id: find_thread_rollouts(finding.codex_home, thread_id)
+            for thread_id in thread_ids
+        }
+    )
     if capture_conversation_metadata_fingerprints:
         summaries = read_conversation_summaries(
             finding.codex_home,
@@ -2101,6 +2203,11 @@ def _with_verification_scope(
             finding.codex_home,
             thread_ids,
             strict=True,
+            rollout_records=(
+                record
+                for records in records_by_thread.values()
+                for record in records
+            ),
         )
     )
     details["planned_expected_artifacts"] = sorted(expected_artifacts)

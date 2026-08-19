@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
@@ -144,6 +145,66 @@ def find_thread_rollouts(
     ]
 
 
+def read_rollouts_at_paths(
+    codex_home: Path,
+    paths: Iterable[Path | str],
+    *,
+    strict: bool = True,
+) -> tuple[RolloutRecord, ...]:
+    """Read only approved rollout paths within the two native roots."""
+
+    home = codex_home.expanduser().resolve()
+    roots = (
+        ((home / "sessions").resolve(), False),
+        ((home / "archived_sessions").resolve(), True),
+    )
+    records: list[RolloutRecord] = []
+    for raw_path in dict.fromkeys(Path(value) for value in paths):
+        path = raw_path.expanduser()
+        if not path.is_absolute():
+            path = home / path
+        try:
+            original_state = path.lstat()
+            resolved = path.resolve(strict=True)
+            path_state = resolved.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if strict:
+                raise CodexStateReadError(
+                    f"Could not inspect approved rollout path {path}: {exc}"
+                ) from exc
+            continue
+        matched: tuple[Path, bool] | None = None
+        for root, archived in roots:
+            try:
+                common = os.path.commonpath((os.fspath(root), os.fspath(resolved)))
+            except ValueError:
+                continue
+            if os.path.normcase(common) == os.path.normcase(os.fspath(root)):
+                matched = (root, archived)
+                break
+        if matched is None:
+            if strict:
+                raise CodexStateReadError(
+                    f"Approved rollout path escapes the native store: {path}"
+                )
+            continue
+        if (
+            stat.S_ISLNK(original_state.st_mode)
+            or not stat.S_ISREG(path_state.st_mode)
+        ):
+            if strict:
+                raise CodexStateReadError(
+                    f"Approved rollout path is not an ordinary file: {path}"
+                )
+            continue
+        record = _read_rollout_meta(resolved, archived=matched[1])
+        if record is not None:
+            records.append(record)
+    return tuple(records)
+
+
 def rollout_state_fingerprint(record: RolloutRecord) -> str:
     """Return a canonical fingerprint of rollout identity and file state.
 
@@ -181,6 +242,7 @@ def read_spawn_descendants(
     thread_ids: Iterable[str],
     *,
     strict: bool = True,
+    rollout_records: Iterable[RolloutRecord] | None = None,
 ) -> dict[str, set[str]]:
     """Read native spawn relationships and return transitive descendants."""
 
@@ -236,7 +298,12 @@ def read_spawn_descendants(
                 ) from exc
 
     # Some Codex versions retain the relationship only in session metadata.
-    for record in iter_rollouts(codex_home):
+    records = (
+        iter_rollouts(codex_home)
+        if rollout_records is None
+        else rollout_records
+    )
+    for record in records:
         for parent in _source_parent_ids(record.source):
             graph.setdefault(parent, set()).add(record.thread_id)
 
@@ -259,6 +326,7 @@ def read_spawn_edges(
     thread_ids: Iterable[str],
     *,
     strict: bool = True,
+    rollout_records: Iterable[RolloutRecord] | None = None,
 ) -> set[tuple[str, str]]:
     """Return direct spawn edges touching any requested conversation."""
 
@@ -317,7 +385,12 @@ def read_spawn_edges(
                     f"Could not inspect spawn edges in {state_db}: {exc}"
                 ) from exc
 
-    for record in iter_rollouts(codex_home):
+    records = (
+        iter_rollouts(codex_home)
+        if rollout_records is None
+        else rollout_records
+    )
+    for record in records:
         for parent in _source_parent_ids(record.source):
             if parent in target_ids or record.thread_id in target_ids:
                 edges.add((parent, record.thread_id))

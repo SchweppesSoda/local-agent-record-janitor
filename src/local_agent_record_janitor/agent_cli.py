@@ -429,6 +429,38 @@ def _run_apply(
             )
             _write_document(result, stdout)
             return EXIT_UNKNOWN
+        if (
+            existing_state
+            and existing_state.get("phase") == "executing"
+            and not store.lock_exists()
+        ):
+            result = result_document(
+                subcommand="apply",
+                operation_id=operation_id,
+                plan_sha=plan_hash,
+                goal_status="blocked",
+                modified=False,
+                mutation_started=False,
+                counts=counts,
+                blockers=[
+                    structured_blocker(
+                        "execution_attempt_aborted",
+                        scope="operation",
+                        retryable=False,
+                        remediation=(
+                            "Create a fresh plan; this operation stopped before "
+                            "a durable mutation checkpoint and will not be reused."
+                        ),
+                    )
+                ],
+                phase="blocked",
+            )
+            try:
+                store.write_result(result)
+            except OperationStoreError:
+                pass
+            _write_document(result, stdout)
+            return EXIT_BLOCKED
         with store.mutation_lock():
             return _apply_locked(
                 args,
@@ -792,58 +824,114 @@ def _apply_locked(
         _write_document(result, stdout)
         return _exit_for_result(result)
 
-    clean_args = argparse.Namespace(
-        command="clean",
-        json=True,
-        yes=True,
-        action_id=[str(action.action_id) for action in selected_actions],
-        thread_id=[],
-        plan_fingerprint=str(context["plan"].plan_fingerprint),
-        clients_closed=True,
-        timeout=float(args.timeout),
-        platform=list(context["platforms"]),
-        limit=0,
-    )
+    selected_action_ids = [
+        str(action.action_id) for action in selected_actions
+    ]
     state.update(
         {
             "phase": "executing",
-            "mutation_started": True,
-            "current_action_ids": list(clean_args.action_id),
-            "current_action_state": "mutation_in_flight",
+            "current_action_ids": selected_action_ids,
+            "current_action_state": "guard_pending",
+            "action_states": {
+                action_id: {
+                    "state": "not_started",
+                    "updated_at": utc_now(),
+                }
+                for action_id in selected_action_ids
+            },
         }
     )
-    store.write_state(state)
     store.append_event(
         {
-            "event": "mutation_started",
-            "action_ids": list(clean_args.action_id),
+            "event": "execution_started",
+            "action_ids": selected_action_ids,
             "mutation_kind": authorization.get("mutation_kind"),
-        }
+        },
+        state_updates=state,
     )
+    state.clear()
+    state.update(store.read_state() or {})
 
-    from .cli import _run_planned_cleanup
+    def record_action_state(
+        checkpoint: str,
+        action: Any,
+        action_result: Any | None,
+    ) -> None:
+        action_id = str(action.action_id)
+        if action_id not in selected_action_ids:
+            raise OperationStoreError(
+                "Execution checkpoint is not bound to the authorized plan"
+            )
+        current = store.read_state() or dict(state)
+        action_states = dict(current.get("action_states") or {})
+        result_status = (
+            str(getattr(action_result, "status", "")) or None
+        )
+        action_states[action_id] = {
+            "state": checkpoint,
+            "result_status": result_status,
+            "updated_at": utc_now(),
+        }
+        mutation_started = bool(current.get("mutation_started")) or (
+            checkpoint == "mutation_started"
+        )
+        completed = list(current.get("completed_action_ids") or [])
+        if (
+            checkpoint == "verified"
+            and (action_result is None or result_status == "deleted")
+            and action_id not in completed
+        ):
+            completed.append(action_id)
+        current.update(
+            {
+                "phase": "executing",
+                "mutation_started": mutation_started,
+                "current_action_ids": [action_id],
+                "current_action_state": checkpoint,
+                "completed_action_ids": completed,
+                "action_states": action_states,
+                "modified": bool(current.get("modified")) or bool(completed),
+                "updated_at": utc_now(),
+            }
+        )
+        event_name = {
+            "guard_started": "action_guard_started",
+            "mutation_started": "mutation_started",
+            "verified": "action_verified",
+        }.get(checkpoint)
+        if event_name is None:
+            raise OperationStoreError(
+                f"Unsupported action checkpoint: {checkpoint}"
+            )
+        event: dict[str, Any] = {
+            "event": event_name,
+            "action_id": action_id,
+            "action_state": checkpoint,
+        }
+        if result_status is not None:
+            event["result_status"] = result_status
+        # The irreversible request is made only after this event and its
+        # corresponding state update are durable.
+        store.append_event(event, state_updates=current)
+        state.clear()
+        state.update(store.read_state() or current)
 
-    internal_stdout = StringIO()
-    internal_stderr = StringIO()
     execution_error: str | None = None
+    execution_result: dict[str, Any] | None = None
     try:
-        exit_code = _run_planned_cleanup(
-            clean_args,
-            scan_report=context["report"],
-            active_adapters=context["active_adapters"],
-            stdin=StringIO(),
-            stdout=internal_stdout,
-            stderr=internal_stderr,
+        outcome = cleanup_service.execute(
+            context["cleanup_context"],
+            selected_actions,
+            timeout=float(args.timeout),
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
-            adapter_builder=context["adapter_builder"],
-            client_inspector=client_inspector,
-            cleanup_service=cleanup_service,
+            action_state_callback=record_action_state,
         )
+        exit_code = EXIT_OK if outcome.ok else EXIT_UNKNOWN
+        execution_result = outcome.audit_payload()
     except Exception as exc:
         exit_code = EXIT_UNKNOWN
-        execution_error = str(exc)
-    execution_result = _execution_audit_payload(internal_stdout.getvalue())
+        execution_error = str(exc) or repr(exc)
     (
         verification,
         final_scope,
@@ -864,6 +952,7 @@ def _apply_locked(
     full_scope_satisfied = bool(
         final_scope is not None and final_scope["all_satisfied"]
     )
+    mutation_started = bool(state.get("mutation_started", False))
     if exact_satisfied and full_scope_satisfied:
         goal_status = "complete"
         modified = bool(verification["verified_action_ids"])
@@ -911,7 +1000,7 @@ def _apply_locked(
         plan_sha=plan_hash,
         goal_status=goal_status,
         modified=modified,
-        mutation_started=True,
+        mutation_started=mutation_started,
         counts=counts,
         blockers=blockers,
         phase="recovery_required" if goal_status == "unknown" else "finished",
@@ -1187,7 +1276,7 @@ def _scan_context(
     *,
     cleanup_service: CleanupService,
 ) -> dict[str, Any]:
-    from .cli import create_default_adapters
+    from .adapter_factory import create_default_adapters
 
     platforms = _effective_platforms(getattr(args, "platform", None))
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None
@@ -1198,11 +1287,14 @@ def _scan_context(
         guard_args.platform = ["all"]
         adapter_builder = lambda: create_default_adapters(guard_args)
         active_adapters = list(adapter_builder())
-    return cleanup_service.prepare(
+    prepared = cleanup_service.prepare(
         active_adapters,
         platforms=platforms,
         adapter_builder=adapter_builder,
-    ).legacy_dict()
+    )
+    result = prepared.legacy_dict()
+    result["cleanup_context"] = prepared
+    return result
 
 
 def _verify_full_target_scope(
@@ -1272,11 +1364,12 @@ def _verify_with_retry(
     str | None,
     int,
 ]:
-    """Run bounded read-only verification with exponential backoff.
+    """Retry exact artifact checks, then perform one terminal full scan.
 
-    A clean exact result plus unrelated target residuals is conclusive and
-    returns immediately.  Pending frozen artifacts or read errors are retried
-    only when a mutation may still be settling, up to the caller's budget.
+    The full target snapshot is deliberately not retried inside ``apply``:
+    one apply has one complete preflight snapshot and one complete terminal
+    snapshot.  If that terminal read is inconclusive, ``agent verify`` is the
+    recovery path and the mutation is never repeated.
     """
 
     service = cleanup_service or CleanupService()
@@ -1290,32 +1383,15 @@ def _verify_with_retry(
     while True:
         attempts += 1
         verification = None
-        final_scope = None
         verification_error = None
-        final_scope_error = None
         try:
             verification = verify_frozen_actions(plan)
         except Exception as exc:
             verification_error = str(exc) or repr(exc)
-        try:
-            final_scope = _verify_full_target_scope(
-                plan,
-                supplied_adapters,
-                cleanup_service=service,
-            )
-        except Exception as exc:
-            final_scope_error = str(exc) or repr(exc)
-
         exact_satisfied = bool(
             verification is not None and verification.get("all_satisfied")
         )
-        full_scan_complete = bool(
-            final_scope is not None and final_scope.get("scan_complete")
-        )
-        full_satisfied = bool(
-            final_scope is not None and final_scope.get("all_satisfied")
-        )
-        if exact_satisfied and (full_satisfied or full_scan_complete):
+        if exact_satisfied:
             break
         if not retry_pending or time.monotonic() >= deadline:
             break
@@ -1324,6 +1400,15 @@ def _verify_with_retry(
             break
         time.sleep(min(delay, remaining))
         delay = min(delay * 2.0, 5.0)
+
+    try:
+        final_scope = _verify_full_target_scope(
+            plan,
+            supplied_adapters,
+            cleanup_service=service,
+        )
+    except Exception as exc:
+        final_scope_error = str(exc) or repr(exc)
     return (
         verification,
         final_scope,

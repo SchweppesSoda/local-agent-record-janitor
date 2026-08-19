@@ -256,6 +256,42 @@ class CleanupService:
             adapter_builder=adapter_builder,
         )
 
+    def execute(
+        self,
+        context: CleanupContext,
+        selected_actions: Sequence[Any],
+        *,
+        timeout: float,
+        app_server_factory: Any,
+        binary_resolver: Any,
+        action_state_callback: Any = None,
+        finding_mapper: Any = None,
+        integrity_approval_builder: Any = None,
+        desktop_fingerprint_resolver: Any = None,
+        cleaner: Any = None,
+    ) -> Any:
+        """Execute one already-prevalidated physical mutation batch.
+
+        Importing lazily keeps the typed snapshot layer independent from the
+        concrete writers while ensuring both CLIs use this single entry.
+        """
+
+        from .execution import execute_prevalidated_actions
+
+        return execute_prevalidated_actions(
+            context,
+            selected_actions,
+            timeout=timeout,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+            client_inspector=self._client_inspector,
+            action_state_callback=action_state_callback,
+            finding_mapper=finding_mapper,
+            integrity_approval_builder=integrity_approval_builder,
+            desktop_fingerprint_resolver=desktop_fingerprint_resolver,
+            cleaner=cleaner,
+        )
+
 
 def selected_platforms(values: Sequence[str] | None) -> set[str]:
     normalized = {

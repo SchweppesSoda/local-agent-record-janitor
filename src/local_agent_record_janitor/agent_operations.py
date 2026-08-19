@@ -11,7 +11,7 @@ from .codex_desktop_state import (
     native_evidence_for_threads,
     remaining_desktop_state_markers,
 )
-from .codex_state import find_thread_rollouts, read_thread_index
+from .codex_state import read_rollouts_at_paths, read_thread_index
 from .legacy_index import inventory_legacy_index
 from .operation_store import plan_sha256
 from .path_identity import canonical_existing_path_key
@@ -310,6 +310,41 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(roots, list):
         raise ValueError("The operation plan has no root action list")
 
+    delete_thread_ids = {
+        str(value)
+        for raw in roots
+        if isinstance(raw, Mapping)
+        and str(raw.get("kind") or "") == "delete_conversation"
+        for value in (
+            raw.get("affected_thread_ids", [])
+            if isinstance(raw.get("affected_thread_ids"), list)
+            else []
+        )
+        if isinstance(value, str) and value
+    }
+    delete_rollout_paths = {
+        str(value)
+        for raw in roots
+        if isinstance(raw, Mapping)
+        and str(raw.get("kind") or "") == "delete_conversation"
+        and isinstance(raw.get("impact"), Mapping)
+        for value in raw["impact"].get("rollout_paths", [])
+        if isinstance(value, str) and value
+    }
+    indexed_delete_threads = read_thread_index(
+        codex_home,
+        delete_thread_ids,
+        strict=True,
+    )
+    rollout_records = read_rollouts_at_paths(
+        codex_home,
+        delete_rollout_paths,
+        strict=True,
+    )
+    rollouts_by_thread: dict[str, list[Any]] = {}
+    for record in rollout_records:
+        rollouts_by_thread.setdefault(record.thread_id, []).append(record)
+
     remaining: list[dict[str, Any]] = []
     verified: list[str] = []
     for raw in roots:
@@ -325,12 +360,16 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
         ) or (thread_id,)
         markers: list[str] = []
         if kind == "delete_conversation":
-            indexed = read_thread_index(codex_home, affected, strict=True)
+            indexed = {
+                value: indexed_delete_threads[value]
+                for value in affected
+                if value in indexed_delete_threads
+            }
             markers.extend(f"thread-index:{value}" for value in sorted(indexed))
             for current_id in affected:
                 markers.extend(
                     f"rollout:{record.path}"
-                    for record in find_thread_rollouts(codex_home, current_id)
+                    for record in rollouts_by_thread.get(current_id, ())
                 )
         elif kind == "repair_legacy_index":
             inventory = inventory_legacy_index(codex_home)

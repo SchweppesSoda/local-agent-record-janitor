@@ -65,6 +65,30 @@ class FrontendAdapter(ABC):
 
         return []
 
+    def live_thread_ids_for(
+        self,
+        thread_ids: set[str],
+    ) -> frozenset[str]:
+        """Re-read only frontend references needed by a mutation guard.
+
+        This deliberately does not call :meth:`scan`: a guard must not rescan
+        native rollouts or rebuild the global cleanup plan for every action.
+        Known adapters may override this with a narrower indexed query.
+        """
+
+        if not thread_ids:
+            return frozenset()
+        live: set[str] = set()
+        for record in self.list_sessions():
+            record_thread_id = getattr(record, "thread_id", None)
+            if (
+                getattr(record, "is_live", False) is True
+                and isinstance(record_thread_id, str)
+                and record_thread_id in thread_ids
+            ):
+                live.add(record_thread_id)
+        return frozenset(live)
+
     @abstractmethod
     def scan(self) -> list[Finding]:
         raise NotImplementedError
