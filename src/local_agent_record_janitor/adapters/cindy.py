@@ -3,6 +3,12 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
+from ..blocker_codes import (
+    CASCADE_REQUIRES_EXPLICIT_SCOPE,
+    IDENTITY_CONFLICT,
+    LIVE_FRONTEND_REFERENCE,
+    SPAWN_EDGE_OPEN,
+)
 from ..codex_state import iter_rollouts
 from ..cindy_references import (
     CindyNativeReference,
@@ -161,6 +167,16 @@ class CindyAdapter(FrontendAdapter):
                 )
                 if reason is not None
             ]
+            blocker_codes = [
+                code
+                for code, blocked in (
+                    (IDENTITY_CONFLICT, ownership_conflict),
+                    (LIVE_FRONTEND_REFERENCE, bool(live_reference_count)),
+                    (CASCADE_REQUIRES_EXPLICIT_SCOPE, bool(descendants)),
+                    (SPAWN_EDGE_OPEN, not evidence.spawn_edges_available),
+                )
+                if blocked
+            ]
             cleanable = (
                 not ownership_conflict
                 and live_reference_count == 0
@@ -219,6 +235,7 @@ class CindyAdapter(FrontendAdapter):
                         "cleanup_blocked_reason": (
                             " ".join(blocked_reasons) if blocked_reasons else None
                         ),
+                        "cleanup_blocker_codes": blocker_codes,
                     },
                 )
             )

@@ -25,7 +25,11 @@ from .agent_operations import (
     zero_counts,
 )
 from .cleaner import AppServerFactory, BinaryResolver, scan_adapters
-from .codex_desktop_state import DesktopStateError, running_related_clients
+from .codex_desktop_state import (
+    ClientInspector,
+    DesktopStateError,
+    running_related_clients,
+)
 from .discovery import default_codex_home
 from .operation_store import (
     OperationLockedError,
@@ -59,11 +63,18 @@ def run_agent_command(
     stderr: TextIO,
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
+    client_inspector: ClientInspector | None = None,
 ) -> int:
     del stderr  # Agent mode writes exactly one JSON/JSONL stream to stdout.
+    inspect_clients = client_inspector or running_related_clients
     try:
         if args.agent_command == "doctor":
-            return _run_doctor(args, supplied_adapters, stdout)
+            return _run_doctor(
+                args,
+                supplied_adapters,
+                stdout,
+                client_inspector=inspect_clients,
+            )
         if args.agent_command == "plan":
             return _run_plan(args, supplied_adapters, stdout)
         if args.agent_command == "apply":
@@ -73,6 +84,7 @@ def run_agent_command(
                 stdout,
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
+                client_inspector=inspect_clients,
             )
         if args.agent_command == "status":
             return _run_status(args, stdout)
@@ -107,6 +119,8 @@ def _run_doctor(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
     stdout: TextIO,
+    *,
+    client_inspector: ClientInspector,
 ) -> int:
     operation_id = "doctor-" + new_operation_id().removeprefix("purge-")
     try:
@@ -147,7 +161,7 @@ def _run_doctor(
         clients: tuple[str, ...] = ()
         client_error: str | None = None
         try:
-            clients = running_related_clients(target_home)
+            clients = client_inspector(target_home)
         except DesktopStateError as exc:
             client_error = str(exc)
             blockers.append(
@@ -317,6 +331,7 @@ def _run_apply(
     *,
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
+    client_inspector: ClientInspector,
 ) -> int:
     plan, error = _load_authorized_plan(
         Path(args.plan).expanduser(),
@@ -393,6 +408,7 @@ def _run_apply(
                 stdout,
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
+                client_inspector=client_inspector,
             )
     except OperationLockedError as exc:
         result = result_document(
@@ -484,6 +500,7 @@ def _apply_locked(
     *,
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
+    client_inspector: ClientInspector,
 ) -> int:
     operation_id = str(plan["operation_id"])
     plan_hash = str(plan["plan_sha256"])
@@ -576,7 +593,7 @@ def _apply_locked(
         else:
             selected_actions.append(fresh)
     try:
-        running = running_related_clients(target_home)
+        running = client_inspector(target_home)
     except DesktopStateError as exc:
         running = ()
         preflight_blockers.append(
@@ -783,6 +800,7 @@ def _apply_locked(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             adapter_builder=context["adapter_builder"],
+            client_inspector=client_inspector,
         )
     except Exception as exc:
         exit_code = EXIT_UNKNOWN

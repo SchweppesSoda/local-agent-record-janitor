@@ -30,6 +30,7 @@ from .cleaner import (
     select_findings,
 )
 from .codex_app_server import CodexAppServer
+from .codex_desktop_state import ClientInspector
 from .conversation_metadata import (
     read_conversation_summaries,
     read_legacy_thread_names,
@@ -953,6 +954,7 @@ def main(
     pi_delete_executor: Any | None = None,
     claude_catalog_builder: Any | None = None,
     claude_delete_executor: Any | None = None,
+    client_inspector: ClientInspector | None = None,
 ) -> int:
     input_stream = stdin or sys.stdin
     output = stdout or sys.stdout
@@ -1019,6 +1021,7 @@ def main(
             stderr=error_output,
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            client_inspector=client_inspector,
         )
 
     if args.command == "restore-legacy-index":
@@ -1216,6 +1219,7 @@ def main(
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
                 adapter_builder=adapter_builder,
+                client_inspector=client_inspector,
             )
         return _run_planned_cleanup(
             args,
@@ -1227,6 +1231,7 @@ def main(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             adapter_builder=adapter_builder,
+            client_inspector=client_inspector,
         )
 
     try:
@@ -1262,6 +1267,7 @@ def _run_codex_purge(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
+    client_inspector: ClientInspector | None = None,
 ) -> int:
     """Execute every currently available Codex cleanup in safe-sized batches."""
 
@@ -1451,6 +1457,7 @@ def _run_codex_purge(
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
             adapter_builder=adapter_builder,
+            client_inspector=client_inspector,
         )
         batch_document = {
             "batch": batch_number,
@@ -3488,6 +3495,7 @@ def _run_planned_cleanup(
     app_server_factory: AppServerFactory,
     binary_resolver: BinaryResolver,
     adapter_builder: Callable[[], Sequence[FrontendAdapter]] | None = None,
+    client_inspector: ClientInspector | None = None,
 ) -> int:
     from .planning import build_cleanup_plan, normalize_storage_path
 
@@ -4026,6 +4034,7 @@ def _run_planned_cleanup(
             desktop_result = execute_desktop_state_cleanup(
                 Path(storage.path),
                 approved_desktop_snapshots,
+                client_inspector=client_inspector,
             )
         except (ActionSelectionError, DesktopStateError) as exc:
             return _emit_fatal_error(

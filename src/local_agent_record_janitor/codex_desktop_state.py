@@ -13,7 +13,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .codex_state import find_thread_rollouts, read_thread_index
 from .path_identity import canonical_existing_path_key
@@ -118,6 +118,9 @@ class DesktopCleanupResult:
                 "remaining_exact_global_state_references": 0,
             },
         }
+
+
+ClientInspector = Callable[[Path | None], tuple[str, ...]]
 
 
 def read_desktop_state(
@@ -244,6 +247,8 @@ def remaining_desktop_state_markers(
 def execute_desktop_state_cleanup(
     codex_home: Path,
     approved_snapshot_fingerprints: Mapping[str, str],
+    *,
+    client_inspector: ClientInspector | None = None,
 ) -> DesktopCleanupResult:
     """Remove exact Desktop-only thread state after strict revalidation."""
 
@@ -278,7 +283,8 @@ def execute_desktop_state_cleanup(
                 f"Codex Desktop state changed after approval: {thread_id}"
             )
 
-    clients = running_related_clients(home)
+    inspect_clients = client_inspector or running_related_clients
+    clients = inspect_clients(home)
     if clients:
         raise DesktopStateError(
             "Related clients are still running: " + ", ".join(clients)
@@ -523,9 +529,10 @@ def _relevant_client_names(
     """Return client names that might still own the target Codex store.
 
     A Cindy process family is ignored only when both the family identity and a
-    *different existing* ``codex-home`` are proven.  Missing process metadata,
-    inaccessible paths, orphaned helpers, and failed identity checks all remain
-    blocking.
+    *different existing* ``codex-home`` are proven.  Conversely, a proven
+    official OpenAI Codex Desktop family is ignored for a proven Cindy-owned
+    ``codex-home``.  Missing process metadata, inaccessible paths, orphaned
+    helpers, and failed identity checks all remain blocking.
     """
 
     home = codex_home.expanduser()
@@ -620,11 +627,28 @@ def _relevant_client_names(
             continue
         valid_cindy_families[root_id] = user_data_dirs[0]
 
+    target_is_cindy_home = _is_proven_cindy_codex_home(home)
+    official_app_roots: dict[int, Path] = {}
+    if target_is_cindy_home:
+        for item in items:
+            if str(item.get("name") or "").casefold() != "chatgpt.exe":
+                continue
+            process_id = _integer_or_minus_one(item.get("process_id"))
+            executable_path = item.get("executable_path")
+            if process_id < 0 or not executable_path:
+                continue
+            app_root = _official_codex_desktop_app_root(
+                Path(str(executable_path))
+            )
+            if app_root is not None:
+                official_app_roots[process_id] = app_root
+
     relevant: set[str] = set()
     for item in items:
         name = str(item.get("name") or "unknown")
         name_key = name.casefold()
         separate_cindy_process = False
+        separate_official_process = False
         process_id = _integer_or_minus_one(item.get("process_id"))
         parent_id = _integer_or_minus_one(item.get("parent_process_id"))
         if name_key == "cindy.exe":
@@ -649,9 +673,66 @@ def _relevant_client_names(
                         user_data_dir / "codex",
                     )
                 )
-        if not separate_cindy_process:
+        if target_is_cindy_home and name_key == "chatgpt.exe":
+            separate_official_process = process_id in official_app_roots
+        elif (
+            target_is_cindy_home
+            and name_key == "codex.exe"
+            and item.get("executable_path")
+        ):
+            ancestor_id = parent_id
+            seen: set[int] = set()
+            while ancestor_id in by_pid and ancestor_id not in seen:
+                seen.add(ancestor_id)
+                app_root = official_app_roots.get(ancestor_id)
+                if app_root is not None:
+                    executable_path = Path(str(item["executable_path"]))
+                    separate_official_process = (
+                        executable_path.is_absolute()
+                        and executable_path.name.casefold() == "codex.exe"
+                        and _is_existing_path_below(executable_path, app_root)
+                    )
+                    break
+                ancestor_id = _integer_or_minus_one(
+                    by_pid[ancestor_id].get("parent_process_id")
+                )
+        if not separate_cindy_process and not separate_official_process:
             relevant.add(name)
     return tuple(sorted(relevant, key=str.casefold))
+
+
+def _is_proven_cindy_codex_home(path: Path) -> bool:
+    try:
+        home = path.resolve(strict=True)
+        if not home.is_dir() or home.name.casefold() != "codex-home":
+            return False
+        bundled_root = home.parent / "codex"
+        if not bundled_root.is_dir():
+            return False
+        return any(
+            candidate.is_file()
+            for candidate in bundled_root.glob("*/codex.exe")
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
+def _official_codex_desktop_app_root(path: Path) -> Path | None:
+    try:
+        executable = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if (
+        not executable.is_file()
+        or executable.name.casefold() != "chatgpt.exe"
+        or executable.parent.name.casefold() != "app"
+        or not executable.parent.parent.name.casefold().startswith(
+            "openai.codex_"
+        )
+        or executable.parent.parent.parent.name.casefold() != "windowsapps"
+    ):
+        return None
+    return executable.parent
 
 
 def _same_existing_path(first: Path, second: Path) -> bool | None:

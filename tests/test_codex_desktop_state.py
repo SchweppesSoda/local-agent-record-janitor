@@ -114,6 +114,46 @@ class CodexDesktopStateTests(unittest.TestCase):
             },
         )
 
+    def _official_codex_process_records(
+        self,
+        root: Path,
+    ) -> tuple[dict[str, object], ...]:
+        app_root = (
+            root
+            / "WindowsApps"
+            / "OpenAI.Codex_26.814.5167.0_x64__fixture"
+            / "app"
+        )
+        executable = app_root / "ChatGPT.exe"
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"chatgpt")
+        bundled = app_root / "resources" / "codex.exe"
+        bundled.parent.mkdir(parents=True, exist_ok=True)
+        bundled.write_bytes(b"codex")
+        return (
+            {
+                "process_id": 200,
+                "parent_process_id": 1,
+                "name": "ChatGPT.exe",
+                "executable_path": str(executable),
+                "command_line": f'"{executable}"',
+            },
+            {
+                "process_id": 201,
+                "parent_process_id": 200,
+                "name": "ChatGPT.exe",
+                "executable_path": str(executable),
+                "command_line": "--type=renderer",
+            },
+            {
+                "process_id": 202,
+                "parent_process_id": 201,
+                "name": "codex.exe",
+                "executable_path": str(bundled),
+                "command_line": "codex.exe app-server",
+            },
+        )
+
     def test_native_home_ignores_proven_separate_cindy_family(self) -> None:
         root = Path(self.temporary_directory.name) / "processes"
         records = self._cindy_process_records(root) + (
@@ -141,6 +181,33 @@ class CodexDesktopStateTests(unittest.TestCase):
         self.assertEqual(
             _relevant_client_names(cindy_home, records),
             ("Cindy.exe", "codex.exe"),
+        )
+
+    def test_cindy_store_ignores_proven_official_codex_family(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        self._cindy_process_records(root)
+        records = self._official_codex_process_records(root)
+        cindy_home = root / "CindyGlobal" / "codex-home"
+
+        self.assertEqual(_relevant_client_names(cindy_home, records), ())
+
+    def test_cindy_store_keeps_unproven_chatgpt_process_blocking(self) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        self._cindy_process_records(root)
+        cindy_home = root / "CindyGlobal" / "codex-home"
+        records = (
+            {
+                "process_id": 200,
+                "parent_process_id": 1,
+                "name": "ChatGPT.exe",
+                "executable_path": str(root / "missing" / "ChatGPT.exe"),
+                "command_line": "ChatGPT.exe",
+            },
+        )
+
+        self.assertEqual(
+            _relevant_client_names(cindy_home, records),
+            ("ChatGPT.exe",),
         )
 
     def test_unproven_or_orphan_related_processes_still_block(self) -> None:

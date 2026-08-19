@@ -527,6 +527,7 @@ class CindyAdapterTests(unittest.TestCase):
         self.assertTrue(finding.details["thread_delete_supported"])
         self.assertFalse(finding.details["needs_quarantine"])
         self.assertTrue(finding.details["cascade_safe"])
+        self.assertEqual(finding.details["cleanup_blocker_codes"], [])
 
     def test_live_and_non_codex_sessions_are_not_reported(self) -> None:
         create_cindy_database(
@@ -570,6 +571,10 @@ class CindyAdapterTests(unittest.TestCase):
         self.assertTrue(finding.details["originator_conflict"])
         self.assertFalse(finding.details["cleanable"])
         self.assertTrue(finding.details["needs_quarantine"])
+        self.assertEqual(
+            finding.details["cleanup_blocker_codes"],
+            ["identity_conflict", "spawn_edge_open"],
+        )
 
     def test_missing_originator_is_accepted_for_legacy_cindy_rollout(self) -> None:
         thread_id = "legacy-cindy"
@@ -636,6 +641,10 @@ class CindyAdapterTests(unittest.TestCase):
 
         self.assertEqual(finding.details["live_reference_count"], 1)
         self.assertFalse(finding.details["cleanable"])
+        self.assertEqual(
+            finding.details["cleanup_blocker_codes"],
+            ["live_frontend_reference", "spawn_edge_open"],
+        )
         self.assertIn(thread_id, adapter.live_thread_ids)
 
     def test_null_status_is_treated_as_live_and_blocks_cleanup(self) -> None:
@@ -721,6 +730,10 @@ class CindyAdapterTests(unittest.TestCase):
             ["still-live-child"],
         )
         self.assertFalse(finding.details["cleanable"])
+        self.assertEqual(
+            finding.details["cleanup_blocker_codes"],
+            ["cascade_requires_explicit_scope"],
+        )
 
     def test_missing_spawn_edge_evidence_fails_closed(self) -> None:
         thread_id = "cindy-cascade-unknown"
@@ -742,6 +755,10 @@ class CindyAdapterTests(unittest.TestCase):
         self.assertFalse(finding.details["cascade_safe"])
         self.assertFalse(finding.details["cleanable"])
         self.assertTrue(finding.details["needs_quarantine"])
+        self.assertEqual(
+            finding.details["cleanup_blocker_codes"],
+            ["spawn_edge_open"],
+        )
 
     def test_resolved_soft_delete_without_codex_artifact_is_not_reported(self) -> None:
         create_cindy_database(
