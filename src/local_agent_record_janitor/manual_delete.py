@@ -315,11 +315,43 @@ def build_manual_delete_closure(
             str(item.get("platform") or "").casefold() for item in evidence
         }
         unavailable_reason: str | None = None
+        owner_client: str | None = None
+        owner_process_root: str | None = None
         if platforms != {"aionui"} and platforms != {"cindy"}:
             unavailable_reason = (
                 "A frontend physical database cannot mix unsupported or "
                 "different frontend platforms in one transaction"
             )
+        elif platforms == {"cindy"}:
+            matching_sessions = tuple(
+                payload
+                for session in action.frontend_sessions
+                if (
+                    (payload := _frontend_approval_payload(session))["platform"]
+                    .casefold()
+                    == "cindy"
+                    and payload["database"] == database
+                )
+            )
+            owner_fields_complete = bool(matching_sessions) and all(
+                str(payload.get("owner_client") or "").strip().casefold()
+                == "cindy"
+                and bool(str(payload.get("owner_process_root") or "").strip())
+                for payload in matching_sessions
+            )
+            owner_roots = {
+                str(payload["owner_process_root"]).strip()
+                for payload in matching_sessions
+                if payload.get("owner_process_root")
+            }
+            if owner_fields_complete and len(owner_roots) == 1:
+                owner_client = "cindy"
+                owner_process_root = next(iter(owner_roots))
+            else:
+                unavailable_reason = (
+                    "Cindy frontend references do not prove one exact owner "
+                    "client and process root"
+                )
         impact = ActionImpact(
             affected_thread_ids=tuple(action.affected_thread_ids),
             descendant_thread_ids=tuple(action.descendants),
@@ -329,6 +361,8 @@ def build_manual_delete_closure(
             frontend_database_paths=(database,),
             frontend_reference_evidence=evidence,
             resource_path=database,
+            owner_client=owner_client,
+            owner_process_root=owner_process_root,
         )
         snapshot = _fingerprint(
             {
@@ -336,6 +370,8 @@ def build_manual_delete_closure(
                 "native_action_id": action.action_id,
                 "target": target.to_dict(),
                 "database": database,
+                "owner_client": owner_client,
+                "owner_process_root": owner_process_root,
                 "references": list(evidence),
             }
         )
@@ -344,6 +380,8 @@ def build_manual_delete_closure(
                 "target": target.to_dict(),
                 "kind": ActionKind.REMOVE_FRONTEND_REFERENCE.value,
                 "database": database,
+                "owner_client": owner_client,
+                "owner_process_root": owner_process_root,
                 "references": list(evidence),
             }
         )[:24]
@@ -1464,6 +1502,20 @@ def _frontend_approval_payload(record: Any) -> dict[str, Any]:
                 )
             value = _normalize_path(value)
         fields[label] = _json_value(value)
+    for label in ("owner_client", "owner_process_root"):
+        present, value = _attribute(record, (label,))
+        if not present or value is None:
+            fields[label] = None
+            continue
+        if not isinstance(value, (str, os.PathLike)) or not os.fspath(value):
+            raise ManualDeletePlanError(
+                f"FrontendSessionRecord has invalid {label}"
+            )
+        fields[label] = (
+            _normalize_path(value)
+            if label == "owner_process_root"
+            else str(value).strip().casefold()
+        )
     if not isinstance(fields["platform"], str) or not fields["platform"]:
         raise ManualDeletePlanError("FrontendSessionRecord has invalid platform")
     if not isinstance(fields["database"], str) or not fields["database"]:

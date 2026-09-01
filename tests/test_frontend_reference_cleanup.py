@@ -47,10 +47,12 @@ class FrontendReferenceCleanupTests(unittest.TestCase):
         )
 
     def clean(self, evidence: list[dict[str, object]]) -> object:
+        platform = str(evidence[0].get("platform") or "").casefold()
         return execute_frontend_reference_cleanup(
-            self.codex_home,
+            self.root if platform == "cindy" else self.codex_home,
             evidence,
             client_inspector=lambda _home: (),
+            owner_client="cindy" if platform == "cindy" else None,
         )
 
     def test_aionui_rowid_delete_preserves_unrelated_rows_and_tables(self) -> None:
@@ -255,6 +257,85 @@ class FrontendReferenceCleanupTests(unittest.TestCase):
         self.assertEqual(after[2:], before[2:])
         self.assertEqual(result.cleared_cindy_current_references, 1)
 
+    def test_cindy_action_uses_exact_owner_identity_once(self) -> None:
+        database = self.root / "cindy-owner.db"
+        create_cindy_database(
+            database,
+            [
+                {
+                    "id": "deleted-session",
+                    "sdk_session_id": "native-id",
+                    "status": "deleted",
+                    "agent_kind": "codex",
+                }
+            ],
+        )
+        adapter = self.cindy_adapter(database)
+        preview = StringIO()
+        self.assertEqual(
+            main(
+                ["clean", "--platform", "cindy", "--json"],
+                adapters=[adapter],
+                stdout=preview,
+                stderr=StringIO(),
+                client_inspector=lambda _root: (),
+            ),
+            0,
+        )
+        plan = json.loads(preview.getvalue())
+        action = next(
+            item
+            for item in plan["actions"]
+            if item["kind"] == "remove_frontend_reference"
+        )
+        self.assertEqual(action["impact"]["owner_client"], "cindy")
+        self.assertEqual(
+            Path(action["impact"]["owner_process_root"]),
+            self.root,
+        )
+        inspections: list[tuple[Path, str | None]] = []
+
+        def inspect(
+            root: Path,
+            *,
+            owner_client: str | None = None,
+        ) -> tuple[str, ...]:
+            inspections.append((root, owner_client))
+            return () if root == self.root and owner_client == "cindy" else (
+                "ChatGPT.exe",
+                "codex.exe",
+            )
+
+        output = StringIO()
+        self.assertEqual(
+            main(
+                [
+                    "clean",
+                    "--platform",
+                    "cindy",
+                    "--action-id",
+                    action["action_id"],
+                    "--plan-fingerprint",
+                    plan["plan_fingerprint"],
+                    "--clients-closed",
+                    "--yes",
+                    "--json",
+                ],
+                adapters=[adapter],
+                stdout=output,
+                stderr=StringIO(),
+                client_inspector=inspect,
+            ),
+            0,
+        )
+        self.assertEqual(inspections, [(self.root, "cindy")])
+        self.assertEqual(
+            json.loads(output.getvalue())["result"][
+                "cleared_cindy_current_references"
+            ],
+            1,
+        )
+
     def test_cindy_history_removes_only_json_field_and_preserves_row(self) -> None:
         database = self.root / "cindy-history.db"
         create_cindy_database(
@@ -389,9 +470,10 @@ class FrontendReferenceCleanupTests(unittest.TestCase):
             "still running",
         ):
             execute_frontend_reference_cleanup(
-                self.codex_home,
+                self.root,
                 [evidence],
                 client_inspector=lambda _home: ("Cindy.exe",),
+                owner_client="cindy",
             )
         with closing(sqlite3.connect(database)) as connection:
             connection.execute("ALTER TABLE sessions ADD COLUMN added TEXT")

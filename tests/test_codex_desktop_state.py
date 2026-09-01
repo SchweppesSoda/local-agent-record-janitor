@@ -176,10 +176,10 @@ class CodexDesktopStateTests(unittest.TestCase):
     def test_cindy_store_blocks_cindy_and_bundled_codex(self) -> None:
         root = Path(self.temporary_directory.name) / "processes"
         records = self._cindy_process_records(root)
-        cindy_home = root / "CindyGlobal" / "codex-home"
+        cindy_root = root / "CindyGlobal"
 
         self.assertEqual(
-            _relevant_client_names(cindy_home, records),
+            _relevant_client_names(cindy_root, records, owner_client="cindy"),
             ("Cindy.exe", "codex.exe"),
         )
 
@@ -187,14 +187,17 @@ class CodexDesktopStateTests(unittest.TestCase):
         root = Path(self.temporary_directory.name) / "processes"
         self._cindy_process_records(root)
         records = self._official_codex_process_records(root)
-        cindy_home = root / "CindyGlobal" / "codex-home"
+        cindy_root = root / "CindyGlobal"
 
-        self.assertEqual(_relevant_client_names(cindy_home, records), ())
+        self.assertEqual(
+            _relevant_client_names(cindy_root, records, owner_client="cindy"),
+            (),
+        )
 
-    def test_cindy_store_keeps_unproven_chatgpt_process_blocking(self) -> None:
+    def test_cindy_store_ignores_unrelated_chatgpt_without_metadata(self) -> None:
         root = Path(self.temporary_directory.name) / "processes"
         self._cindy_process_records(root)
-        cindy_home = root / "CindyGlobal" / "codex-home"
+        cindy_root = root / "CindyGlobal"
         records = (
             {
                 "process_id": 200,
@@ -206,8 +209,70 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            _relevant_client_names(cindy_home, records),
-            ("ChatGPT.exe",),
+            _relevant_client_names(cindy_root, records, owner_client="cindy"),
+            (),
+        )
+
+    def test_cindy_store_ignores_unrelated_metadata_gaps_but_blocks_unknown_cindy(
+        self,
+    ) -> None:
+        root = Path(self.temporary_directory.name) / "processes"
+        owner_root = root / "renamed-owner-root"
+        owner_root.mkdir(parents=True)
+        records = (
+            {
+                "name": "ChatGPT.exe",
+                "executable_path": None,
+                "command_line": None,
+            },
+            {
+                "process_id": 201,
+                "parent_process_id": 1,
+                "name": "AionUI.exe",
+                "executable_path": None,
+                "command_line": None,
+            },
+            {
+                "process_id": 202,
+                "parent_process_id": 1,
+                "name": "codex.exe",
+                "executable_path": None,
+                "command_line": None,
+            },
+        )
+        self.assertEqual(
+            _relevant_client_names(owner_root, records, owner_client="cindy"),
+            (),
+        )
+
+        other_cindy = self._cindy_process_records(
+            root / "other-process-root",
+        )
+        self.assertEqual(
+            _relevant_client_names(
+                owner_root,
+                other_cindy + records,
+                owner_client="cindy",
+            ),
+            (),
+        )
+
+        incomplete_cindy = (
+            {
+                "process_id": 300,
+                "parent_process_id": 1,
+                "name": "Cindy.exe",
+                "executable_path": None,
+                "command_line": None,
+            },
+        )
+        self.assertEqual(
+            _relevant_client_names(
+                owner_root,
+                incomplete_cindy,
+                owner_client="cindy",
+            ),
+            ("Cindy.exe",),
         )
 
     def test_unproven_or_orphan_related_processes_still_block(self) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import sqlite3
 import stat
@@ -119,10 +120,11 @@ class _PreparedMutation:
 
 
 def execute_frontend_reference_cleanup(
-    codex_home: Path,
+    owner_process_root: Path,
     evidence_items: Sequence[Mapping[str, Any]],
     *,
     client_inspector: ClientInspector,
+    owner_client: str | None = None,
     phase_callback: Callable[[str], None] | None = None,
 ) -> FrontendReferenceCleanupResult:
     """Apply one physical frontend-database batch transactionally."""
@@ -146,8 +148,16 @@ def execute_frontend_reference_cleanup(
         )
     database = Path(next(iter(databases))).expanduser().absolute()
     platform = next(iter(platforms))
+    if platform == "cindy" and str(owner_client or "").casefold() != "cindy":
+        raise FrontendReferenceError(
+            "Cindy frontend reference cleanup requires owner_client=cindy"
+        )
     _validate_database_file(database)
-    _require_clients_closed(codex_home, client_inspector)
+    _require_clients_closed(
+        owner_process_root,
+        client_inspector,
+        owner_client=owner_client,
+    )
 
     backup_directory = Path(
         tempfile.mkdtemp(
@@ -159,7 +169,6 @@ def execute_frontend_reference_cleanup(
     mutation_started = False
     try:
         _sqlite_backup(database, backup_path)
-        _require_clients_closed(codex_home, client_inspector)
         with closing(sqlite3.connect(database)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
@@ -1604,10 +1613,27 @@ def _validate_database_file(database: Path) -> None:
 
 
 def _require_clients_closed(
-    codex_home: Path,
+    owner_process_root: Path,
     client_inspector: ClientInspector,
+    *,
+    owner_client: str | None,
 ) -> None:
-    clients = client_inspector(codex_home)
+    try:
+        parameters = inspect.signature(client_inspector).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    accepts_owner_client = any(
+        parameter.name == "owner_client"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_owner_client:
+        clients = client_inspector(
+            owner_process_root,
+            owner_client=owner_client,
+        )
+    else:
+        clients = client_inspector(owner_process_root)
     if clients:
         raise FrontendReferenceError(
             "Related frontend clients are still running: "

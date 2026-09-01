@@ -52,10 +52,12 @@ class FrontendReferenceBatchTests(unittest.TestCase):
         self,
         evidence: list[dict[str, object]],
     ) -> cleanup.FrontendReferenceCleanupResult:
+        platform = str(evidence[0].get("platform") or "").casefold()
         return execute_frontend_reference_cleanup(
-            self.codex_home,
+            self.root if platform == "cindy" else self.codex_home,
             evidence,
             client_inspector=lambda _home: (),
+            owner_client="cindy" if platform == "cindy" else None,
         )
 
     def test_aionui_set_guard_and_transaction_count_are_cardinality_independent(self) -> None:

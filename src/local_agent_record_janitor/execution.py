@@ -465,6 +465,67 @@ def execute_prevalidated_actions(
                 (),
             )
         )
+        platforms = {
+            str(item.get("platform") or "").strip().casefold()
+            for item in reference_evidence
+        }
+        if len(platforms) != 1:
+            raise ExecutionError(
+                "One frontend reference batch must target one frontend.",
+                kind="frontend_reference_platform_mismatch",
+                matches=[str(action.action_id) for action in actions],
+            )
+        owner_client: str | None = None
+        owner_process_root: Path
+        storage = _storage_for_action(actions[0], plan)
+        if platforms == {"cindy"}:
+            raw_owner_clients = [
+                getattr(action.impact, "owner_client", None)
+                for action in actions
+            ]
+            if any(
+                client is None or not str(client).strip()
+                for client in raw_owner_clients
+            ):
+                raise ExecutionError(
+                    "Cindy frontend reference actions require one exact "
+                    "owner client and process root.",
+                    kind="frontend_reference_owner_identity_missing",
+                    matches=[str(action.action_id) for action in actions],
+                )
+            owner_clients = {
+                str(client).strip().casefold()
+                for client in raw_owner_clients
+            }
+            raw_owner_roots = [
+                getattr(action.impact, "owner_process_root", None)
+                for action in actions
+            ]
+            if any(
+                root is None or not str(root).strip()
+                for root in raw_owner_roots
+            ):
+                raise ExecutionError(
+                    "Cindy frontend reference actions require one exact "
+                    "owner client and process root.",
+                    kind="frontend_reference_owner_identity_missing",
+                    matches=[str(action.action_id) for action in actions],
+                )
+            owner_roots = {
+                str(root).strip()
+                for root in raw_owner_roots
+            }
+            if owner_clients != {"cindy"} or len(owner_roots) != 1:
+                raise ExecutionError(
+                    "Cindy frontend reference actions require one exact "
+                    "owner client and process root.",
+                    kind="frontend_reference_owner_identity_missing",
+                    matches=[str(action.action_id) for action in actions],
+                )
+            owner_client = "cindy"
+            owner_process_root = Path(next(iter(owner_roots)))
+        else:
+            owner_process_root = Path(storage.path)
         if action_state_callback is not None:
             for action in actions:
                 action_state_callback("guard_started", action, None)
@@ -475,11 +536,11 @@ def execute_prevalidated_actions(
             for action in actions:
                 action_state_callback(phase, action, None)
 
-        storage = _storage_for_action(actions[0], plan)
         result = execute_frontend_reference_cleanup(
-            Path(storage.path),
+            owner_process_root,
             reference_evidence,
             client_inspector=client_inspector,
+            owner_client=owner_client,
             phase_callback=forward_frontend_phase,
         )
         return ExecutionOutcome(
@@ -503,6 +564,56 @@ def execute_prevalidated_actions(
             raise ExecutionError(
                 "One frontend session batch must target one physical database.",
                 kind="multiple_frontend_session_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        raw_owner_process_roots = [
+            getattr(action.impact, "owner_process_root", None)
+            for action in actions
+        ]
+        owner_process_roots = {
+            str(root).strip()
+            for root in raw_owner_process_roots
+            if root is not None and str(root).strip()
+        }
+        if any(
+            root is None or not str(root).strip()
+            for root in raw_owner_process_roots
+        ):
+            raise ExecutionError(
+                "Every Cindy frontend session action must bind an explicit "
+                "owner process root.",
+                kind="frontend_session_owner_root_missing",
+                matches=[str(action.action_id) for action in actions],
+            )
+        if len(owner_process_roots) != 1:
+            raise ExecutionError(
+                "One frontend session batch must target one owner process root.",
+                kind="frontend_session_owner_root_mismatch",
+                matches=[str(action.action_id) for action in actions],
+            )
+        raw_owner_clients = [
+            getattr(action.impact, "owner_client", None)
+            for action in actions
+        ]
+        owner_clients = {
+            str(client).strip().casefold()
+            for client in raw_owner_clients
+            if client is not None and str(client).strip()
+        }
+        if any(
+            client is None or not str(client).strip()
+            for client in raw_owner_clients
+        ):
+            raise ExecutionError(
+                "Every Cindy frontend session action must bind an explicit "
+                "owner client.",
+                kind="frontend_session_owner_client_missing",
+                matches=[str(action.action_id) for action in actions],
+            )
+        if owner_clients != {"cindy"}:
+            raise ExecutionError(
+                "Cindy frontend session actions must bind owner_client=cindy.",
+                kind="frontend_session_owner_client_mismatch",
                 matches=[str(action.action_id) for action in actions],
             )
         evidence = tuple(
@@ -530,7 +641,8 @@ def execute_prevalidated_actions(
         storage = _storage_for_action(actions[0], plan)
         result = execute_cindy_session_cleanup(
             evidence,
-            client_root=Path(storage.path),
+            owner_client="cindy",
+            owner_process_root=Path(next(iter(owner_process_roots))),
             client_inspector=client_inspector,
             phase_callback=forward_session_phase,
         )

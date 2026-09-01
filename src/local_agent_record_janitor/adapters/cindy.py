@@ -35,14 +35,28 @@ class CindyAdapter(FrontendAdapter):
         database: Path,
         codex_home: Path,
         cindy_root: Path | None = None,
+        owner_process_root: Path | None = None,
         codex_bin_hint: Path | None = None,
         backend: str = "codex",
     ) -> None:
-        super().__init__(database=database, codex_home=codex_home)
+        root = (
+            Path(cindy_root).expanduser()
+            if cindy_root is not None
+            else Path(database).expanduser().parent
+        )
+        super().__init__(
+            database=database,
+            codex_home=codex_home,
+            data_root=root,
+            owner_process_root=(
+                owner_process_root
+                if owner_process_root is not None
+                else root
+            ),
+        )
         self.backend = normalize_engine(backend)
-        root = cindy_root or database.parent
-        self.cindy_root = root.expanduser()
-        self.codex_bin_hint = codex_bin_hint or discover_cindy_codex(root)
+        self.cindy_root = self.data_root
+        self.codex_bin_hint = codex_bin_hint or discover_cindy_codex(self.data_root)
         self._reference_catalog_cache: Any | None = None
 
     def snapshot_sessions(
@@ -97,6 +111,8 @@ class CindyAdapter(FrontendAdapter):
                 thread_id=reference.native_session_id,
                 database=self.database,
                 codex_home=self.codex_home,
+                owner_process_root=self.owner_process_root,
+                owner_client=self.client,
                 backend=reference.backend,
                 status=reference.session_status,
                 updated_at_ms=reference.session_updated_at_ms,

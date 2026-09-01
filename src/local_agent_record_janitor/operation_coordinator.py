@@ -217,7 +217,18 @@ class OperationCoordinator:
                 if live.result is not None:
                     # In particular, an unknown result is a recovery state;
                     # apply must never send another irreversible request.
-                    return dict(live.result)
+                    # A known pre-mutation blocker is the one exception: the
+                    # child journal is explicitly resumable once the blocker
+                    # (for example, an open client) is gone.  Keep terminal
+                    # and unknown results immutable, but let that one child
+                    # pass through the normal skip/resume loop.
+                    if str(live.result.get("goal_status") or "") != "blocked":
+                        return dict(live.result)
+                    if not any(
+                        str(batch.get("status") or "") == "blocked"
+                        for batch in child_inspection.batches
+                    ):
+                        return dict(live.result)
             else:
                 source = None if adapters is None else tuple(adapters)
                 (
@@ -234,7 +245,11 @@ class OperationCoordinator:
                     include_action_contexts=True,
                     codex_home=codex_home,
                 )
-                candidates, blockers = self._bind_fresh_candidates(document, context)
+                candidates, blockers = self._bind_fresh_candidates(
+                    document,
+                    context,
+                    skip_child_ids=child_inspection.completed_child_ids,
+                )
                 if blockers:
                     return self._result_document(
                         document, normalized_scope, goal_status="blocked",
@@ -1003,8 +1018,8 @@ class OperationCoordinator:
             storage_id_for_path,
         )
 
-        grouped: dict[str, list[Any]] = {}
-        databases: dict[str, Path] = {}
+        grouped: dict[tuple[str, str], list[Any]] = {}
+        databases: dict[tuple[str, str], tuple[Path, Path]] = {}
         for session in getattr(inventory, "frontend_sessions", ()):
             if str(getattr(session, "platform", "")).casefold() != "cindy":
                 continue
@@ -1024,8 +1039,33 @@ class OperationCoordinator:
                 raise OperationCoordinatorError(
                     "Cindy terminal session evidence is not exact"
                 )
-            key = os.path.normcase(os.path.abspath(str(database)))
-            databases[key] = database.expanduser().absolute()
+            raw_owner_process_root = getattr(
+                session,
+                "owner_process_root",
+                None,
+            )
+            owner_client = str(
+                getattr(session, "owner_client", "") or ""
+            ).strip().casefold()
+            if owner_client != "cindy":
+                raise OperationCoordinatorError(
+                    "Cindy terminal session evidence is missing explicit "
+                    "owner_client=cindy"
+                )
+            if raw_owner_process_root is None or not str(raw_owner_process_root).strip():
+                raise OperationCoordinatorError(
+                    "Cindy terminal session evidence is missing explicit "
+                    "owner_process_root"
+                )
+            database_path = database.expanduser().absolute()
+            owner_process_root = Path(
+                str(raw_owner_process_root)
+            ).expanduser().absolute()
+            key = (
+                os.path.normcase(os.path.abspath(str(database_path))),
+                os.path.normcase(os.path.abspath(str(owner_process_root))),
+            )
+            databases[key] = (database_path, owner_process_root)
             grouped.setdefault(key, []).append(session)
 
         if not grouped:
@@ -1038,7 +1078,7 @@ class OperationCoordinator:
         storages = list(getattr(context.plan, "storages", ()))
         storage_ids = {str(storage.storage_id) for storage in storages}
         for key in sorted(grouped):
-            database = databases[key]
+            database, owner_process_root = databases[key]
             seeds = []
             for session in grouped[key]:
                 reference = session.details["frontend_reference"]
@@ -1086,6 +1126,8 @@ class OperationCoordinator:
                     (
                         os.path.normcase(str(database))
                         + "\0"
+                        + os.path.normcase(str(owner_process_root))
+                        + "\0"
                         + session_id
                         + "\0"
                         + str(evidence["session_row_fingerprint"])
@@ -1099,12 +1141,16 @@ class OperationCoordinator:
                 payload: dict[str, Any] = {
                     "frontend_session_id": session_id,
                     "status": session.status,
+                    "owner_client": owner_client,
+                    "owner_process_root": str(owner_process_root),
                 }
                 if isinstance(working_dir, str) and working_dir.strip():
                     payload["project_path"] = working_dir.strip()
                 impact = ActionImpact(
                     frontend_session_database_paths=(str(database),),
                     frontend_session_evidence=(evidence,),
+                    owner_client=owner_client,
+                    owner_process_root=str(owner_process_root),
                     resource_path=str(database),
                     external_engine=str(session.backend or "codex"),
                     external_storage_root=str(storage_path),
@@ -2528,6 +2574,8 @@ class OperationCoordinator:
         self,
         document: Mapping[str, Any],
         context: Any,
+        *,
+        skip_child_ids: Iterable[str] = (),
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
         frozen = {
             str(item.get("action_id")): item
@@ -2538,15 +2586,67 @@ class OperationCoordinator:
             str(action.action_id): action
             for action in getattr(context.plan, "actions", ())
         }
+        frontend_by_target: dict[tuple[str, str, str], list[Any]] = {}
+        for action in current.values():
+            kind = str(
+                getattr(
+                    getattr(action, "kind", None),
+                    "value",
+                    getattr(action, "kind", ""),
+                )
+            )
+            if kind != "delete_frontend_session":
+                continue
+            target = getattr(action, "target", None)
+            if target is None:
+                continue
+            target_key = (
+                kind,
+                str(getattr(target, "storage_id", "")),
+                str(getattr(target, "thread_id", "")),
+            )
+            frontend_by_target.setdefault(target_key, []).append(action)
+        completed = {str(child_id) for child_id in skip_child_ids}
         selected: list[Any] = []
         blockers: list[dict[str, Any]] = []
         for batch in document.get("child_batches", ()):
             if not isinstance(batch, Mapping):
                 continue
+            if str(batch.get("child_operation_id") or "") in completed:
+                # A terminal child is already authorized by its durable
+                # receipt/event. Its records may intentionally be absent
+                # from a fresh catalog, so never try to bind it again.
+                continue
             for action_id in batch.get("action_ids", ()):
                 key = str(action_id)
                 action = current.get(key)
                 frozen_action = frozen.get(key)
+                rebound = False
+                if isinstance(frozen_action, Mapping) and (
+                    action is None
+                    or self._metadata(action_binding(action))
+                    != frozen_action.get("binding")
+                ):
+                    frozen_target = frozen_action.get("target")
+                    if not isinstance(frozen_target, Mapping):
+                        frozen_target = frozen_action.get("binding")
+                    if not isinstance(frozen_target, Mapping):
+                        frozen_target = {}
+                    rebound_action = self._rebind_frontend_session_action(
+                        frozen_action,
+                        frontend_by_target.get(
+                            (
+                                "delete_frontend_session",
+                                str(frozen_target.get("storage_id") or ""),
+                                str(frozen_target.get("thread_id") or ""),
+                            ),
+                            (),
+                        ),
+                        key,
+                    )
+                    if rebound_action is not None:
+                        action = rebound_action
+                        rebound = True
                 if action is None or not isinstance(frozen_action, Mapping):
                     blockers.append(self._blocker(
                         "target_state_changed",
@@ -2554,7 +2654,7 @@ class OperationCoordinator:
                         scope=f"action:{key}", action_id=key,
                     ))
                     continue
-                if self._metadata(action_binding(action)) != frozen_action.get("binding"):
+                if not rebound and self._metadata(action_binding(action)) != frozen_action.get("binding"):
                     blockers.append(self._blocker(
                         "target_state_changed",
                         f"approved action {key} changed after plan",
@@ -2570,6 +2670,271 @@ class OperationCoordinator:
                     continue
                 selected.append(action)
         return tuple(selected), blockers
+
+    @classmethod
+    def _rebind_frontend_session_action(
+        cls,
+        frozen_action: Mapping[str, Any],
+        current_actions: Iterable[Any],
+        frozen_action_id: str,
+    ) -> Any | None:
+        """Rebind Cindy session after an authorized SDK reference clear.
+
+        Cindy's generated action ID includes the full session-row
+        fingerprint. A preceding remove_frontend_reference child is allowed
+        to change only sdk_session_id from its approved value to NULL, which
+        necessarily gives the fresh action a different ID and snapshot. Keep
+        this exception narrow: the physical target, owner, all stable row
+        evidence, and every other action binding field must remain identical.
+        """
+
+        if str(frozen_action.get("kind") or "") != "delete_frontend_session":
+            return None
+        frozen_binding = frozen_action.get("binding")
+        if not isinstance(frozen_binding, Mapping):
+            return None
+        frozen_impact = frozen_binding.get("impact")
+        if not isinstance(frozen_impact, Mapping):
+            return None
+        frozen_target = frozen_action.get("target")
+        if not isinstance(frozen_target, Mapping):
+            frozen_target = frozen_binding
+        frozen_storage = str(
+            frozen_target.get("storage_id") or frozen_binding.get("storage_id") or ""
+        )
+        frozen_thread = str(
+            frozen_target.get("thread_id") or frozen_binding.get("thread_id") or ""
+        )
+        frozen_databases = tuple(
+            str(value)
+            for value in frozen_impact.get("frontend_session_database_paths", ())
+        )
+        frozen_owner = str(frozen_impact.get("owner_process_root") or "")
+        matches: list[Any] = []
+        for candidate in current_actions:
+            try:
+                current_binding = cls._metadata(action_binding(candidate))
+            except Exception:
+                continue
+            if not isinstance(current_binding, Mapping):
+                continue
+            if str(current_binding.get("kind") or "") != "delete_frontend_session":
+                continue
+            if str(current_binding.get("storage_id") or "") != frozen_storage:
+                continue
+            if str(current_binding.get("thread_id") or "") != frozen_thread:
+                continue
+            current_impact = current_binding.get("impact")
+            if not isinstance(current_impact, Mapping):
+                continue
+            current_databases = tuple(
+                str(value)
+                for value in current_impact.get(
+                    "frontend_session_database_paths", ()
+                )
+            )
+            if current_databases != frozen_databases:
+                continue
+            if str(current_impact.get("owner_process_root") or "") != frozen_owner:
+                continue
+            if cls._frontend_session_transition_allowed(
+                frozen_binding,
+                current_binding,
+            ):
+                matches.append(candidate)
+        if len(matches) != 1:
+            return None
+        try:
+            frozen_evidence = frozen_impact.get("frontend_session_evidence")
+            impact = replace(
+                matches[0].impact,
+                frontend_session_evidence=tuple(
+                    dict(item)
+                    for item in frozen_evidence
+                    if isinstance(item, Mapping)
+                ),
+            )
+            return replace(
+                matches[0],
+                action_id=str(frozen_action_id),
+                snapshot_fingerprint=str(
+                    frozen_binding.get("snapshot_fingerprint") or ""
+                ),
+                impact=impact,
+            )
+        except (TypeError, ValueError):
+            # Only the repository's immutable CandidateAction is supported;
+            # do not mutate an arbitrary adapter object in place.
+            return None
+
+    @classmethod
+    def _frontend_session_transition_allowed(
+        cls,
+        frozen_binding: Mapping[str, Any],
+        current_binding: Mapping[str, Any],
+    ) -> bool:
+        """Return whether a fresh Cindy session binding is safe to reuse."""
+
+        for key in (
+            "kind",
+            "storage_id",
+            "thread_id",
+            "affected_thread_ids",
+            "observation_ids",
+            "capability",
+        ):
+            if cls._metadata(frozen_binding.get(key)) != cls._metadata(
+                current_binding.get(key)
+            ):
+                return False
+        frozen_impact = frozen_binding.get("impact")
+        current_impact = current_binding.get("impact")
+        if not isinstance(frozen_impact, Mapping) or not isinstance(
+            current_impact, Mapping
+        ):
+            return False
+        left_impact = dict(frozen_impact)
+        right_impact = dict(current_impact)
+        frozen_evidence = left_impact.pop("frontend_session_evidence", None)
+        current_evidence = right_impact.pop("frontend_session_evidence", None)
+        if cls._metadata(left_impact) != cls._metadata(right_impact):
+            return False
+        if not isinstance(frozen_evidence, Sequence) or isinstance(
+            frozen_evidence, (str, bytes, bytearray)
+        ) or not isinstance(current_evidence, Sequence) or isinstance(
+            current_evidence, (str, bytes, bytearray)
+        ):
+            return False
+        if len(frozen_evidence) != 1 or len(current_evidence) != 1:
+            return False
+        approved = cls._metadata(frozen_evidence[0])
+        observed = cls._metadata(current_evidence[0])
+        if not isinstance(approved, Mapping) or not isinstance(observed, Mapping):
+            return False
+        approved = dict(approved)
+        observed = dict(observed)
+        sentinel = object()
+        approved_sdk = approved.pop("expected_sdk_session_id", sentinel)
+        # _metadata intentionally omits None-valued mapping fields. Treat an
+        # omitted fresh SDK value as the observed NULL, but require the
+        # approved evidence to carry its original non-NULL reference.
+        observed_sdk = observed.pop("expected_sdk_session_id", None)
+        approved_row = approved.pop("session_row_fingerprint", None)
+        observed_row = observed.pop("session_row_fingerprint", None)
+        if cls._metadata(approved) != cls._metadata(observed):
+            return False
+        if approved_sdk is sentinel:
+            return False
+        allowed_sdk = {None} if approved_sdk is None else {approved_sdk, None}
+        if observed_sdk not in allowed_sdk:
+            return False
+        frozen_snapshot = str(frozen_binding.get("snapshot_fingerprint") or "")
+        current_snapshot = str(current_binding.get("snapshot_fingerprint") or "")
+        expected_frozen_snapshot = ":".join(
+            (
+                str(approved_row or ""),
+                str(approved.get("schema_bundle_fingerprint") or ""),
+                str(approved.get("message_id_fingerprint") or ""),
+            )
+        )
+        expected_current_snapshot = ":".join(
+            (
+                str(observed_row or ""),
+                str(observed.get("schema_bundle_fingerprint") or ""),
+                str(observed.get("message_id_fingerprint") or ""),
+            )
+        )
+        return (
+            frozen_snapshot == expected_frozen_snapshot
+            and current_snapshot == expected_current_snapshot
+        )
+    @staticmethod
+    def _error_details(error: BaseException) -> dict[str, str]:
+        """Serialize only type/message metadata for a child failure.
+
+        Exception objects and their arbitrary attributes are deliberately not
+        journaled: adapters may attach request bodies, rows, or transcripts to
+        them.  The coordinator keeps the original human-readable exception
+        text while limiting the durable shape to body-free metadata.
+        """
+
+        message = str(error) or repr(error)
+        return {
+            "type": type(error).__name__,
+            "message": message,
+        }
+
+    @staticmethod
+    def _child_attempted(state: Mapping[str, Any]) -> bool:
+        """Return true for any durable indication that mutation was tried."""
+
+        return any(
+            bool(state.get(field))
+            for field in ("mutation_started", "mutation_attempted", "attempted")
+        )
+
+    @classmethod
+    def _resumable_blocked_child(cls, state: Mapping[str, Any]) -> bool:
+        """Recognize the sole safe apply-resume state.
+
+        A known blocker may be retried only when the child explicitly reached
+        ``blocked`` before opening/attempting mutation.  Requiring all four
+        fields prevents a forged or partially-written checkpoint from being
+        mistaken for a fresh operation.
+        """
+
+        return (
+            state.get("phase") == "blocked"
+            and state.get("goal_status") == "blocked"
+            and state.get("current_action_state") == "not_started"
+            and not cls._child_attempted(state)
+        )
+
+    @classmethod
+    def _child_blockers(
+        cls,
+        value: Mapping[str, Any] | None,
+        child_id: str,
+    ) -> list[dict[str, Any]]:
+        """Extract persisted body-free blockers from a child checkpoint."""
+
+        if not isinstance(value, Mapping):
+            return []
+        raw_blockers = value.get("blockers")
+        result: list[dict[str, Any]] = []
+        if isinstance(raw_blockers, Sequence) and not isinstance(
+            raw_blockers, (str, bytes, bytearray)
+        ):
+            for raw in raw_blockers:
+                if not isinstance(raw, Mapping):
+                    continue
+                blocker = cls._metadata(raw)
+                if not isinstance(blocker, Mapping):
+                    continue
+                if not blocker.get("blocker_code"):
+                    continue
+                item = dict(blocker)
+                item.setdefault("scope", f"child:{child_id}")
+                result.append(item)
+        if result:
+            return result
+        raw_error = value.get("error")
+        if isinstance(raw_error, Mapping):
+            message = raw_error.get("message")
+        else:
+            message = raw_error
+        if isinstance(message, str) and message:
+            code = (
+                "mutation_outcome_unknown"
+                if str(value.get("goal_status") or "") == "unknown"
+                else "batch_execution_blocked"
+            )
+            return [cls._blocker(
+                code,
+                message,
+                scope=f"child:{child_id}",
+            )]
+        return []
 
     def _inspect_child_states(
         self,
@@ -2645,13 +3010,36 @@ class OperationCoordinator:
                     modified = modified or bool(result.get("modified"))
                     mutation_started = mutation_started or bool(
                         result.get("mutation_started")
+                        or result.get("mutation_attempted")
+                        or result.get("attempted")
                     )
                     if goal in {"complete", "completed_with_residuals"}:
                         completed.add(child_id)
                         view["status"] = goal
                         batches.append(view)
                         continue
+                    # Older integrations may have persisted a non-terminal
+                    # result alongside the checkpoint.  It is resumable only
+                    # when the checkpoint proves the same pre-mutation state;
+                    # a result's goal alone must never authorize a retry.
+                    if (
+                        goal == "blocked"
+                        and state is not None
+                        and self._resumable_blocked_child(state)
+                    ):
+                        view["status"] = "blocked"
+                        persisted = self._child_blockers(state, child_id)
+                        if not persisted:
+                            persisted = self._child_blockers(result, child_id)
+                        if persisted:
+                            view["blockers"] = persisted
+                        batches.append(view)
+                        continue
                     view["status"] = "unknown"
+                    persisted = self._child_blockers(result, child_id)
+                    if persisted:
+                        view["blockers"] = persisted
+                        blockers.extend(persisted)
                     blockers.append(self._blocker(
                         "recovery_required",
                         "child operation has a non-terminal persisted result",
@@ -2684,9 +3072,12 @@ class OperationCoordinator:
 
                 goal = str(state.get("goal_status") or "")
                 phase = str(state.get("phase") or "")
-                started = bool(state.get("mutation_started"))
+                started = self._child_attempted(state)
                 modified = modified or bool(state.get("modified"))
                 mutation_started = mutation_started or started
+                persisted_blockers = self._child_blockers(state, child_id)
+                if persisted_blockers:
+                    view["blockers"] = persisted_blockers
                 if phase == "finished" and goal in {
                     "complete",
                     "completed_with_residuals",
@@ -2702,6 +3093,7 @@ class OperationCoordinator:
                         batches.append(view)
                         continue
                     view["status"] = "unknown"
+                    blockers.extend(persisted_blockers)
                     blockers.append(self._blocker(
                         "recovery_required",
                         "child terminal state lacks a trusted completion event",
@@ -2710,7 +3102,17 @@ class OperationCoordinator:
                     batches.append(view)
                     continue
 
-                # The only resumable persisted state is the preflight phase
+                # A known pre-mutation blocker is safe to retry after its
+                # external cause is resolved.  This is intentionally stricter
+                # than merely checking mutation_started: a guard may have
+                # begun or an attempted flag may have been persisted without
+                # a mutation marker, and those states still require verify.
+                if self._resumable_blocked_child(state):
+                    view["status"] = "blocked"
+                    batches.append(view)
+                    continue
+
+                # The other resumable persisted state is the preflight phase
                 # before any irreversible request was marked durable.
                 if phase == "preflight" and not started:
                     view["status"] = "pending"
@@ -2718,6 +3120,7 @@ class OperationCoordinator:
                     continue
 
                 view["status"] = "unknown"
+                blockers.extend(persisted_blockers)
                 blockers.append(self._blocker(
                     "recovery_required",
                     "child operation has started or has an untrusted state; "
@@ -2798,8 +3201,56 @@ class OperationCoordinator:
         mutation_started = child_inspection.mutation_started
         stopped_unknown = False
         blocked_batches: list[str] = []
+        blocked_batch_blockers: list[dict[str, Any]] = []
+        def batch_key(batch: Any) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+            return (
+                str(batch.storage_id),
+                str(batch.mutation_family),
+                tuple(str(value) for value in batch.resource_key),
+                tuple(
+                    str(getattr(action, "action_id", ""))
+                    for action in batch.actions
+                ),
+            )
+
+        frozen_child_ids = {
+            (
+                str(raw.get("storage_id") or ""),
+                str(raw.get("mutation_family") or ""),
+                tuple(str(value) for value in raw.get("resource_key", ())),
+                tuple(str(value) for value in raw.get("action_ids", ())),
+            ): str(raw.get("child_operation_id") or "")
+            for raw in live.document.get("child_batches", ())
+            if isinstance(raw, Mapping)
+            and str(raw.get("child_operation_id") or "")
+        }
+        if frozen_child_ids:
+            unresolved = [
+                self._blocker(
+                    "target_state_changed",
+                    "fresh batch has no immutable child binding",
+                    scope=f"batch:{batch.batch_id}",
+                )
+                for batch in batches
+                if batch_key(batch) not in frozen_child_ids
+            ]
+            if unresolved:
+                result = self._result_document(
+                    live.document,
+                    live.document.get("scope", {}),
+                    goal_status="blocked",
+                    blockers=unresolved,
+                    batches=child_inspection.batches,
+                    modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started,
+                )
+                live.result = result
+                return result
         for index, batch in enumerate(batches):
-            child_id = f"{live.operation_id}-{index + 1}"
+            key = batch_key(batch)
+            child_id = frozen_child_ids.get(key) or (
+                f"{live.operation_id}-{index + 1}"
+            )
             if child_id in completed_child_ids:
                 skipped_batch = {
                     "batch_id": batch.batch_id,
@@ -2914,7 +3365,7 @@ class OperationCoordinator:
                             )
                         }
                         typed = tuple(
-                            typed_by_id[str(action.action_id)]
+                            typed_by_id.get(str(action.action_id), action)
                             for action in batch.actions
                         )
                         outcome = self.service.execute(
@@ -3009,6 +3460,14 @@ class OperationCoordinator:
                     )
                 )
                 stopped_unknown = stopped_unknown or batch_unknown
+                error_details = self._error_details(exc)
+                failure_blocker = self._blocker(
+                    "batch_execution_blocked"
+                    if not batch_unknown
+                    else "mutation_outcome_unknown",
+                    error_details["message"],
+                    scope=f"child:{child_id}",
+                )
                 failed_batch = {
                     "batch_id": batch.batch_id,
                     "child_operation_id": child_id,
@@ -3016,26 +3475,55 @@ class OperationCoordinator:
                     "mutation_family": batch.mutation_family,
                     "status": "unknown" if batch_unknown else "blocked",
                     "action_ids": [str(action.action_id) for action in batch.actions],
-                    "error": str(exc) or repr(exc),
+                    "error": error_details["message"],
+                    "error_details": error_details,
+                    "blockers": [failure_blocker],
                 }
                 failed_batch.update(self._batch_scope_metadata(live.context, batch))
-                if not batch_unknown and store is not None:
+                if store is not None:
                     try:
-                        # Persist the explicit known-unchanged outcome so a
-                        # later status read does not mistake a guarded child
-                        # for an ambiguous native mutation. A child that has
-                        # started a transaction remains non-resumable; a
-                        # fresh plan is required to retry it.
+                        # Persist both known blockers and ambiguous failures.
+                        # Status must not need to replay the journal to recover
+                        # the original error, and an unknown child must retain
+                        # its recovery boundary rather than being retried.
+                        current_state = dict(store.read_state() or state)
+                        state_modified = bool(current_state.get("modified"))
+                        state_started = bool(
+                            current_state.get("mutation_started")
+                            or current_state.get("mutation_attempted")
+                        )
+                        state_attempted = bool(
+                            current_state.get("attempted") or batch_mutation_started
+                        )
+                        safe_pre_mutation_block = (
+                            not batch_unknown
+                            and not known_rollback
+                            and not batch_mutation_started
+                            and not state_started
+                            and not state_attempted
+                        )
                         state_updates = {
-                            "phase": "blocked",
-                            "goal_status": "blocked",
+                            "phase": "recovery_required" if batch_unknown else "blocked",
+                            "goal_status": "unknown" if batch_unknown else "blocked",
                             "goal_satisfied": False,
-                            "modified": False,
-                            "mutation_started": batch_mutation_started,
+                            "modified": state_modified,
+                            "mutation_started": state_started or batch_mutation_started,
+                            "attempted": state_attempted,
+                            "error": error_details,
+                            "blockers": [failure_blocker],
                         }
+                        if safe_pre_mutation_block:
+                            # execution.py may checkpoint guard_started before
+                            # a writer's process guard rejects the batch. That
+                            # marker is not an irreversible-attempt marker;
+                            # normalize only this fully proven pre-mutation
+                            # known-blocker state so resume remains safe.
+                            state_updates["current_action_state"] = "not_started"
                         event = {
                             "event": "batch_finished",
-                            "goal_status": "blocked",
+                            "goal_status": "unknown" if batch_unknown else "blocked",
+                            "error": error_details,
+                            "blockers": [failure_blocker],
                         }
                         if known_rollback:
                             state_updates.update(
@@ -3049,19 +3537,24 @@ class OperationCoordinator:
                             state_updates=state_updates,
                         )
                     except Exception as journal_error:
-                        # If the known rollback itself cannot be journaled,
-                        # the operation is no longer trustworthy and must
-                        # return to the conservative unknown boundary.
+                        # If the failure itself cannot be journaled, the
+                        # operation is no longer trustworthy and must return
+                        # to the conservative unknown boundary.
                         batch_unknown = True
                         failed_batch["status"] = "unknown"
                         failed_batch["error"] = (
                             f"{failed_batch['error']}; could not persist "
-                            f"known rollback: {journal_error}"
+                            f"failure evidence: {journal_error}"
                         )
+                        failed_batch["error_details"] = {
+                            **error_details,
+                            "persistence_error": str(journal_error) or repr(journal_error),
+                        }
                 batch_results.append(failed_batch)
                 if batch_unknown:
                     break
                 blocked_batches.append(child_id)
+                blocked_batch_blockers.append(failure_blocker)
         # An ambiguous irreversible result is a recovery boundary. Do not
         # trigger even the terminal catalog pass here: explicit ``verify`` is
         # the only recovery operation allowed to rescan after ``unknown``.
@@ -3113,14 +3606,24 @@ class OperationCoordinator:
         blockers: list[dict[str, Any]] = []
         if terminal_error is not None:
             blockers.append(self._blocker("terminal_scan_incomplete", terminal_error))
-        for child_id in blocked_batches:
-            blockers.append(self._blocker(
-                "batch_execution_blocked",
-                "a child batch failed before an irreversible request",
-                scope=f"child:{child_id}",
-            ))
+        if blocked_batch_blockers:
+            blockers.extend(blocked_batch_blockers)
+        else:
+            for child_id in blocked_batches:
+                blockers.append(self._blocker(
+                    "batch_execution_blocked",
+                    "a child batch failed before an irreversible request",
+                    scope=f"child:{child_id}",
+                ))
         if residuals:
             blockers.append(self._blocker("residual_records", "approved records remain"))
+        # Preserve the exact child failure on the immediate result as well as
+        # in its durable checkpoint.  This makes a failed apply actionable
+        # without opening the child journal and also covers unknown failures.
+        for batch_result in batch_results:
+            for blocker in batch_result.get("blockers", ()):
+                if isinstance(blocker, Mapping) and dict(blocker) not in blockers:
+                    blockers.append(dict(blocker))
         if stopped_unknown:
             goal = "unknown"
             blockers.append(self._blocker(
@@ -3260,10 +3763,23 @@ class OperationCoordinator:
         storage_path: Path,
         index: int,
     ) -> tuple[OperationStore, dict[str, Any]]:
-        child_actions = [
-            self._action_document(live.context, action)
-            for action in batch.actions
-        ]
+        frozen_actions = {
+            str(item.get("action_id")): item
+            for item in live.document.get("actions", ())
+            if isinstance(item, Mapping)
+        }
+        child_actions = []
+        for action in batch.actions:
+            frozen_action = frozen_actions.get(str(action.action_id))
+            if not isinstance(frozen_action, Mapping):
+                raise OperationCoordinatorError(
+                    "batch action is absent from the immutable top-level plan"
+                )
+            # The child plan is a projection of the immutable top-level
+            # authorization. Fresh execution objects may carry a rebinding
+            # snapshot, but must never change accept_plan's child hash during
+            # cross-process recovery.
+            child_actions.append(self._metadata(frozen_action))
         child_plan: dict[str, Any] = {
             "schema_version": "larj.child-operation-plan.v1",
             "operation_id": child_id,
@@ -3425,6 +3941,7 @@ class OperationCoordinator:
 
     def _status_for_document(self, document: Mapping[str, Any]) -> dict[str, Any]:
         batches: list[dict[str, Any]] = []
+        blockers: list[dict[str, Any]] = []
         started = False
         modified = False
         storage_by_id = {
@@ -3432,13 +3949,24 @@ class OperationCoordinator:
             for storage in document.get("storages", ())
             if isinstance(storage, Mapping) and storage.get("path")
         }
+
         for raw in document.get("child_batches", ()):
             if not isinstance(raw, Mapping):
                 continue
             status = "pending"
             child_id = str(raw.get("child_operation_id") or "")
             path = storage_by_id.get(str(raw.get("storage_id")))
-            if path is not None and child_id:
+            child_result: Mapping[str, Any] | None = None
+            child_state: Mapping[str, Any] | None = None
+            child_blockers: list[dict[str, Any]] = []
+            if path is None or not child_id:
+                status = "unknown"
+                child_blockers = [self._blocker(
+                    "recovery_required",
+                    "operation child batch has no trusted storage binding",
+                    scope=f"child:{child_id or '<missing>'}",
+                )]
+            else:
                 try:
                     child_store = OperationStore(path, child_id)
                     child_result = child_store.read_result()
@@ -3447,27 +3975,50 @@ class OperationCoordinator:
                         if child_result is not None
                         else child_store.read_state()
                     )
-                except Exception:
-                    child_result = None
-                    child_state = None
+                except Exception as exc:
                     status = "unknown"
+                    child_blockers = [self._blocker(
+                        "recovery_required",
+                        f"could not trust child operation state: {exc}",
+                        scope=f"child:{child_id}",
+                    )]
                 if child_result:
                     status = str(
                         child_result.get("goal_status")
                         or child_result.get("status")
                         or "unknown"
                     )
-                    started = started or bool(child_result.get("mutation_started"))
+                    started = started or bool(
+                        child_result.get("mutation_started")
+                        or child_result.get("mutation_attempted")
+                        or child_result.get("attempted")
+                    )
                     modified = modified or bool(child_result.get("modified"))
+                    child_blockers = self._child_blockers(child_result, child_id)
                 elif child_state:
                     status = str(
                         child_state.get("goal_status")
                         or child_state.get("phase")
                         or "unknown"
                     )
-                    started = started or bool(child_state.get("mutation_started"))
+                    started = started or bool(
+                        child_state.get("mutation_started")
+                        or child_state.get("mutation_attempted")
+                        or child_state.get("attempted")
+                    )
                     modified = modified or bool(child_state.get("modified"))
-            batches.append({**dict(raw), "status": status})
+                    child_blockers = self._child_blockers(child_state, child_id)
+
+            source = child_result or child_state
+            batch_view = {**dict(raw), "status": status}
+            if isinstance(source, Mapping) and source.get("error") is not None:
+                batch_view["error"] = self._metadata(source.get("error"))
+            if child_blockers:
+                batch_view["blockers"] = child_blockers
+                for blocker in child_blockers:
+                    if blocker not in blockers:
+                        blockers.append(blocker)
+            batches.append(batch_view)
         statuses = {
             str(batch.get("status") or "")
             for batch in batches
@@ -3493,7 +4044,7 @@ class OperationCoordinator:
             "mutation_started": started,
             "scope": document.get("scope", {}),
             "batches": batches,
-            "blockers": [],
+            "blockers": [self._metadata(value) for value in blockers],
         }
 
     def _result_document(

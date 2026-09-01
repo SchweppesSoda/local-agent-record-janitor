@@ -163,6 +163,12 @@ class ActionImpact:
     frontend_project_evidence: tuple[Mapping[str, Any], ...] = ()
     frontend_session_database_paths: tuple[str, ...] = ()
     frontend_session_evidence: tuple[Mapping[str, Any], ...] = ()
+    # Exact Cindy process-owner root frozen by the adapter. This stays
+    # separate from the database/storage path: SQLite rollback evidence lives
+    # at the latter, while process ownership is checked only against this
+    # exact root.
+    owner_client: str | None = None
+    owner_process_root: str | None = None
     indexed_thread_ids: tuple[str, ...] = ()
     rollout_state_fingerprints: tuple[str, ...] = ()
     conversation_metadata_fingerprints: tuple[str, ...] = ()
@@ -251,6 +257,8 @@ class ActionImpact:
                 _json_value(value)
                 for value in self.frontend_session_evidence
             ],
+            "owner_client": self.owner_client,
+            "owner_process_root": self.owner_process_root,
         }
 
 
@@ -320,6 +328,8 @@ class CandidateAction:
                 "database_paths": list(
                     self.impact.frontend_session_database_paths
                 ),
+                "owner_client": self.impact.owner_client,
+                "owner_process_root": self.impact.owner_process_root,
                 "evidence": [
                     _json_value(value)
                     for value in self.impact.frontend_session_evidence
@@ -1709,6 +1719,22 @@ def _frontend_reference_actions(
             )
         )
         unavailable_reason = unscoped_reason
+        owner_client: str | None = None
+        owner_process_root: str | None = None
+        if platform == "cindy":
+            owner_client = "cindy"
+            owner_roots = {
+                normalize_storage_path(str(root))
+                for observation in group
+                if (root := observation.details.get("cindy_profile_root"))
+            }
+            if len(owner_roots) == 1:
+                owner_process_root = next(iter(owner_roots))
+            elif unavailable_reason is None:
+                unavailable_reason = (
+                    "Cindy frontend references do not prove one exact owner "
+                    "process root."
+                )
         if unavailable_reason is None and storage_evidence.errors:
             unavailable_reason = (
                 "Cleanup is blocked for this Codex data directory because "
@@ -1750,6 +1776,8 @@ def _frontend_reference_actions(
                 "target": target.to_dict(),
                 "platform": platform,
                 "database": database,
+                "owner_client": owner_client,
+                "owner_process_root": owner_process_root,
                 "observation_ids": list(observation_ids),
                 "references": list(references),
             }
@@ -1761,6 +1789,8 @@ def _frontend_reference_actions(
             frontend_database_paths=((database,) if database else ()),
             frontend_reference_evidence=references,
             resource_path=database or None,
+            owner_client=owner_client,
+            owner_process_root=owner_process_root,
         )
         action_id_digest = _fingerprint(
             {

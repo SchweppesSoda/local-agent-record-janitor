@@ -122,7 +122,7 @@ class DesktopCleanupResult:
         }
 
 
-ClientInspector = Callable[[Path | None], tuple[str, ...]]
+ClientInspector = Callable[..., tuple[str, ...]]
 
 
 def read_desktop_state(
@@ -442,15 +442,23 @@ def strip_state_references(
     return value, removed
 
 
-def running_related_clients(codex_home: Path | None = None) -> tuple[str, ...]:
+def running_related_clients(
+    owner_process_root: Path | None = None,
+    *,
+    owner_client: str | None = None,
+) -> tuple[str, ...]:
     if os.name != "nt":
         return ()
     records = _running_related_process_records()
-    if codex_home is None:
+    if owner_process_root is None:
         return tuple(
             sorted({str(item["name"]) for item in records}, key=str.casefold)
         )
-    return _relevant_client_names(codex_home, records)
+    return _relevant_client_names(
+        owner_process_root,
+        records,
+        owner_client=owner_client,
+    )
 
 
 def _running_related_process_records() -> tuple[dict[str, Any], ...]:
@@ -540,23 +548,32 @@ def _running_related_process_records() -> tuple[dict[str, Any], ...]:
 
 
 def _relevant_client_names(
-    codex_home: Path,
+    owner_process_root: Path,
     records: Iterable[Mapping[str, Any]],
+    *,
+    owner_client: str | None = None,
 ) -> tuple[str, ...]:
-    """Return client names that might still own the target Codex store.
+    """Return process names relevant to one explicit owner identity.
 
-    A Cindy process family is ignored only when both the family identity and a
-    *different existing* ``codex-home`` are proven.  Conversely, a proven
-    official OpenAI Codex Desktop family is ignored for a proven Cindy-owned
-    ``codex-home``.  Missing process metadata, inaccessible paths, orphaned
-    helpers, and failed identity checks all remain blocking.
+    Cindy ownership is proven from the process family's executable identity
+    and its literal ``--user-data-dir`` value. The caller supplies that exact
+    data root and the stable owner client; this function never appends a
+    profile directory name or inspects a sibling bundle to guess ownership.
     """
 
-    home = codex_home.expanduser()
+    home = owner_process_root.expanduser()
+    owner_is_cindy = str(owner_client or "").strip().casefold() == "cindy"
     items = tuple(records)
-    try:
-        by_pid = {int(item["process_id"]): item for item in items}
-    except (KeyError, TypeError, ValueError):
+    by_pid: dict[int, Mapping[str, Any]] = {}
+    invalid_process_metadata = False
+    for item in items:
+        try:
+            by_pid[int(item["process_id"])] = item
+        except (KeyError, TypeError, ValueError):
+            invalid_process_metadata = True
+    if invalid_process_metadata and not owner_is_cindy:
+        # The generic guard has no owning-client identity and therefore keeps
+        # its conservative fail-closed behavior for incomplete snapshots.
         return tuple(
             sorted({str(item.get("name") or "unknown") for item in items})
         )
@@ -644,130 +661,44 @@ def _relevant_client_names(
             continue
         valid_cindy_families[root_id] = user_data_dirs[0]
 
-    target_is_cindy_home = _is_proven_cindy_codex_home(home)
-    official_app_roots: dict[int, Path] = {}
-    if target_is_cindy_home:
-        for item in items:
-            if str(item.get("name") or "").casefold() != "chatgpt.exe":
-                continue
-            process_id = _integer_or_minus_one(item.get("process_id"))
-            executable_path = item.get("executable_path")
-            if process_id < 0 or not executable_path:
-                continue
-            app_root = _official_codex_desktop_app_root(
-                Path(str(executable_path))
-            )
-            if app_root is not None:
-                official_app_roots[process_id] = app_root
-
     relevant: set[str] = set()
     for item in items:
         name = str(item.get("name") or "unknown")
         name_key = name.casefold()
+        if owner_is_cindy and name_key not in {"cindy.exe", "codex.exe"}:
+            # Cindy owns this frontend store. Other client families are not
+            # candidates for its write guard, even when their installation
+            # metadata is unavailable.
+            continue
         separate_cindy_process = False
-        separate_official_process = False
         process_id = _integer_or_minus_one(item.get("process_id"))
         parent_id = _integer_or_minus_one(item.get("parent_process_id"))
         if name_key == "cindy.exe":
             root_id = cindy_root_by_pid.get(process_id, -1)
             user_data_dir = valid_cindy_families.get(root_id)
             if user_data_dir is not None:
-                separate_cindy_process = (
-                    _same_existing_path(user_data_dir / "codex-home", home)
-                    is False
-                )
-        elif name_key == "codex.exe" and item.get("executable_path"):
+                relation = _same_existing_path(user_data_dir, home)
+                separate_cindy_process = relation is False
+            elif owner_is_cindy:
+                # A Cindy process whose executable/command-line evidence is
+                # incomplete cannot be proven to belong to another profile.
+                # Keep it blocking (fail closed).
+                separate_cindy_process = False
+        elif name_key == "codex.exe":
             root_id = cindy_root_by_pid.get(parent_id, -1)
             user_data_dir = valid_cindy_families.get(root_id)
-            if user_data_dir is not None and (
-                _same_existing_path(user_data_dir / "codex-home", home) is False
-            ):
-                executable_path = Path(str(item["executable_path"]))
-                separate_cindy_process = (
-                    executable_path.is_absolute()
-                    and _is_existing_path_below(
-                        executable_path,
-                        user_data_dir / "codex",
-                    )
-                )
-        if target_is_cindy_home and name_key == "chatgpt.exe":
-            separate_official_process = process_id in official_app_roots
-        elif (
-            target_is_cindy_home
-            and name_key == "codex.exe"
-            and item.get("executable_path")
-        ):
-            ancestor_id = parent_id
-            seen: set[int] = set()
-            while ancestor_id in by_pid and ancestor_id not in seen:
-                seen.add(ancestor_id)
-                app_root = official_app_roots.get(ancestor_id)
-                if app_root is not None:
-                    executable_path = Path(str(item["executable_path"]))
-                    separate_official_process = (
-                        executable_path.is_absolute()
-                        and executable_path.name.casefold() == "codex.exe"
-                        and (
-                            _is_existing_path_below(executable_path, app_root)
-                            or _is_official_codex_runtime_executable(
-                                executable_path
-                            )
-                        )
-                    )
-                    break
-                ancestor_id = _integer_or_minus_one(
-                    by_pid[ancestor_id].get("parent_process_id")
-                )
-        if not separate_cindy_process and not separate_official_process:
+            if user_data_dir is not None:
+                separate_cindy_process = _same_existing_path(user_data_dir, home) is False
+            elif owner_is_cindy and root_id in cindy_root_by_pid.values():
+                # The child is attached to Cindy, but its family did not
+                # yield a trustworthy user-data root. Keep it blocking.
+                separate_cindy_process = False
+            elif owner_is_cindy:
+                # A standalone codex.exe is not Cindy's owner process.
+                continue
+        if not separate_cindy_process:
             relevant.add(name)
     return tuple(sorted(relevant, key=str.casefold))
-
-
-def _is_proven_cindy_codex_home(path: Path) -> bool:
-    try:
-        home = path.resolve(strict=True)
-        if not home.is_dir() or home.name.casefold() != "codex-home":
-            return False
-        bundled_root = home.parent / "codex"
-        if not bundled_root.is_dir():
-            return False
-        return any(
-            candidate.is_file()
-            for candidate in bundled_root.glob("*/codex.exe")
-        )
-    except (OSError, RuntimeError):
-        return False
-
-
-def _official_codex_desktop_app_root(path: Path) -> Path | None:
-    try:
-        executable = path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    if (
-        not executable.is_file()
-        or executable.name.casefold() != "chatgpt.exe"
-        or executable.parent.name.casefold() != "app"
-        or not executable.parent.parent.name.casefold().startswith(
-            "openai.codex_"
-        )
-        or executable.parent.parent.parent.name.casefold() != "windowsapps"
-    ):
-        return None
-    return executable.parent
-
-
-def _is_official_codex_runtime_executable(path: Path) -> bool:
-    """Recognize the per-user runtime launched by official Codex Desktop."""
-
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return False
-    runtime_root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
-    return (
-        path.name.casefold() == "codex.exe"
-        and _is_existing_path_below(path, runtime_root)
-    )
 
 
 def _same_existing_path(first: Path, second: Path) -> bool | None:
@@ -777,15 +708,6 @@ def _same_existing_path(first: Path, second: Path) -> bool | None:
         return os.path.samefile(first, second)
     except OSError:
         return None
-
-
-def _is_existing_path_below(path: Path, root: Path) -> bool:
-    try:
-        resolved_path = path.resolve(strict=True)
-        resolved_root = root.resolve(strict=True)
-        return resolved_path.is_relative_to(resolved_root)
-    except (OSError, RuntimeError):
-        return False
 
 
 def _integer_or_minus_one(value: Any) -> int:

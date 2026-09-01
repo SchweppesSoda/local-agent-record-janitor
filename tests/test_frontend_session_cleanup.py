@@ -227,6 +227,115 @@ class FrontendSessionCleanupTests(unittest.TestCase):
                     (None,),
                 )
 
+    def test_prior_authorized_reference_clear_keeps_session_delete_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database, deleted = self._database(Path(temporary), 1)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute(
+                    "UPDATE sessions SET sdk_session_id='native-original' WHERE id=?",
+                    (deleted[0],),
+                )
+                db.commit()
+            evidence = build_cindy_session_delete_evidence(
+                self._seeds(database, deleted)
+            )
+            with closing(sqlite3.connect(database)) as db:
+                db.execute(
+                    "UPDATE sessions SET sdk_session_id=NULL WHERE id=?",
+                    (deleted[0],),
+                )
+                db.commit()
+            result = execute_cindy_session_cleanup(evidence)
+            self.assertEqual(result.deleted_session_count, 1)
+
+    def test_replacement_sdk_session_id_is_still_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database, deleted = self._database(Path(temporary), 1)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute(
+                    "UPDATE sessions SET sdk_session_id='native-original' WHERE id=?",
+                    (deleted[0],),
+                )
+                db.commit()
+            evidence = build_cindy_session_delete_evidence(
+                self._seeds(database, deleted)
+            )
+            with closing(sqlite3.connect(database)) as db:
+                db.execute(
+                    "UPDATE sessions SET sdk_session_id='native-replacement' WHERE id=?",
+                    (deleted[0],),
+                )
+                db.commit()
+            with self.assertRaises(FrontendSessionGuardError):
+                execute_cindy_session_cleanup(evidence)
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT sdk_session_id FROM sessions WHERE id=?",
+                        (deleted[0],),
+                    ).fetchone(),
+                    ("native-replacement",),
+                )
+
+    def test_client_check_uses_explicit_owner_process_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_root = Path(temporary) / "renamed-cindy-data"
+            owner_process_root = data_root / "renamed-engine-home"
+            owner_process_root.mkdir(parents=True)
+            database, deleted = self._database(data_root, 1)
+            evidence = build_cindy_session_delete_evidence(
+                self._seeds(database, deleted)
+            )
+            inspected: list[Path] = []
+            inspected_clients: list[str] = []
+
+            def inspect(path: Path, *, owner_client: str) -> tuple[str, ...]:
+                inspected.append(path)
+                inspected_clients.append(owner_client)
+                if path != owner_process_root:
+                    return ("ChatGPT.exe", "codex.exe")
+                return ()
+
+            result = execute_cindy_session_cleanup(
+                evidence,
+                owner_client="cindy",
+                owner_process_root=owner_process_root,
+                client_inspector=inspect,
+            )
+
+            self.assertEqual(result.deleted_session_count, 1)
+            self.assertEqual(
+                inspected,
+                [owner_process_root],
+            )
+            self.assertEqual(inspected_clients, ["cindy"])
+
+    def test_running_cindy_still_blocks_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data_root = Path(temporary) / "renamed-cindy-data"
+            owner_process_root = data_root / "renamed-engine-home"
+            owner_process_root.mkdir(parents=True)
+            database, deleted = self._database(data_root, 1)
+            evidence = build_cindy_session_delete_evidence(
+                self._seeds(database, deleted)
+            )
+
+            with self.assertRaisesRegex(FrontendSessionGuardError, "Cindy.exe"):
+                execute_cindy_session_cleanup(
+                    evidence,
+                    owner_process_root=owner_process_root,
+                    client_inspector=lambda _path: ("Cindy.exe",),
+                )
+
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM sessions WHERE id=?",
+                        (deleted[0],),
+                    ).fetchone()[0],
+                    1,
+                )
+
     def test_high_level_cindy_plan_emits_session_delete_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -264,6 +373,14 @@ class FrontendSessionCleanupTests(unittest.TestCase):
                     for action in actions
                 },
                 {"deleted"},
+            )
+            self.assertEqual(
+                {action["impact"]["owner_process_root"] for action in actions},
+                {str(root)},
+            )
+            self.assertEqual(
+                {action["impact"]["owner_client"] for action in actions},
+                {"cindy"},
             )
             self.assertEqual(
                 [batch["mutation_family"] for batch in document["child_batches"]],

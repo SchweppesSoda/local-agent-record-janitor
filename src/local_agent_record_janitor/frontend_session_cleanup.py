@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import sqlite3
@@ -49,6 +50,8 @@ class CindySessionDeleteEvidence:
     expected_status: str
     session_schema_fingerprint: str
     session_row_fingerprint: str
+    stable_session_row_fingerprint: str
+    expected_sdk_session_id: str | None
     schema_bundle_fingerprint: str
     expected_message_count: int
     message_id_fingerprint: str
@@ -68,12 +71,13 @@ class CindySessionDeleteEvidence:
         if not session_id:
             raise ValueError("session_id must not be blank")
         if status not in _TERMINAL:
-            raise ValueError("Cindy hard deletion requires a terminal status")
+            raise ValueError("Cindy hard deletion requires status=deleted")
         if self.table != "sessions":
             raise ValueError("only Cindy sessions rows are supported")
         for name in (
             "session_schema_fingerprint",
             "session_row_fingerprint",
+            "stable_session_row_fingerprint",
             "schema_bundle_fingerprint",
             "message_id_fingerprint",
         ):
@@ -106,6 +110,8 @@ class CindySessionDeleteEvidence:
             "expected_status": self.expected_status,
             "session_schema_fingerprint": self.session_schema_fingerprint,
             "session_row_fingerprint": self.session_row_fingerprint,
+            "stable_session_row_fingerprint": self.stable_session_row_fingerprint,
+            "expected_sdk_session_id": self.expected_sdk_session_id,
             "schema_bundle_fingerprint": self.schema_bundle_fingerprint,
             "expected_message_count": self.expected_message_count,
             "message_id_fingerprint": self.message_id_fingerprint,
@@ -216,15 +222,33 @@ def execute_cindy_session_cleanup(
     evidence_items: Sequence[CindySessionDeleteEvidence | Mapping[str, Any]],
     *,
     vector_extension: Path | None = None,
-    client_root: Path | None = None,
-    client_inspector: Callable[[Path], Sequence[str]] | None = None,
+    owner_client: str = "cindy",
+    owner_process_root: Path | None = None,
+    client_inspector: Callable[..., Sequence[str]] | None = None,
     phase_callback: Callable[[str], None] | None = None,
 ) -> FrontendSessionCleanupResult:
     evidence = _normalize_evidence(evidence_items)
     database = _one_database(evidence)
     ids = tuple(item.session_id for item in evidence)
-    _require_client_closed(client_root, client_inspector)
+    process_root = (
+        Path(owner_process_root).expanduser().absolute()
+        if owner_process_root is not None
+        else None
+    )
+    owner_identity = str(owner_client).strip().casefold()
+    if owner_identity != "cindy":
+        raise FrontendSessionGuardError(
+            "Cindy session deletion requires owner_client=cindy"
+        )
     guard_cindy_session_rows(evidence, vector_extension=vector_extension)
+    # Take one operation/client process snapshot after the complete read-only
+    # evidence guard and before creating a rollback copy or opening a write
+    # transaction. The batch writer never re-enumerates per selected row.
+    _require_client_closed(
+        process_root,
+        client_inspector,
+        owner_client=owner_identity,
+    )
     backup_dir, backup = _backup(database)
     db: sqlite3.Connection | None = None
     started = attempted = committed = False
@@ -232,7 +256,6 @@ def execute_cindy_session_cleanup(
     vector_rows: tuple[int, ...] = ()
     counts = dict(sessions=0, messages=0, fts=0, embeddings=0, vectors=0, media=0, skills=0)
     try:
-        _require_client_closed(client_root, client_inspector)
         db = _connect(database, readonly=False, vector_extension=vector_extension)
         db.execute("BEGIN IMMEDIATE")
         _assert_same(evidence, _snapshot(db, ids))
@@ -381,18 +404,60 @@ def execute_cindy_session_cleanup(
 
 
 def _require_client_closed(
-    client_root: Path | None,
-    client_inspector: Callable[[Path], Sequence[str]] | None,
+    owner_process_root: Path | None,
+    client_inspector: Callable[..., Sequence[str]] | None,
+    *,
+    owner_client: str,
 ) -> None:
-    if client_root is None or client_inspector is None:
+    if client_inspector is None:
         return
-    running = tuple(client_inspector(Path(client_root)))
+    if owner_process_root is None:
+        raise FrontendSessionGuardError(
+            "Cindy session deletion requires an explicit owner_process_root"
+        )
+    running = tuple(
+        _inspect_owner_process(
+            client_inspector,
+            owner_process_root,
+            owner_client=owner_client,
+        )
+    )
     if running:
         raise FrontendSessionGuardError(
             "Close the owning Cindy client before deleting frontend sessions: "
             + ", ".join(running)
         )
 
+
+def _inspect_owner_process(
+    client_inspector: Callable[..., Sequence[str]],
+    owner_process_root: Path,
+    *,
+    owner_client: str,
+) -> Sequence[str]:
+    """Pass both frozen owner identities to inspectors that support them.
+
+    The production inspector is ``running_related_clients`` and accepts the
+    keyword. One-argument test/integration inspectors remain usable as a
+    narrow compatibility seam; they still receive the exact frozen data root
+    and cannot trigger any path-based inference in this writer.
+    """
+
+    try:
+        parameters = inspect.signature(client_inspector).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    accepts_owner_client = any(
+        parameter.name == "owner_client"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_owner_client:
+        return client_inspector(
+            owner_process_root,
+            owner_client=owner_client,
+        )
+    return client_inspector(owner_process_root)
 
 def _snapshot(
     db: sqlite3.Connection,
@@ -478,6 +543,9 @@ def _snapshot(
         required_tables=("chat_messages_vec_v1", "embedding_jobs"),
     )
     result: list[CindySessionDeleteEvidence] = []
+    stable_columns = tuple(
+        column for column in columns if column != "sdk_session_id"
+    )
     for row in rows:
         session_id = str(row["id"])
         status = str(row["status"] or "").casefold()
@@ -493,6 +561,14 @@ def _snapshot(
                 expected_status=status,
                 session_schema_fingerprint=schema_hash,
                 session_row_fingerprint=row_fingerprint(row, columns),
+                stable_session_row_fingerprint=row_fingerprint(
+                    row, stable_columns
+                ),
+                expected_sdk_session_id=(
+                    None
+                    if row["sdk_session_id"] is None
+                    else str(row["sdk_session_id"])
+                ),
                 schema_bundle_fingerprint=bundle_hash,
                 expected_message_count=len(message_ids),
                 message_id_fingerprint=_ids_hash(message_ids),
@@ -657,6 +733,14 @@ def _normalize_evidence(
                 expected_status=str(raw.get("expected_status") or ""),
                 session_schema_fingerprint=str(raw.get("session_schema_fingerprint") or ""),
                 session_row_fingerprint=str(raw.get("session_row_fingerprint") or ""),
+                stable_session_row_fingerprint=str(
+                    raw.get("stable_session_row_fingerprint") or ""
+                ),
+                expected_sdk_session_id=(
+                    None
+                    if raw.get("expected_sdk_session_id") is None
+                    else str(raw.get("expected_sdk_session_id"))
+                ),
                 schema_bundle_fingerprint=str(raw.get("schema_bundle_fingerprint") or ""),
                 expected_message_count=int(raw.get("expected_message_count") or 0),
                 message_id_fingerprint=str(raw.get("message_id_fingerprint") or ""),
@@ -681,10 +765,34 @@ def _assert_same(
     expected: Sequence[CindySessionDeleteEvidence],
     current: Sequence[CindySessionDeleteEvidence],
 ) -> None:
-    left = {item.session_id: item.to_dict() for item in expected}
-    right = {item.session_id: item.to_dict() for item in current}
-    if left != right:
+    left = {item.session_id: item for item in expected}
+    right = {item.session_id: item for item in current}
+    if set(left) != set(right):
         raise FrontendSessionGuardError("Approved Cindy session evidence changed")
+    for session_id, approved in left.items():
+        observed = right[session_id]
+        approved_doc = approved.to_dict()
+        observed_doc = observed.to_dict()
+        approved_sdk = approved_doc.pop("expected_sdk_session_id")
+        observed_sdk = observed_doc.pop("expected_sdk_session_id")
+        # The preceding, separately authorized reference batch may clear this
+        # one field.  The stable row fingerprint still binds every other
+        # session column, while a replacement native ID remains forbidden.
+        approved_doc.pop("session_row_fingerprint")
+        observed_doc.pop("session_row_fingerprint")
+        if approved_doc != observed_doc:
+            raise FrontendSessionGuardError(
+                "Approved Cindy session evidence changed"
+            )
+        allowed_sdk_values = (
+            {None}
+            if approved_sdk is None
+            else {approved_sdk, None}
+        )
+        if observed_sdk not in allowed_sdk_values:
+            raise FrontendSessionGuardError(
+                "Approved Cindy sdk_session_id changed to another record"
+            )
 
 
 def _one_database(items: Sequence[CindySessionDeleteEvidence]) -> Path:

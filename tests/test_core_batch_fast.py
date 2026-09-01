@@ -45,6 +45,70 @@ class CoreBatchFastTests(unittest.TestCase):
         create_thread_index(home, rows)
         return ids, paths
 
+    @staticmethod
+    def _recovery_context(root: Path) -> tuple[SimpleNamespace, tuple[object, object]]:
+        """Build two metadata-only stores for child recovery tests."""
+
+        first_home = root / "first-store"
+        second_home = root / "second-store"
+        first_home.mkdir()
+        second_home.mkdir()
+
+        def make_action(action_id: str, storage_id: str, home: Path) -> object:
+            impact = SimpleNamespace(
+                external_storage_root=str(home),
+                external_action_payload={},
+                to_dict=lambda: {
+                    "external_storage_root": str(home),
+                    "affected_thread_ids": [action_id],
+                },
+            )
+            return SimpleNamespace(
+                action_id=action_id,
+                kind="delete_conversation",
+                available=True,
+                target=SimpleNamespace(
+                    storage_id=storage_id,
+                    thread_id=action_id,
+                ),
+                impact=impact,
+                observation_ids=(),
+                snapshot_fingerprint="snapshot:recovery",
+                resource_kind="conversation",
+                to_dict=lambda: {
+                    "action_id": action_id,
+                    "target": {
+                        "storage_id": storage_id,
+                        "thread_id": action_id,
+                    },
+                },
+            )
+
+        first = make_action("first", "first-store", first_home)
+        second = make_action("second", "second-store", second_home)
+        first_storage = SimpleNamespace(
+            storage_id="first-store",
+            path=first_home,
+            to_dict=lambda: {"storage_id": "first-store", "path": str(first_home)},
+        )
+        second_storage = SimpleNamespace(
+            storage_id="second-store",
+            path=second_home,
+            to_dict=lambda: {"storage_id": "second-store", "path": str(second_home)},
+        )
+        context = SimpleNamespace(
+            snapshot=SimpleNamespace(snapshot_id="snapshot:recovery"),
+            plan=SimpleNamespace(
+                actions=(first, second),
+                storages=(first_storage, second_storage),
+                observations=(),
+                conversations=(),
+                plan_fingerprint="plan:recovery",
+            ),
+            actions=(first, second),
+        )
+        return context, (first, second)
+
     def test_healthy_native_run_uses_two_catalog_passes_for_all_batch_sizes(self) -> None:
         """A real native fixture gets one plan and one terminal catalog pass."""
 
@@ -296,6 +360,247 @@ class CoreBatchFastTests(unittest.TestCase):
                 store.read_state()["next_event_sequence"], 101  # type: ignore[index]
             )
 
+    def test_known_blocker_resumes_only_unfinished_child_and_status_keeps_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context, actions = self._recovery_context(root)
+            first, second = actions
+
+            class BlockingService:
+                def __init__(self) -> None:
+                    self.blocked = True
+                    self.executions: list[str] = []
+
+                def execute(self, _context: object, selected: object, **_kwargs: object):
+                    action = tuple(selected)[0]
+                    action_id = str(action.action_id)
+                    self.executions.append(action_id)
+                    if action_id == "second" and self.blocked:
+                        raise RuntimeError("client is still open")
+                    return SimpleNamespace(
+                        results=(SimpleNamespace(status="deleted"),),
+                        modified=True,
+                    )
+
+            service = BlockingService()
+            coordinator = OperationCoordinator(service)
+            coordinator._build_context = lambda *args, **kwargs: (
+                context,
+                (),
+                None,
+                None,
+                {},
+                {},
+            )
+            coordinator._select_candidates = lambda *_args, **_kwargs: (
+                (first, second),
+                [],
+            )
+            coordinator._terminal_context = lambda _live: (
+                SimpleNamespace(
+                    plan=SimpleNamespace(actions=(), scan_complete=True),
+                ),
+                None,
+            )
+            plan_path = root / "operation-plan.json"
+
+            blocked = coordinator.run_operation(
+                client="native",
+                record_ids=("first", "second"),
+                plan_path=plan_path,
+                clients_closed=True,
+            )
+            self.assertEqual(blocked["goal_status"], "blocked", blocked)
+            self.assertEqual(service.executions, ["first", "second"])
+            self.assertTrue(
+                any(
+                    blocker.get("message") == "client is still open"
+                    for blocker in blocked["blockers"]
+                )
+            )
+
+            child_id = f"{blocked['operation_id']}-2"
+            child_store = OperationStore(root / "second-store", child_id)
+            child_state = child_store.read_state()
+            self.assertIsNotNone(child_state)
+            assert child_state is not None
+            self.assertEqual(child_state["phase"], "blocked")
+            self.assertEqual(child_state["goal_status"], "blocked")
+            self.assertFalse(child_state["mutation_started"])
+            self.assertEqual(child_state["current_action_state"], "not_started")
+            self.assertEqual(child_state["error"]["message"], "client is still open")
+            self.assertNotIn("body", child_state["error"])
+
+            # A fresh coordinator must expose the persisted child blocker in a
+            # single status read, without requiring the caller to inspect its
+            # event journal.
+            status = OperationCoordinator(SimpleNamespace()).status_operation(
+                operation_id=str(blocked["operation_id"]),
+                plan_path=plan_path,
+            )
+            self.assertEqual(status["goal_status"], "blocked")
+            self.assertEqual(
+                [batch["status"] for batch in status["batches"]],
+                ["complete", "blocked"],
+            )
+            self.assertTrue(
+                any(
+                    blocker.get("message") == "client is still open"
+                    for blocker in status["blockers"]
+                )
+            )
+            self.assertFalse(any(
+                blocker.get("blocker_code") == "recovery_required"
+                for blocker in status["blockers"]
+            ))
+
+            # Resolving the external blocker allows the same immutable plan
+            # to resume only child 2; child 1 is durably skipped.
+            service.blocked = False
+            resumed = coordinator.apply_operation(
+                operation_id=str(blocked["operation_id"]),
+                plan_path=plan_path,
+                clients_closed=True,
+            )
+            self.assertEqual(resumed["goal_status"], "complete")
+            self.assertEqual(service.executions, ["first", "second", "second"])
+            self.assertTrue(resumed["batches"][0].get("skipped"))
+
+    def test_unknown_child_persists_error_and_never_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context, actions = self._recovery_context(root)
+            first, _second = actions
+
+            class UnknownService:
+                def __init__(self) -> None:
+                    self.executions: list[str] = []
+
+                def execute(self, _context: object, selected: object, **kwargs: object):
+                    action = tuple(selected)[0]
+                    self.executions.append(str(action.action_id))
+                    kwargs["action_state_callback"]("mutation_started", action, None)
+                    raise RuntimeError("ambiguous mutation outcome")
+
+            service = UnknownService()
+            coordinator = OperationCoordinator(service)
+            coordinator._build_context = lambda *args, **kwargs: (
+                context,
+                (),
+                None,
+                None,
+                {},
+                {},
+            )
+            coordinator._select_candidates = lambda *_args, **_kwargs: ((first,), [])
+            plan_path = root / "unknown-plan.json"
+
+            unknown = coordinator.run_operation(
+                client="native",
+                record_ids=("first",),
+                plan_path=plan_path,
+                clients_closed=True,
+            )
+            self.assertEqual(unknown["goal_status"], "unknown")
+            self.assertEqual(service.executions, ["first"], unknown)
+
+            child_id = f"{unknown['operation_id']}-1"
+            child_store = OperationStore(root / "first-store", child_id)
+            state = child_store.read_state()
+            self.assertIsNotNone(state)
+            assert state is not None
+            self.assertEqual(state["phase"], "recovery_required")
+            self.assertEqual(state["error"]["message"], "ambiguous mutation outcome")
+            self.assertEqual(
+                state["blockers"][0]["blocker_code"],
+                "mutation_outcome_unknown",
+            )
+
+            status = OperationCoordinator(SimpleNamespace()).status_operation(
+                operation_id=str(unknown["operation_id"]),
+                plan_path=plan_path,
+            )
+            self.assertEqual(status["goal_status"], "unknown")
+            self.assertTrue(any(
+                blocker.get("message") == "ambiguous mutation outcome"
+                for blocker in status["blockers"]
+            ))
+
+            # Apply stops at durable recovery evidence, before context
+            # construction or a second writer call.
+            retry = coordinator.apply_operation(
+                operation_id=str(unknown["operation_id"]),
+                plan_path=plan_path,
+                clients_closed=True,
+            )
+            self.assertEqual(retry["goal_status"], "unknown")
+            self.assertEqual(service.executions, ["first"])
+
+    def test_attempted_blocked_child_is_recovery_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            storage = root / "store"
+            storage.mkdir()
+            child_id = "attempted-operation-1"
+            child_plan = {
+                "schema_version": "larj.child-operation-plan.v1",
+                "operation_id": child_id,
+                "target": {"codex_home": str(storage), "storage_id": "store"},
+                "parent_operation_id": "attempted-operation",
+                "mutation_family": "delete_conversation",
+                "actions": [],
+            }
+            child_plan["plan_sha256"] = plan_sha256(child_plan)
+            child_store = OperationStore(storage, child_id)
+            child_store.accept_plan(child_plan)
+            child_store.write_state({
+                "schema_version": "larj.agent-state.v1",
+                "operation_id": child_id,
+                "plan_sha256": child_plan["plan_sha256"],
+                "phase": "blocked",
+                "goal_status": "blocked",
+                "goal_satisfied": False,
+                "modified": False,
+                "mutation_started": False,
+                "attempted": True,
+                "current_action_state": "not_started",
+                "next_event_sequence": 1,
+            })
+            child_store.append_event({
+                "event": "batch_finished",
+                "goal_status": "blocked",
+            }, state_updates={
+                "phase": "blocked",
+                "goal_status": "blocked",
+                "goal_satisfied": False,
+                "attempted": True,
+            })
+            document = {
+                "schema_version": "larj.operation-plan.v1",
+                "document_type": "operation_plan",
+                "operation_id": "attempted-operation",
+                "scope": {"client": "native"},
+                "storages": [{"storage_id": "store", "path": str(storage)}],
+                "actions": [],
+                "child_batches": [{
+                    "child_operation_id": child_id,
+                    "storage_id": "store",
+                    "mutation_family": "delete_conversation",
+                    "resource_key": [],
+                    "action_ids": [],
+                }],
+            }
+            document["plan_sha256"] = plan_sha256(document)
+            plan_path = root / "attempted-plan.json"
+            write_new_json(plan_path, document)
+            coordinator = OperationCoordinator(SimpleNamespace())
+            inspection = coordinator._inspect_child_states(document)
+            self.assertEqual(inspection.batches[0]["status"], "unknown")
+            self.assertTrue(any(
+                blocker.get("blocker_code") == "recovery_required"
+                for blocker in inspection.blockers
+            ))
+
     def test_partition_actions_keeps_storage_family_and_database_boundaries(self) -> None:
         def action(
             action_id: str,
@@ -346,6 +651,62 @@ class CoreBatchFastTests(unittest.TestCase):
             [action.action_id for action in batches[0].actions],
             ["native-a", "native-b"],
         )
+
+    def test_frontend_reference_batch_rejects_mixed_missing_cindy_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "renamed-cindy-profile"
+            database = root / "frontend.sqlite"
+            evidence = {
+                "platform": "cindy",
+                "database": str(database),
+            }
+
+            def action(action_id: str, **owner: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    action_id=action_id,
+                    kind="remove_frontend_reference",
+                    target=SimpleNamespace(storage_id="cindy-store"),
+                    impact=SimpleNamespace(
+                        frontend_database_paths=(str(database),),
+                        frontend_reference_evidence=(evidence,),
+                        **owner,
+                    ),
+                )
+
+            actions = (
+                action(
+                    "cindy-complete",
+                    owner_client="cindy",
+                    owner_process_root=str(root),
+                ),
+                action("cindy-missing", owner_process_root=str(root)),
+            )
+            context = SimpleNamespace(
+                plan=SimpleNamespace(
+                    storages=(
+                        SimpleNamespace(storage_id="cindy-store", path=database),
+                    ),
+                ),
+            )
+
+            with patch(
+                "local_agent_record_janitor.execution.execute_frontend_reference_cleanup"
+            ) as cleanup:
+                with self.assertRaises(ExecutionError) as raised:
+                    execute_prevalidated_actions(
+                        context,
+                        actions,
+                        timeout=1,
+                        app_server_factory=lambda **_kwargs: None,
+                        binary_resolver=lambda _hint: None,
+                        client_inspector=lambda _root, **_kwargs: (),
+                    )
+
+            self.assertEqual(
+                raised.exception.kind,
+                "frontend_reference_owner_identity_missing",
+            )
+            cleanup.assert_not_called()
 
     def test_unknown_session_result_stops_remaining_requests(self) -> None:
         actions = tuple(

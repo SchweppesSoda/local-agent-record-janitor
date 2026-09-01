@@ -95,11 +95,41 @@ class FrontendBatchSnapshot:
 class FrontendAdapter(ABC):
     name: str
 
-    def __init__(self, *, database: Path, codex_home: Path) -> None:
-        self.database = database.expanduser()
-        self.codex_home = codex_home.expanduser()
+    def __init__(
+        self,
+        *,
+        database: Path,
+        codex_home: Path,
+        data_root: Path | None = None,
+        owner_process_root: Path | None = None,
+    ) -> None:
+        self.database = Path(database).expanduser()
+        self.codex_home = Path(codex_home).expanduser()
+        # Keep storage identity and process ownership as separate frozen
+        # values. In particular, never derive the process root from a
+        # database parent or from a directory basename at execution time.
+        self._data_root = Path(
+            data_root if data_root is not None else self.database.parent
+        ).expanduser()
+        self._owner_process_root = Path(
+            owner_process_root
+            if owner_process_root is not None
+            else self.codex_home
+        ).expanduser()
         self._live_thread_ids: set[str] = set()
         self._frontend_snapshot: FrontendBatchSnapshot | None = None
+
+    @property
+    def data_root(self) -> Path:
+        """Exact frontend data root associated with this adapter."""
+
+        return self._data_root
+
+    @property
+    def owner_process_root(self) -> Path:
+        """Exact root passed to the owning-client process guard."""
+
+        return self._owner_process_root
 
     @property
     def client(self) -> str:

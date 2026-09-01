@@ -34,6 +34,13 @@ class FrontendSessionRecord:
     is_live: bool = False
     details: Mapping[str, Any] = field(default_factory=dict)
     codex_bin_hint: Path | None = None
+    # Exact process-owner root frozen by the adapter. This is deliberately
+    # optional for legacy third-party records, but Cindy records must carry
+    # it instead of asking execution to infer a root from storage names.
+    owner_process_root: Path | None = None
+    # Stable client identity for process attribution. Cindy session rows use
+    # the literal value ``cindy``; it is not inferred from a path name.
+    owner_client: str | None = None
 
     def approval_payload(self) -> dict[str, Any]:
         payload = {
@@ -59,6 +66,12 @@ class FrontendSessionRecord:
                         "boundary_rewind_at_ms"
                     ),
                     "cindy_profile_root": self.details.get("cindy_profile_root"),
+                    "owner_client": self.owner_client,
+                    "owner_process_root": (
+                        _normalized_path(self.owner_process_root)
+                        if self.owner_process_root is not None
+                        else None
+                    ),
                 }
             )
         if self.platform.casefold() == "codex-desktop":
@@ -86,6 +99,12 @@ class FrontendSessionRecord:
             "codex_bin_hint": (
                 str(self.codex_bin_hint) if self.codex_bin_hint is not None else None
             ),
+            "owner_process_root": (
+                str(self.owner_process_root)
+                if self.owner_process_root is not None
+                else None
+            ),
+            "owner_client": self.owner_client,
             "details": _json_value(dict(self.details)),
         }
 
@@ -289,8 +308,18 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             session_home = _absolute_path(session.codex_home)
             session_key = _normalized_path(session_home)
             home_paths.setdefault(session_key, session_home)
+            owner_process_root = (
+                _absolute_path(session.owner_process_root)
+                if session.owner_process_root is not None
+                else None
+            )
             frontend_by_home[session_key].append(
-                replace(session, codex_home=session_home, database=_absolute_path(session.database))
+                replace(
+                    session,
+                    codex_home=session_home,
+                    database=_absolute_path(session.database),
+                    owner_process_root=owner_process_root,
+                )
             )
 
     all_records: list[ManagedConversation] = []

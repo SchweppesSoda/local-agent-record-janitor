@@ -158,9 +158,12 @@ def _mutation_resource_key(action: Any, family: str) -> tuple[str, ...]:
         return ()
     attributes: tuple[str, ...]
     if family == "remove_frontend_reference":
-        attributes = ("frontend_database_paths",)
+        attributes = ("frontend_database_paths", "owner_process_root")
     elif family == "delete_frontend_session":
-        attributes = ("frontend_session_database_paths",)
+        attributes = (
+            "frontend_session_database_paths",
+            "owner_process_root",
+        )
     elif family == "delete_project_item":
         attributes = ("frontend_project_database_paths",)
     elif family == "remove_broken_relation":

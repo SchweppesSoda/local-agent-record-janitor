@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -326,6 +327,36 @@ class FrontendClosureTests(unittest.TestCase):
             connection.commit()
         with self.assertRaises(FrontendReferenceGuardError):
             guard_frontend_reference_closure({"shared": tuple(evidence)})
+
+    def test_cindy_mixed_missing_owner_identity_blocks_manual_closure(self) -> None:
+        database = self.root / "renamed-cindy.sqlite"
+        create_cindy_database(
+            database,
+            [
+                {"id": "cindy-a", "sdk_session_id": "shared", "status": "active", "agent_kind": "codex"},
+                {"id": "cindy-b", "sdk_session_id": "shared", "status": "active", "agent_kind": "codex"},
+            ],
+        )
+        adapter = CindyAdapter(
+            database=database,
+            codex_home=self.home,
+            cindy_root=self.root / "arbitrary-profile-name",
+        )
+        rows = tuple(adapter.list_sessions())
+        mixed_rows = (rows[0], replace(rows[1], owner_client=None))
+        action = next(
+            item
+            for item in build_manual_delete_plan(
+                SessionCatalog(records=(self._record("shared", mixed_rows),))
+            ).actions
+        )
+
+        closure = build_manual_delete_closure(action)
+
+        self.assertEqual(len(closure.frontend_actions), 1)
+        frontend = closure.frontend_actions[0]
+        self.assertFalse(frontend.available)
+        self.assertIn("exact owner", frontend.unavailable_reason or "")
 
     def test_unknown_native_result_never_releases_frontend_actions(self) -> None:
         database = self.root / "aionui-unknown.sqlite"
