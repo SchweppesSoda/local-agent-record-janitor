@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
@@ -145,6 +146,12 @@ class OperationStore:
         self.result_path = self.directory / "result.json"
         self.receipt_path = self.directory / "receipt.json"
         self.lock_path = self.directory / "apply.lock"
+        # The plan is immutable once accepted. Keep its decoded document and
+        # file revision locally so action checkpoints do not repeatedly parse
+        # an O(number-of-actions) plan. ``read_plan`` still validates the
+        # revision and falls back to a full integrity read after replacement.
+        self._plan_cache: dict[str, Any] | None = None
+        self._plan_cache_revision: tuple[int, int, int, int, int] | None = None
 
     def accept_plan(self, plan: Mapping[str, Any]) -> None:
         self._ensure_directory(create=True)
@@ -182,7 +189,24 @@ class OperationStore:
 
     def read_plan(self) -> dict[str, Any]:
         self._assert_safe()
-        _validate_regular_file(self.plan_path, _required_lstat(self.plan_path))
+        value = self._read_plan_cached()
+        self._assert_safe()
+        # Do not expose the mutable cached object to callers. Internal hot
+        # paths use ``_read_plan_cached`` directly; the public API preserves
+        # the old copy-on-read behavior for nested authorization mappings.
+        return deepcopy(value)
+
+    def _read_plan_cached(self) -> dict[str, Any]:
+        """Read and validate the immutable plan at most once per revision."""
+
+        plan_stat = _required_lstat(self.plan_path)
+        _validate_regular_file(self.plan_path, plan_stat)
+        revision = _path_revision(plan_stat)
+        if (
+            self._plan_cache is not None
+            and self._plan_cache_revision == revision
+        ):
+            return self._plan_cache
         value = strict_json_load(self.plan_path)
         if not isinstance(value, dict):
             raise OperationStoreError("Stored operation plan is not a JSON object")
@@ -190,7 +214,8 @@ class OperationStore:
         if not embedded_hash or plan_sha256(value) != embedded_hash:
             raise OperationStoreError("Stored operation plan failed integrity validation")
         self._validate_plan_binding(value)
-        self._assert_safe()
+        self._plan_cache = dict(value)
+        self._plan_cache_revision = revision
         return value
 
     def read_state(self) -> dict[str, Any] | None:
@@ -206,9 +231,69 @@ class OperationStore:
         self._assert_safe()
         return value
 
+    def _read_state_fast(self) -> dict[str, Any] | None:
+        """Read a checkpoint without replaying the event journal.
+
+        ``append_event`` has already serialized the previous checkpoint and
+        uses the state's durable sequence as its append index. Full journal
+        replay remains the responsibility of public status/recovery reads.
+        """
+
+        self._assert_safe()
+        state_stat = _optional_lstat(self.state_path)
+        if state_stat is None:
+            return None
+        _validate_regular_file(self.state_path, state_stat)
+        value = strict_json_load(self.state_path)
+        if not isinstance(value, dict):
+            raise OperationStoreError("Operation state is not a JSON object")
+        self._validate_state_document(value, check_journal=False)
+        self._assert_safe()
+        return value
+
     def write_state(self, state: Mapping[str, Any]) -> None:
         self._assert_safe()
-        self._validate_state_document(state)
+        state_document = dict(state)
+        self._preserve_event_sequence(state_document)
+        self._validate_state_document(state_document)
+        existing = _optional_lstat(self.state_path)
+        if existing is not None:
+            _validate_regular_file(self.state_path, existing)
+        atomic_write_json(self.state_path, state_document)
+        self._assert_safe()
+
+    def _preserve_event_sequence(self, state: dict[str, Any]) -> None:
+        """Never let a stale caller checkpoint regress the append index."""
+
+        incoming = state.get("next_event_sequence")
+        if incoming is None:
+            incoming = 1
+            state["next_event_sequence"] = incoming
+        if type(incoming) is not int or incoming < 1:
+            raise OperationStoreError(
+                "Operation state has an invalid next event sequence"
+            )
+        existing_stat = _optional_lstat(self.state_path)
+        if existing_stat is None:
+            return
+        _validate_regular_file(self.state_path, existing_stat)
+        existing = strict_json_load(self.state_path)
+        if not isinstance(existing, Mapping):
+            raise OperationStoreError("Existing operation state is not a JSON object")
+        previous = existing.get("next_event_sequence")
+        if type(previous) is int and previous > incoming:
+            state["next_event_sequence"] = previous
+
+    def _write_state_fast(self, state: Mapping[str, Any]) -> None:
+        """Persist a journal-bound checkpoint without rescanning the journal.
+
+        Private callers reach this only through ``append_event`` so event
+        bytes are durable before state advertises the corresponding sequence.
+        Public ``write_state`` retains the complete validation path.
+        """
+
+        self._assert_safe()
+        self._validate_state_document(state, check_journal=False)
         existing = _optional_lstat(self.state_path)
         if existing is not None:
             _validate_regular_file(self.state_path, existing)
@@ -222,10 +307,30 @@ class OperationStore:
         state_updates: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._assert_safe()
-        current_state = self.read_state() or {}
-        plan = self.read_plan()
-        events = self.read_events()
-        sequence = len(events) + 1
+        # Before the mutation gate opens, read_state performs the expensive
+        # journal consistency check. Once a mutation marker is persisted,
+        # state and the next sequence number are the append index; explicit
+        # status/recovery calls still use read_events for a complete audit.
+        current_state = self._read_state_fast() or {}
+        plan = self._read_plan_cached()
+        raw_sequence = current_state.get("next_event_sequence", 1)
+        if type(raw_sequence) is not int or raw_sequence < 1:
+            raise OperationStoreError(
+                "Operation state has an invalid next event sequence"
+            )
+        sequence = raw_sequence
+        events_state = _optional_lstat(self.events_path)
+        if sequence == 1 and events_state is not None:
+            # A state file that advertises the initial sequence while a
+            # journal already exists cannot be repaired safely in an append
+            # hot path. Replaying the journal here would turn one checkpoint
+            # into an O(N) operation (and N checkpoints into O(N**2)).
+            # Explicit status/verify recovery may inspect the journal and
+            # decide whether a fresh operation is required.
+            _validate_regular_file(self.events_path, events_state)
+            raise OperationStoreError(
+                "Operation state sequence is behind its durable event journal"
+            )
         payload = {
             "sequence": sequence,
             "recorded_at": utc_now(),
@@ -238,7 +343,6 @@ class OperationStore:
             or payload.get("plan_sha256") != plan["plan_sha256"]
         ):
             raise OperationStoreError("Event binding cannot be overridden")
-        events_state = _optional_lstat(self.events_path)
         created = events_state is None
         if events_state is not None:
             _validate_regular_file(self.events_path, events_state)
@@ -257,7 +361,11 @@ class OperationStore:
             current_state.update(dict(state_updates))
         current_state["next_event_sequence"] = sequence + 1
         current_state["updated_at"] = utc_now()
-        self.write_state(current_state)
+        # Avoid write_state -> read_state -> read_events recursion for every
+        # event. Event bytes and the state document have both been fsynced by
+        # the time this returns; the full journal remains available to the
+        # explicit recovery/status path.
+        self._write_state_fast(current_state)
         self._assert_safe()
         return payload
 
@@ -316,12 +424,15 @@ class OperationStore:
                 "Unknown operations must retain their detailed recovery journal"
             )
         plan = self.read_plan()
-        authorization = plan.get("authorization")
-        roots = (
-            authorization.get("root_actions", [])
-            if isinstance(authorization, Mapping)
-            else []
-        )
+        if plan.get("schema_version") == "larj.child-operation-plan.v1":
+            roots = plan.get("actions", [])
+        else:
+            authorization = plan.get("authorization")
+            roots = (
+                authorization.get("root_actions", [])
+                if isinstance(authorization, Mapping)
+                else []
+            )
         action_ids = sorted(
             {
                 str(item.get("action_id") or "")
@@ -691,8 +802,13 @@ class OperationStore:
         if not same_target:
             raise OperationStoreError("Operation plan target does not match its store")
 
-    def _validate_state_document(self, state: Mapping[str, Any]) -> None:
-        plan = self.read_plan()
+    def _validate_state_document(
+        self,
+        state: Mapping[str, Any],
+        *,
+        check_journal: bool = True,
+    ) -> None:
+        plan = self._read_plan_cached()
         goal = state.get("goal_status")
         if (
             state.get("schema_version") != _STATE_SCHEMA
@@ -706,7 +822,16 @@ class OperationStore:
             or type(state.get("mutation_started")) is not bool
         ):
             raise OperationStoreError("Operation state schema or binding is invalid")
-        if self.events_path.exists():
+        # Once the durable mutation gate is true, replaying the whole journal
+        # for every action-state read is unnecessary and turns checkpoints
+        # into O(N²). Public recovery methods still call read_events directly;
+        # before the gate opens we retain the contradiction check needed to
+        # reject forged state.
+        if (
+            check_journal
+            and not bool(state.get("mutation_started"))
+            and self.events_path.exists()
+        ):
             events = self.read_events()
             if any(event.get("event") == "mutation_started" for event in events) and not state[
                 "mutation_started"
@@ -831,6 +956,16 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int]:
         int(value.st_dev),
         int(value.st_ino),
         int(getattr(value, "st_ctime_ns", int(value.st_ctime * 1_000_000_000))),
+    )
+
+
+def _path_revision(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Return a cheap revision token for cached trusted files."""
+
+    return (
+        *_file_identity(value),
+        int(value.st_size),
+        int(getattr(value, "st_mtime_ns", int(value.st_mtime * 1_000_000_000))),
     )
 
 

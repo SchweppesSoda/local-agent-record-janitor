@@ -707,7 +707,12 @@ def _relevant_client_names(
                     separate_official_process = (
                         executable_path.is_absolute()
                         and executable_path.name.casefold() == "codex.exe"
-                        and _is_existing_path_below(executable_path, app_root)
+                        and (
+                            _is_existing_path_below(executable_path, app_root)
+                            or _is_official_codex_runtime_executable(
+                                executable_path
+                            )
+                        )
                     )
                     break
                 ancestor_id = _integer_or_minus_one(
@@ -750,6 +755,19 @@ def _official_codex_desktop_app_root(path: Path) -> Path | None:
     ):
         return None
     return executable.parent
+
+
+def _is_official_codex_runtime_executable(path: Path) -> bool:
+    """Recognize the per-user runtime launched by official Codex Desktop."""
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return False
+    runtime_root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+    return (
+        path.name.casefold() == "codex.exe"
+        and _is_existing_path_below(path, runtime_root)
+    )
 
 
 def _same_existing_path(first: Path, second: Path) -> bool | None:

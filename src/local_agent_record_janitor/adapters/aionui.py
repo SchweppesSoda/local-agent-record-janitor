@@ -3,13 +3,20 @@ from __future__ import annotations
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..codex_state import iter_rollouts
 from ..discovery import discover_aionui_codex
 from ..models import Finding, RolloutRecord
 from ..sqlite_utils import connect_readonly, table_exists
+from ..record_identity import (
+    NATIVE_ROOT_UNVERIFIED,
+    EngineCapability,
+    capability_for,
+    normalize_engine,
+)
 from ..sqlite_identity import (
     quote_identifier,
     row_fingerprint,
@@ -27,8 +34,39 @@ from .base import (
 )
 
 
+@dataclass(frozen=True)
+class AionUIProjectItem:
+    """Metadata-only projection of an AionUI conversations/project row."""
+
+    database: Path
+    project_id: str
+    conversation_id: str | None = None
+    title: str | None = None
+    working_dir: str | None = None
+    session_reference_count: int = 0
+    schema_fingerprint: str | None = None
+    row_fingerprint: str | None = None
+    project_delete_supported: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "database": str(self.database),
+            "project_id": self.project_id,
+            "conversation_id": self.conversation_id or self.project_id,
+            "title": self.title,
+            "working_dir": self.working_dir,
+            "session_reference_count": self.session_reference_count,
+            "schema_fingerprint": self.schema_fingerprint,
+            "row_fingerprint": self.row_fingerprint,
+            "project_delete_supported": self.project_delete_supported,
+            "expected_zero_acp_session_refs": self.session_reference_count == 0,
+            "kind": "project_item",
+        }
+
+
 class AionUIAdapter(FrontendAdapter):
     name = "aionui"
+    supports_all_backends = True
 
     def __init__(
         self,
@@ -36,14 +74,53 @@ class AionUIAdapter(FrontendAdapter):
         database: Path,
         codex_home: Path,
         codex_bin_hint: Path | None = None,
+        backend: str | None = "codex",
+        native_roots: Mapping[str, Path | str] | None = None,
     ) -> None:
         super().__init__(database=database, codex_home=codex_home)
+        self.backend = normalize_engine(backend) if backend is not None else None
         self.codex_bin_hint = codex_bin_hint or discover_aionui_codex()
+        self.native_roots = {
+            normalize_engine(engine): Path(root).expanduser()
+            for engine, root in (native_roots or {}).items()
+            if str(engine).strip() and str(root).strip()
+        }
 
-    def list_sessions(self) -> list["FrontendSessionRecord"]:
-        """Read every AionUI Codex mapping across current and old schemas."""
+    def native_root_for(self, backend: str | None = None) -> Path | None:
+        """Return an explicitly qualified native root, if one was supplied.
+
+        AionUI's generic codex_home is a frontend association hint and is not
+        enough to identify a Pi or Claude store. Only an explicit per-engine
+        root participates in native capability proofs.
+        """
+
+        engine = normalize_engine(backend or self.backend or "codex")
+        if engine == "codex":
+            return self.codex_home
+        return self.native_roots.get(engine)
+
+    def native_root_verified(self, backend: str | None = None) -> bool:
+        root = self.native_root_for(backend)
+        return root is not None
+
+    def list_sessions(
+        self,
+        *,
+        backend: str | None = None,
+        all_backends: bool = False,
+    ) -> list["FrontendSessionRecord"]:
+        """Read AionUI ACP mappings for one backend or every backend."""
 
         from ..inventory import FrontendSessionRecord
+        requested_backend = (
+            None
+            if all_backends
+            else (
+                normalize_engine(backend)
+                if backend is not None
+                else self.backend
+            )
+        )
 
         if not optional_database_file_exists(self.database):
             return []
@@ -75,6 +152,30 @@ class AionUIAdapter(FrontendAdapter):
                     database=self.database,
                 )
                 title_column = "c.title" if "title" in conversation_columns else "NULL"
+                project_id_column = _optional_column_sql(
+                    conversation_columns,
+                    "project_id",
+                )
+                working_dir_column = _optional_column_sql(
+                    conversation_columns,
+                    "working_dir",
+                    "cwd",
+                    "project_path",
+                )
+                acp_schema = table_schema(connection, "acp_session")
+                acp_schema_hash = schema_fingerprint(acp_schema)
+                acp_columns = tuple(str(item["name"]) for item in acp_schema)
+                acp_primary_key = tuple(
+                    str(item["name"])
+                    for item in sorted(acp_schema, key=lambda item: int(item["pk"]))
+                    if int(item["pk"]) > 0
+                )
+                has_rowid = _table_has_rowid(connection, "acp_session")
+                rowid_column = "a.rowid" if has_rowid else "NULL"
+                identity_projection = ", ".join(
+                    f"a.{quote_identifier(column)} AS {quote_identifier(f'__acp_{index}')}"
+                    for index, column in enumerate(acp_columns)
+                )
                 rows = connection.execute(
                     f"""
                     SELECT
@@ -86,6 +187,10 @@ class AionUIAdapter(FrontendAdapter):
                         a.last_active_at,
                         {backend_column} AS backend,
                         {title_column} AS title,
+                        {project_id_column} AS project_id,
+                        {working_dir_column} AS working_dir,
+                        {rowid_column} AS __acp_rowid,
+                        {identity_projection},
                         CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS conversation_exists
                     FROM acp_session a
                     LEFT JOIN conversations c ON c.id = a.conversation_id
@@ -128,13 +233,216 @@ class AionUIAdapter(FrontendAdapter):
                     "agent_id": row["agent_id"],
                     "agent_source": row["agent_source"],
                     "conversation_exists": bool(row["conversation_exists"]),
+                    "project_id": _display_string(row["project_id"]),
+                    "working_dir": _display_string(row["working_dir"]),
                     "backend_known": _normalized_string(row["backend"]) is not None,
+                    "native_root": (
+                        str(self.native_root_for(_normalized_string(row["backend"])))
+                        if _normalized_string(row["backend"]) is not None
+                        and self.native_root_for(_normalized_string(row["backend"])) is not None
+                        else None
+                    ),
+                    "native_root_verified": self.native_root_verified(
+                        _normalized_string(row["backend"])
+                    ),
+                    "cleanup_blockers": _aionui_native_root_blockers(
+                        _normalized_string(row["backend"]),
+                        native_root_verified=self.native_root_verified(
+                            _normalized_string(row["backend"])
+                        ),
+                    ),
+                    "frontend_reference": _aionui_reference_evidence(
+                        database=self.database,
+                        row=row,
+                        schema=acp_schema,
+                        schema_hash=acp_schema_hash,
+                        columns=acp_columns,
+                        primary_key=acp_primary_key,
+                        has_rowid=has_rowid,
+                    ),
                 },
                 codex_bin_hint=self.codex_bin_hint,
             )
             for row in rows
-            if _normalized_string(row["backend"]) in {None, "codex"}
+            if requested_backend is None or _normalized_string(row["backend"]) in {None, requested_backend}
         ]
+
+    def list_references(self) -> list["FrontendSessionRecord"]:
+        """Alias emphasizing that ACP rows are frontend references."""
+
+        return self.list_sessions()
+
+    def observed_backends(self) -> tuple[str, ...]:
+        """Return every backend named by AionUI metadata, including unknown."""
+
+        rows = self.list_sessions(all_backends=True)
+        return tuple(
+            sorted(
+                {normalize_engine(row.backend) if row.backend else "unknown" for row in rows}
+            )
+        )
+
+    def capability_matrix(
+        self,
+        backends: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, EngineCapability]:
+        """Expose static capabilities for observed AionUI engines.
+
+        Known engines are reference-writer-only until native/project writers are
+        registered. Unknown backend names remain inventory-only.
+        """
+
+        names = tuple(backends) if backends is not None else self.observed_backends()
+        return {
+            normalize_engine(name): self.registered_capability(normalize_engine(name))
+            for name in names
+            if str(name).strip()
+        }
+
+    def registered_capability(
+        self,
+        backend: str | None = None,
+        *,
+        native_writer_verified: bool = False,
+    ) -> EngineCapability:
+        """Report only writers actually available for this AionUI store."""
+
+        engine = normalize_engine(backend or self.backend or "codex")
+        if engine == "codex":
+            return EngineCapability(
+                "aionui",
+                engine,
+                inventory=True,
+                native_delete=bool(native_writer_verified),
+                frontend_session_delete=False,
+                frontend_reference_delete=True,
+                frontend_project_delete=False,
+                verify=True,
+                reason=(
+                    "Exact ACP reference cleanup is registered; AionUI native "
+                    "Codex deletion requires a verified native writer"
+                    if not native_writer_verified
+                    else
+                    "AionUI exact ACP reference cleanup and a verified native "
+                    "Codex writer are registered"
+                ),
+            )
+        if engine in {"pi", "claude"}:
+            root_verified = self.native_root_verified(engine)
+            blockers = (
+                ()
+                if root_verified
+                else (
+                    _aionui_native_root_blocker(engine),
+                )
+            )
+            return EngineCapability(
+                "aionui",
+                engine,
+                inventory=True,
+                native_delete=False,
+                frontend_session_delete=False,
+                frontend_reference_delete=True,
+                frontend_project_delete=False,
+                verify=True,
+                reason=(
+                    "AionUI "
+                    + engine
+                    + " references are inventoried, but no verified native "
+                    "writer is registered"
+                ),
+                blockers=blockers,
+            )
+        return capability_for("aionui", engine, observed=True)
+
+    def list_project_items(self) -> list[AionUIProjectItem]:
+        """Read conversations as separate project-item metadata rows."""
+
+        if not optional_database_file_exists(self.database):
+            return []
+        try:
+            with closing(connect_readonly(self.database)) as connection:
+                require_table_columns(
+                    connection,
+                    table_name="conversations",
+                    required_columns={"id"},
+                    database=self.database,
+                )
+                columns = table_columns(
+                    connection, table_name="conversations", database=self.database
+                )
+                conversation_schema = table_schema(connection, "conversations")
+                conversation_columns = tuple(
+                    str(item["name"]) for item in conversation_schema
+                )
+                selected_columns = ", ".join(
+                    f"c.{quote_identifier(column)} AS {quote_identifier(column)}"
+                    for column in conversation_columns
+                )
+                title_sql = _optional_column_sql(columns, "title")
+                project_sql = _optional_column_sql(columns, "project_id")
+                working_sql = _optional_column_sql(
+                    columns, "working_dir", "cwd", "project_path"
+                )
+                has_acp_session = table_exists(connection, "acp_session")
+                if has_acp_session:
+                    require_table_columns(
+                        connection,
+                        table_name="acp_session",
+                        required_columns={"conversation_id"},
+                        database=self.database,
+                    )
+                reference_sql = (
+                    "(SELECT COUNT(*) FROM acp_session a "
+                    "WHERE a.conversation_id = c.id)"
+                    if has_acp_session
+                    else "0"
+                )
+                rows = connection.execute(
+                    f"""
+                    SELECT {selected_columns},
+                           {title_sql} AS __larj_project_title,
+                           {project_sql} AS __larj_explicit_project_id,
+                           {working_sql} AS __larj_working_dir,
+                           {reference_sql} AS session_reference_count
+                    FROM conversations c
+                    ORDER BY c.id
+                    """
+                ).fetchall()
+        except AdapterScanError:
+            raise
+        except sqlite3.Error as exc:
+            raise AdapterScanError(
+                f"Could not inspect AionUI project items {self.database}: {exc}"
+            ) from exc
+        items: list[AionUIProjectItem] = []
+        for row in rows:
+            conversation_id = _display_string(row["id"])
+            project_id = _display_string(row["__larj_explicit_project_id"]) or conversation_id
+            if not conversation_id or not project_id:
+                raise AdapterScanError(
+                    f"{self.database} is incompatible: conversations.id contains an invalid value"
+                )
+            reference_count = int(row["session_reference_count"] or 0)
+            items.append(
+                AionUIProjectItem(
+                    database=self.database,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                    title=_display_string(row["__larj_project_title"]),
+                    working_dir=_display_string(row["__larj_working_dir"]),
+                    session_reference_count=reference_count,
+                    schema_fingerprint=schema_fingerprint(conversation_schema),
+                    row_fingerprint=row_fingerprint(row, conversation_columns),
+                    project_delete_supported=(
+                        has_acp_session and reference_count == 0
+                    ),
+                )
+            )
+        return items
+
+    def project_items(self) -> list[AionUIProjectItem]:
+        return self.list_project_items()
 
     def scan(self) -> list[Finding]:
         self._replace_live_thread_ids(set())
@@ -469,6 +777,18 @@ def _preferred_rollout(records: list[RolloutRecord]) -> RolloutRecord | None:
     )[0]
 
 
+def _optional_column_sql(
+    columns: set[str],
+    *names: str,
+) -> str:
+    """Return a quoted conversations column or a NULL projection."""
+
+    for name in names:
+        if name in columns:
+            return "c." + quote_identifier(name)
+    return "NULL"
+
+
 def _normalized_string(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -590,3 +910,27 @@ def _ownership_evidence(
         "expected_originator": "aionui-session",
         "observed_originators": sorted(originators),
     }
+
+
+def _aionui_native_root_blocker(engine: str | None) -> dict[str, str]:
+    normalized = normalize_engine(engine or "unknown")
+    return {
+        "blocker_code": NATIVE_ROOT_UNVERIFIED,
+        "scope": "native_root",
+        "engine": normalized,
+        "message": (
+            "AionUI does not uniquely identify the native "
+            f"{normalized} storage root"
+        ),
+    }
+
+
+def _aionui_native_root_blockers(
+    engine: str | None,
+    *,
+    native_root_verified: bool,
+) -> list[dict[str, str]]:
+    normalized = normalize_engine(engine or "unknown")
+    if normalized not in {"pi", "claude"} or native_root_verified:
+        return []
+    return [_aionui_native_root_blocker(normalized)]

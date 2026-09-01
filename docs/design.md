@@ -1,8 +1,9 @@
 # 本地 Agent 记录清理模型与安全边界
 
-本文档描述 0.2.0 的当前实现。项目只负责找出失效或用户明确选择的本地 Agent
-记录，展示精确影响，永久删除，再确认目标已消失。它不是恢复平台、长期备份库、
-rollout 隔离区或自动数据修复器。
+本文档描述 0.2.0 的当前实现。项目只负责在已支持的适配器范围内找出失效或用户明确
+选择的本地 Agent 记录，展示精确影响，永久删除，再确认目标已消失。它不是恢复平台、
+长期备份库、rollout 隔离区或自动数据修复器；分类词汇不代表每个客户端都已实现全套
+发现和删除。
 
 ## 统一执行架构
 
@@ -19,6 +20,13 @@ Driver
 人类入口 `scan/records/delete/clean/purge` 和 Agent 入口
 `agent doctor/plan/apply/status/verify` 都调用同一个 `CleanupService`。CLI 负责参数、
 确认和输出，不拥有另一套扫描或删除规则。
+
+`gui` 是 Codex `records/delete` 的 Tk 人工界面：它把统一 inventory 和
+`ManualDeletePlan` 投影成可搜索、逐项勾选的列表，并复用相同的计划指纹、客户端关闭
+确认、执行前重验证和删除后验证。GUI 不提供全选。一次明确勾选和确认会额外绑定范围内
+精确 Codex Desktop 快照，并顺序编排 native thread 删除与 Desktop 状态清理；两者仍是
+独立物理修改批次，各自执行客户端归属检查、回滚保护和写后验证，不组成伪事务。
+Cindy/AionUI frontend mutation family 不在该组合授权内，仍明确保留并单独处理。
 
 核心类型分工：
 
@@ -48,12 +56,14 @@ Codex thread 的身份是 `(CODEX_HOME, thread_id)`；Pi session 和 Claude sess
 
 ## 快照与计划
 
-一次完整快照聚合：
+一次完整快照按所选适配器的实际能力聚合可用证据，可能包括：
 
 - Codex SQLite 列表、活动/归档 rollout 首行 metadata 和旧索引；
 - 精确关系边与完整关联任务范围；
 - Codex Desktop 可探测的 local catalog/UI 结构化引用；
-- AionUI/Cindy 当前与历史 frontend reference；
+- AionUI/Cindy 当前与历史 frontend reference；AionUI orphan project/conversations
+  row 仅在已探测支持 schema、完整不可变行证据且确认无 `acp_session` 引用时可执行，
+  其他 schema 保持 `inventory_only`；
 - Pi/Claude storage-qualified session manifest；
 - 读取失败、进程归属和 identity conflict。
 
@@ -71,7 +81,8 @@ action 生成完整目标、影响范围、schema/行/文件指纹、稳定 ID �
 | 孤立关联任务 thread | 展示完整级联范围后删除 |
 | 只剩无效关系边 | 精确删除一条已批准关系行 |
 | 只剩旧索引/Desktop 状态 | 精确清除残留 |
-| 只剩 Cindy/AionUI 映射 | 精确清除该映射 |
+| 只剩 Cindy/AionUI 映射 | 精确清除该映射；Cindy `status=deleted` 会话可作为独立批次物理删除 |
+| 只剩 AionUI project/conversations row | 仅在支持 schema、完整不可变行证据且无 `acp_session` 引用时按数据库集合精确删除；其他 schema 报告为 `orphan_project` / `inventory_only` |
 | Pi/Claude session | 删除精确文件或 manifest |
 | 同一 ID 位于多个存储 | 每个物理存储分别选择 |
 | 活动引用、读取失败、身份冲突 | 阻止该目标并返回稳定原因 |
@@ -96,6 +107,9 @@ store、是唯一链接的普通文件、thread ID 与完整指纹仍匹配且�
 
 ### Cindy
 
+- 软删除会话：只接受 `sessions.status='deleted'`，按一个数据库冻结全部精确行和依赖
+  证据，并在单个事务中集合删除会话、消息、FTS、embedding/vector 及已支持依赖；
+- `active`、`archived`、schema 漂移或无法证明归属的行保持不变；
 - 当前引用：只把目标 session 的 `sdk_session_id` 清为 `NULL`；
 - 历史引用：只从绑定消息 ID、消息行指纹和原始内容哈希的结构化
   `agent_switch` JSON 中移除 `fromSdkSessionId`。
@@ -125,15 +139,17 @@ store；Cindy 进程也不阻止已证明独立的官方 store。无法证明归
 
 ## 执行、验证与性能
 
-`plan` 做一次完整快照；`apply` 做一次完整预检和一次完整终检。N 个 action
-之间只重查本 action 涉及的数据库行、文件、活动引用和关联范围：
+默认 planner 对每个 store 做一次 catalog pass；apply 的终验取决于路径。healthy/native
+记录的已测合同是计划一次、终验一次两次 full catalog pass。N 个 action 之间只重查本
+action 涉及的数据库行、文件、活动引用和关联范围：
 
 ```text
 一次完整扫描 + N 次定点检查 + 一次完整终检
 ```
 
-中途漂移立即停止剩余动作，不在每个 action 前重扫全库。性能测试直接统计 full-scan
-调用次数；100 个 action 仍必须只有两次完整扫描。
+中途漂移立即停止剩余动作，不在每个 action 前重扫全库，也不重建完整 catalog/plan/
+frontend。性能测试直接统计 full-scan 调用次数；两次 pass 是 healthy/native 路径的
+实测结果，不对 stale/broken 等 anomaly scan 路径作统一承诺。
 
 执行结果采用 `deleted/not_deleted/partial/unknown` 或 Agent
 `complete/completed_with_residuals/blocked/unknown`。API 成功响应不能代替磁盘、

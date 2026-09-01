@@ -54,6 +54,11 @@ EXIT_OK = 0
 EXIT_UNKNOWN = 1
 EXIT_BLOCKED = 3
 
+_CHILD_OPERATION_PLAN_SCHEMA = "larj.child-operation-plan.v1"
+_CHILD_OPERATION_REMEDIATION = (
+    "Use operation status/verify with the top-level plan passed by --plan."
+)
+
 
 def run_agent_command(
     args: argparse.Namespace,
@@ -1093,7 +1098,74 @@ def _apply_locked(
     return _exit_for_result(result)
 
 
+def _read_child_operation_plan(args: argparse.Namespace) -> Mapping[str, Any] | None:
+    """Return a supplied top-level child-operation plan without touching state."""
+
+    plan_path = getattr(args, "plan", None)
+    if plan_path is None:
+        try:
+            # Do not call OperationStore.read_plan here: a child plan is not
+            # bound to the legacy agent schema, and must be rejected before
+            # legacy status/verify can validate or mutate anything.  Resolving
+            # its path and reading the raw JSON is still strictly read-only.
+            store = OperationStore(
+                _status_home(args), str(getattr(args, "operation_id", ""))
+            )
+            plan_path = store.plan_path
+        except (OperationStoreError, TypeError, ValueError):
+            return None
+    try:
+        value = strict_json_load(Path(plan_path).expanduser())
+    except (OperationStoreError, TypeError, ValueError):
+        return None
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == _CHILD_OPERATION_PLAN_SCHEMA
+    ):
+        return value
+    return None
+
+
+def _incompatible_operation_surface_result(
+    args: argparse.Namespace,
+    *,
+    subcommand: str,
+    plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    return result_document(
+        subcommand=subcommand,
+        operation_id=str(getattr(args, "operation_id", "")),
+        plan_sha=str(plan.get("plan_sha256") or ""),
+        goal_status="blocked",
+        modified=False,
+        mutation_started=False,
+        blockers=[
+            structured_blocker(
+                "incompatible_operation_surface",
+                scope="operation",
+                retryable=False,
+                remediation=_CHILD_OPERATION_REMEDIATION,
+                message=(
+                    "The supplied plan is a top-level child-operation plan; "
+                    "legacy agent status/verify cannot operate on child batches."
+                ),
+            )
+        ],
+        phase="preflight",
+        details={"plan_schema_version": _CHILD_OPERATION_PLAN_SCHEMA},
+    )
+
+
 def _run_status(args: argparse.Namespace, stdout: TextIO) -> int:
+    incompatible_plan = _read_child_operation_plan(args)
+    if incompatible_plan is not None:
+        document = _incompatible_operation_surface_result(
+            args,
+            subcommand="status",
+            plan=incompatible_plan,
+        )
+        _write_document(document, stdout)
+        return EXIT_BLOCKED
     try:
         store = OperationStore(_status_home(args), str(args.operation_id))
         if store.lock_exists():
@@ -1182,6 +1254,15 @@ def _run_verify(
     *,
     cleanup_service: CleanupService,
 ) -> int:
+    incompatible_plan = _read_child_operation_plan(args)
+    if incompatible_plan is not None:
+        document = _incompatible_operation_surface_result(
+            args,
+            subcommand="verify",
+            plan=incompatible_plan,
+        )
+        _write_document(document, stdout)
+        return EXIT_BLOCKED
     store: OperationStore | None = None
     try:
         store = OperationStore(_status_home(args), str(args.operation_id))
@@ -1670,6 +1751,7 @@ def _next_frozen_batch(actions: Sequence[Any]) -> tuple[str | None, list[Any]]:
             matches = [min(matches, key=lambda value: str(value.action_id))]
         if family in {
             "remove_frontend_reference",
+            "delete_frontend_session",
             "remove_broken_relation",
         }:
             by_database: dict[str, list[Any]] = {}
@@ -1677,6 +1759,8 @@ def _next_frozen_batch(actions: Sequence[Any]) -> tuple[str | None, list[Any]]:
                 attribute = (
                     "frontend_database_paths"
                     if family == "remove_frontend_reference"
+                    else "frontend_session_database_paths"
+                    if family == "delete_frontend_session"
                     else "relation_database_paths"
                 )
                 paths = tuple(

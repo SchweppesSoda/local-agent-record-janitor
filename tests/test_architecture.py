@@ -52,6 +52,14 @@ class DependencyDirectionTests(unittest.TestCase):
                 self.assertNotIn("cli", imports)
                 self.assertNotIn("agent_cli", imports)
 
+    def test_gui_is_a_thin_human_facade_over_inventory_and_manual_delete(self) -> None:
+        imports = imported_modules("gui.py")
+
+        self.assertIn("inventory", imports)
+        self.assertIn("manual_delete", imports)
+        self.assertNotIn("cli", imports)
+        self.assertNotIn("agent_cli", imports)
+
 
 if __name__ == "__main__":
     unittest.main()

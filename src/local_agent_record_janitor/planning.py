@@ -13,6 +13,7 @@ from typing import Any
 
 from .codex_state import (
     find_thread_rollouts,
+    iter_rollouts,
     read_spawn_descendants,
     read_thread_index,
     rollout_state_fingerprint,
@@ -35,6 +36,8 @@ from .legacy_index import (
 from .models import ConversationSummary, Finding, RolloutRecord
 from .path_identity import canonical_existing_path_key
 
+_DEFAULT_ROLLOUT_READER = find_thread_rollouts
+
 
 class ActionKind(str, Enum):
     DELETE_CONVERSATION = "delete_conversation"
@@ -46,6 +49,8 @@ class ActionKind(str, Enum):
     REPAIR_LEGACY_INDEX = "repair_legacy_index"
     DELETE_PI_SESSION = "delete_pi_session"
     DELETE_CLAUDE_SESSION = "delete_claude_session"
+    DELETE_FRONTEND_SESSION = "delete_frontend_session"
+    DELETE_PROJECT_ITEM = "delete_project_item"
     KEEP = "keep"
 
 
@@ -154,6 +159,10 @@ class ActionImpact:
     frontend_references_preserved: bool = True
     frontend_database_paths: tuple[str, ...] = ()
     frontend_reference_evidence: tuple[Mapping[str, Any], ...] = ()
+    frontend_project_database_paths: tuple[str, ...] = ()
+    frontend_project_evidence: tuple[Mapping[str, Any], ...] = ()
+    frontend_session_database_paths: tuple[str, ...] = ()
+    frontend_session_evidence: tuple[Mapping[str, Any], ...] = ()
     indexed_thread_ids: tuple[str, ...] = ()
     rollout_state_fingerprints: tuple[str, ...] = ()
     conversation_metadata_fingerprints: tuple[str, ...] = ()
@@ -228,6 +237,20 @@ class ActionImpact:
                 _json_value(value)
                 for value in self.frontend_reference_evidence
             ],
+            "frontend_project_database_paths": list(
+                self.frontend_project_database_paths
+            ),
+            "frontend_project_evidence": [
+                _json_value(value)
+                for value in self.frontend_project_evidence
+            ],
+            "frontend_session_database_paths": list(
+                self.frontend_session_database_paths
+            ),
+            "frontend_session_evidence": [
+                _json_value(value)
+                for value in self.frontend_session_evidence
+            ],
         }
 
 
@@ -277,6 +300,30 @@ class CandidateAction:
                     if self.legacy_inventory is not None
                     else None
                 ),
+            }
+        elif self.resource_kind == "project_item":
+            resource = {
+                "kind": "project_item",
+                "target": self.target.to_dict(),
+                "database_paths": list(
+                    self.impact.frontend_project_database_paths
+                ),
+                "evidence": [
+                    _json_value(value)
+                    for value in self.impact.frontend_project_evidence
+                ],
+            }
+        elif self.resource_kind == "frontend_session":
+            resource = {
+                "kind": "frontend_session",
+                "target": self.target.to_dict(),
+                "database_paths": list(
+                    self.impact.frontend_session_database_paths
+                ),
+                "evidence": [
+                    _json_value(value)
+                    for value in self.impact.frontend_session_evidence
+                ],
             }
         else:
             resource = {
@@ -642,9 +689,38 @@ def build_cleanup_plan(
                 f"Could not inspect conversation list records: {_error_text(exc)}"
             )
 
+        # The production reader historically rescanned both rollout roots for
+        # every target. That made anomaly planning O(targets * catalog_size)
+        # even though all targets in this store share the same physical
+        # catalog. Keep the injected two-argument reader contract for tests
+        # and compatibility callers, while the default reader gets one
+        # store-level pass and a thread-id index.
+        rollout_records_by_thread: Mapping[str, Sequence[RolloutRecord]] | None
+        if rollout_reader is _DEFAULT_ROLLOUT_READER:
+            indexed_records: dict[str, list[RolloutRecord]] = defaultdict(list)
+            try:
+                for record in iter_rollouts(evidence.path):
+                    indexed_records[record.thread_id].append(record)
+            except Exception as exc:
+                evidence.errors.append(
+                    "Could not inspect conversation content files for "
+                    f"{evidence.path}: {_error_text(exc)}"
+                )
+                # A partial physical catalog must never be used as if it were
+                # complete. Clear any records yielded before the walk failed;
+                # the per-storage error then keeps every affected action
+                # fail-closed.
+                indexed_records.clear()
+            rollout_records_by_thread = indexed_records
+        else:
+            rollout_records_by_thread = None
+
         for thread_id in sorted(affected_ids):
             try:
-                records = rollout_reader(evidence.path, thread_id)
+                if rollout_records_by_thread is None:
+                    records = rollout_reader(evidence.path, thread_id)
+                else:
+                    records = rollout_records_by_thread.get(thread_id, ())
             except Exception as exc:
                 evidence.errors.append(
                     "Could not inspect conversation content files for "

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import stat
 from abc import ABC, abstractmethod
@@ -7,9 +9,16 @@ from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from ..models import Finding
+from ..record_identity import (
+    EngineCapability,
+    StoreKey,
+    capability_for,
+    normalize_client,
+    normalize_engine,
+)
 from ..sqlite_utils import connect_readonly, table_exists
 
 if TYPE_CHECKING:
@@ -28,6 +37,60 @@ class CodexEvidence:
     descendants_by_parent: dict[str, tuple[str, ...]]
     spawn_edges_available: bool
 
+@dataclass(frozen=True)
+class FrontendBatchSnapshot:
+    """One immutable frontend enumeration reused by all batch guards.
+
+    A guard may still perform a narrow, exact row check immediately before a
+    write. It must not enumerate the frontend database again for every native
+    action. ``records`` intentionally contains metadata-only adapter rows.
+    """
+
+    client: str
+    database: Path
+    records: tuple["FrontendSessionRecord", ...]
+    fingerprint: str
+
+    @property
+    def live_native_ids(self) -> frozenset[str]:
+        return frozenset(
+            record.thread_id
+            for record in self.records
+            if record.is_live and isinstance(record.thread_id, str)
+        )
+
+    @property
+    def native_ids(self) -> frozenset[str]:
+        return frozenset(
+            record.thread_id
+            for record in self.records
+            if isinstance(record.thread_id, str)
+        )
+
+    def references_for(
+        self,
+        native_ids: Iterable[str],
+    ) -> Mapping[str, tuple["FrontendSessionRecord", ...]]:
+        wanted = {value for value in native_ids if isinstance(value, str)}
+        grouped: dict[str, list["FrontendSessionRecord"]] = {
+            value: [] for value in wanted
+        }
+        for record in self.records:
+            if record.thread_id in grouped:
+                grouped[record.thread_id].append(record)
+        return {
+            value: tuple(grouped[value])
+            for value in sorted(grouped)
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "client": self.client,
+            "database": str(self.database),
+            "fingerprint": self.fingerprint,
+            "records": [record.to_dict() for record in self.records],
+            "live_native_ids": sorted(self.live_native_ids),
+        }
 
 class FrontendAdapter(ABC):
     name: str
@@ -36,6 +99,99 @@ class FrontendAdapter(ABC):
         self.database = database.expanduser()
         self.codex_home = codex_home.expanduser()
         self._live_thread_ids: set[str] = set()
+        self._frontend_snapshot: FrontendBatchSnapshot | None = None
+
+    @property
+    def client(self) -> str:
+        return normalize_client(self.name)
+
+    @property
+    def engine(self) -> str:
+        return normalize_engine(
+            getattr(self, "backend", None)
+            or getattr(self, "engine_name", None)
+            or "codex"
+        )
+
+    @property
+    def store_key(self) -> StoreKey:
+        return StoreKey(self.engine, self.database, kind="sqlite")
+
+    @property
+    def capability(self) -> EngineCapability:
+        """Conservative capability for this concrete adapter instance."""
+
+        return capability_for(self.client, self.engine, observed=self.available)
+
+    def invalidate_frontend_snapshot(self) -> None:
+        """Drop a batch snapshot after a successful frontend mutation."""
+
+        self._frontend_snapshot = None
+
+    def snapshot_sessions(
+        self,
+        *,
+        refresh: bool = False,
+        all_backends: bool = False,
+    ) -> FrontendBatchSnapshot:
+        """Enumerate frontend metadata once and cache the immutable result.
+
+        Mutation code can use the returned snapshot for all action guards. A
+        caller must explicitly request ``refresh`` after a write or external
+        state change; action loops never rebuild the catalog implicitly.
+        """
+
+        if self._frontend_snapshot is not None and not refresh:
+            return self._frontend_snapshot
+        if all_backends and getattr(self, "supports_all_backends", False):
+            rows = tuple(self.list_sessions(all_backends=True))
+        else:
+            rows = tuple(self.list_sessions())
+        canonical_rows = [
+            record.approval_payload()
+            for record in sorted(
+                rows,
+                key=lambda item: (
+                    str(item.platform),
+                    str(item.database).casefold(),
+                    str(item.platform_session_id),
+                    str(item.thread_id or ""),
+                ),
+            )
+        ]
+        encoded = json.dumps(
+            canonical_rows,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        snapshot = FrontendBatchSnapshot(
+            client=self.client,
+            database=self.database,
+            records=rows,
+            fingerprint="v1:" + hashlib.sha256(encoded).hexdigest(),
+        )
+        self._frontend_snapshot = snapshot
+        self._replace_live_thread_ids(set(snapshot.live_native_ids))
+        return snapshot
+
+    # Explicit aliases make the batch contract discoverable to callers that
+    # use either noun without adding another enumeration path.
+    build_frontend_snapshot = snapshot_sessions
+    frontend_snapshot = snapshot_sessions
+
+    def batch_frontend_guard(
+        self,
+        thread_ids: Iterable[str],
+        *,
+        snapshot: FrontendBatchSnapshot | None = None,
+    ) -> frozenset[str]:
+        """Return live references among target IDs from one cached snapshot."""
+
+        wanted = {value for value in thread_ids if isinstance(value, str)}
+        current = snapshot or self.snapshot_sessions()
+        return frozenset(wanted & current.live_native_ids)
 
     @property
     def available(self) -> bool:
@@ -78,16 +234,7 @@ class FrontendAdapter(ABC):
 
         if not thread_ids:
             return frozenset()
-        live: set[str] = set()
-        for record in self.list_sessions():
-            record_thread_id = getattr(record, "thread_id", None)
-            if (
-                getattr(record, "is_live", False) is True
-                and isinstance(record_thread_id, str)
-                and record_thread_id in thread_ids
-            ):
-                live.add(record_thread_id)
-        return frozenset(live)
+        return self.batch_frontend_guard(thread_ids)
 
     @abstractmethod
     def scan(self) -> list[Finding]:

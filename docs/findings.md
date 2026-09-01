@@ -29,8 +29,10 @@ Finding 是 adapter 的兼容证据格式，描述一个不一致状态，不等
 - rollout originator 不与 Cindy 冲突；
 - Codex 索引或 rollout至少存在一项。
 
-这里的“孤立”是从可见 UI 的角度描述。Janitor 不删除 Cindy tombstone 或消息行；
-它只清空精确当前 `sdk_session_id`，或从已绑定消息 ID、行指纹和内容哈希的结构化
+这里的“孤立”是从可见 UI 的角度描述。高层 operation 可将 `status=deleted` 的
+Cindy tombstone、消息、索引和已支持的会话专属依赖冻结为一个数据库批次并物理删除；
+`active`、`archived` 或 schema 未证明的行不进入该动作。单独清理原生记录引用时，
+仍只清空精确当前 `sdk_session_id`，或从已绑定消息 ID、行指纹和内容哈希的结构化
 `agent_switch` JSON 中移除 `fromSdkSessionId`。
 
 ## Codex 原生完整性

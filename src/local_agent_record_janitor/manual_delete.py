@@ -26,6 +26,7 @@ from .codex_state import rollout_state_fingerprint
 from .discovery import choose_codex_binary
 from .models import ConversationSummary, Finding, RolloutRecord
 from .path_identity import canonical_existing_path_key
+from .blocker_codes import LIVE_FRONTEND_REFERENCE
 
 
 class ManualDeletePlanError(ValueError):
@@ -83,6 +84,9 @@ class ManualDeleteAction:
     root: Any = field(repr=False, compare=False)
     affected_records: tuple[Any, ...] = field(repr=False, compare=False)
     risk: str = "high"
+    # Structured closure evidence; free-text blockers never authorize a waiver.
+    frontend_closure_eligible: bool = False
+    frontend_reference_evidence: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def descendants(self) -> tuple[str, ...]:
@@ -106,6 +110,10 @@ class ManualDeleteAction:
             "frontend_snapshot_fingerprint": (
                 self.frontend_snapshot_fingerprint
             ),
+            "frontend_closure_eligible": self.frontend_closure_eligible,
+            "frontend_reference_evidence": [
+                _json_value(item) for item in self.frontend_reference_evidence
+            ],
             "expected_scope": self.expected_scope.to_dict(),
             "codex_bin_hint": (
                 _normalize_path(self.codex_bin_hint)
@@ -125,6 +133,10 @@ class ManualDeleteAction:
             "frontend_sessions": [
                 _frontend_display_payload(item)
                 for item in self.frontend_sessions
+            ],
+            "frontend_closure_eligible": self.frontend_closure_eligible,
+            "frontend_reference_evidence": [
+                _json_value(item) for item in self.frontend_reference_evidence
             ],
         }
 
@@ -218,6 +230,173 @@ class ManualDeletePlan:
         }
 
 
+@dataclass(frozen=True)
+class ManualDeleteClosure:
+    """A native manual action paired with exact frontend cleanup actions."""
+
+    native_action: ManualDeleteAction
+    frontend_actions: tuple[Any, ...] = ()
+    eligible: bool = False
+    blockers: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "native_action_id": self.native_action.action_id,
+            "eligible": self.eligible,
+            "blockers": list(self.blockers),
+            "frontend_actions": [
+                action.to_dict()
+                for action in self.frontend_actions
+                if callable(getattr(action, "to_dict", None))
+            ],
+        }
+
+
+def build_manual_delete_closure(
+    action: ManualDeleteAction,
+) -> ManualDeleteClosure:
+    """Build paired per-database frontend actions from one native action.
+
+    The native root is still sent to its native writer only once. Frontend
+    actions carry the same immutable row evidence and are intentionally one
+    action per physical database, so the coordinator can run one transaction
+    for each store after native success.
+    """
+
+    if not isinstance(action, ManualDeleteAction):
+        raise ManualDeletePlanError("A manual delete closure requires a ManualDeleteAction")
+    if not action.available:
+        return ManualDeleteClosure(
+            native_action=action,
+            eligible=False,
+            blockers=tuple(action.unavailable_reasons),
+        )
+    if not action.frontend_closure_eligible:
+        return ManualDeleteClosure(
+            native_action=action,
+            eligible=False,
+            blockers=(
+                "Native action has no approved exact frontend reference closure",
+            ),
+        )
+    if not action.frontend_reference_evidence:
+        return ManualDeleteClosure(
+            native_action=action,
+            eligible=False,
+            blockers=("Frontend closure is marked eligible but contains no evidence",),
+        )
+
+    from .planning import (
+        ActionImpact,
+        ActionKind,
+        CandidateAction,
+        RiskLevel,
+        TargetRef,
+        storage_id_for_path,
+    )
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for raw in action.frontend_reference_evidence:
+        evidence = dict(raw)
+        database = evidence.get("database")
+        if not isinstance(database, (str, os.PathLike)) or not os.fspath(database):
+            return ManualDeleteClosure(
+                native_action=action,
+                eligible=False,
+                blockers=("Frontend closure evidence has no physical database",),
+            )
+        grouped.setdefault(_normalize_path(database), []).append(evidence)
+
+    target = TargetRef(storage_id_for_path(action.codex_home), action.thread_id)
+    frontend_actions: list[CandidateAction] = []
+    for database, raw_evidence in sorted(grouped.items()):
+        evidence = tuple(sorted(raw_evidence, key=_canonical_json))
+        platforms = {
+            str(item.get("platform") or "").casefold() for item in evidence
+        }
+        unavailable_reason: str | None = None
+        if platforms != {"aionui"} and platforms != {"cindy"}:
+            unavailable_reason = (
+                "A frontend physical database cannot mix unsupported or "
+                "different frontend platforms in one transaction"
+            )
+        impact = ActionImpact(
+            affected_thread_ids=tuple(action.affected_thread_ids),
+            descendant_thread_ids=tuple(action.descendants),
+            frontend_reference_count=len(evidence),
+            frontend_residual_count=len(evidence),
+            frontend_references_preserved=False,
+            frontend_database_paths=(database,),
+            frontend_reference_evidence=evidence,
+            resource_path=database,
+        )
+        snapshot = _fingerprint(
+            {
+                "schema_version": 1,
+                "native_action_id": action.action_id,
+                "target": target.to_dict(),
+                "database": database,
+                "references": list(evidence),
+            }
+        )
+        digest = _fingerprint(
+            {
+                "target": target.to_dict(),
+                "kind": ActionKind.REMOVE_FRONTEND_REFERENCE.value,
+                "database": database,
+                "references": list(evidence),
+            }
+        )[:24]
+        frontend_actions.append(
+            CandidateAction(
+                action_id=f"{ActionKind.REMOVE_FRONTEND_REFERENCE.value}-{digest}",
+                kind=ActionKind.REMOVE_FRONTEND_REFERENCE,
+                target=target,
+                risk=(RiskLevel.REVIEW if unavailable_reason is None else RiskLevel.BLOCKED),
+                available=unavailable_reason is None,
+                unavailable_reason=unavailable_reason,
+                impact=impact,
+                snapshot_fingerprint=snapshot,
+                requires_explicit_selection=True,
+                resource_kind="frontend_reference",
+            )
+        )
+    return ManualDeleteClosure(
+        native_action=action,
+        frontend_actions=tuple(frontend_actions),
+        eligible=True,
+    )
+
+
+def build_manual_delete_closures(
+    plan: ManualDeletePlan,
+) -> tuple[ManualDeleteClosure, ...]:
+    """Build paired closures without rescanning a catalog or frontend store."""
+
+    if not isinstance(plan, ManualDeletePlan):
+        raise ManualDeletePlanError("A manual delete closure requires a ManualDeletePlan")
+    return tuple(build_manual_delete_closure(action) for action in plan.actions)
+
+
+def frontend_actions_after_native_success(
+    closure: ManualDeleteClosure,
+    native_result: Any,
+) -> tuple[Any, ...]:
+    """Return frontend actions only after a positively known native delete.
+
+    Every non-deleted status, including ``unknown`` and ``partial``, returns
+    no frontend actions. This small gate lets the coordinator guarantee that
+    an ambiguous native API result can never trigger a frontend write.
+    """
+
+    if not isinstance(closure, ManualDeleteClosure) or not closure.eligible:
+        return ()
+    status = getattr(native_result, "status", native_result)
+    status = getattr(status, "value", status)
+    if str(status).casefold() != "deleted":
+        return ()
+    return tuple(closure.frontend_actions)
+
 CatalogBuilder = Callable[[], Any]
 
 
@@ -309,13 +488,19 @@ def execute_manual_delete(
     verifier: FindingVerifier | None = None,
     verification_attempts: int = 4,
     verification_interval: float = 0.05,
+    preflight_verified: bool = False,
+    targeted_guards_only: bool = False,
+    action_state_callback: Callable[[str, Any, Any | None], None] | None = None,
+    targeted_guard: Callable[[ManualDeleteAction], None] | None = None,
 ) -> CleanupReport:
     """Revalidate and execute an explicitly approved manual deletion plan.
 
-    ``catalog_builder`` is intentionally required. It is called once before
-    app-server startup for the complete approval comparison, then again by
-    the cleaner immediately before each deletion request to compare the exact
-    frontend-reference snapshot. No Cindy/AionUI database is ever modified.
+    ``catalog_builder`` is intentionally required for compatibility with
+    direct callers. The normal shared batch path sets ``preflight_verified``
+    and ``targeted_guards_only`` after it has already compared one immutable
+    catalog snapshot. In that mode this function never rebuilds a full
+    catalog per action; callers may provide ``targeted_guard`` for an exact
+    row/path check. No Cindy/AionUI database is ever modified.
     """
 
     if not clients_closed:
@@ -336,16 +521,19 @@ def execute_manual_delete(
     if not callable(catalog_builder):
         raise ManualDeletePlanError("catalog_builder must be callable")
 
-    refreshed = build_manual_delete_plan(catalog_builder()).with_selected_actions(
-        action.action_id for action in plan.actions
-    )
-    if not hmac.compare_digest(
-        approved_plan_fingerprint,
-        refreshed.plan_fingerprint or "",
-    ):
-        raise ManualDeletePlanError(
-            "The manual deletion plan changed after approval; nothing was deleted"
-        )
+    if preflight_verified:
+        refreshed = plan
+    else:
+        refreshed = build_manual_delete_plan(
+            catalog_builder()
+        ).with_selected_actions(action.action_id for action in plan.actions)
+        if not hmac.compare_digest(
+            approved_plan_fingerprint,
+            refreshed.plan_fingerprint or "",
+        ):
+            raise ManualDeletePlanError(
+                "The manual deletion plan changed after approval; nothing was deleted"
+            )
 
     findings = [_synthetic_finding(action) for action in refreshed.actions]
     expected_scopes = {
@@ -368,6 +556,10 @@ def execute_manual_delete(
 
     def validate_frontend_snapshot(finding: Finding) -> None:
         expected = action_by_key[finding_key(finding)]
+        if targeted_guard is not None:
+            targeted_guard(expected)
+        if targeted_guards_only:
+            return
         current_plan = build_manual_delete_plan(catalog_builder())
         current = current_plan.with_selected_actions(
             (expected.action_id,)
@@ -388,6 +580,8 @@ def execute_manual_delete(
             )
 
     def verify_with_complete_inventory(finding: Finding) -> VerificationResult:
+        if targeted_guards_only:
+            return verify_finding_deleted(finding)
         try:
             verification_catalog = catalog_builder()
             verification_failures, structure_errors = _catalog_failures(
@@ -421,11 +615,36 @@ def execute_manual_delete(
             )
         return verify_finding_deleted(finding)
 
+    def forward_action_state(
+        checkpoint: str,
+        finding: Finding,
+        action_result: Any | None,
+    ) -> None:
+        action = action_by_key.get(finding_key(finding))
+        if action is None:
+            raise ManualDeletePlanError(
+                "A manual deletion checkpoint is not bound to its approved action"
+            )
+        if action_state_callback is not None:
+            action_state_callback(checkpoint, action, action_result)
+        if (
+            checkpoint == "verified"
+            and str(getattr(action_result, "status", "")) == "unknown"
+        ):
+            # The cleaner catches this at the batch boundary and marks all
+            # pending roots unknown. This prevents a second irreversible
+            # request after an ambiguous outcome.
+            raise ManualDeletePlanError(
+                "Manual deletion outcome is unknown; stop the remaining batch"
+            )
+
     kwargs: dict[str, Any] = {
         "verifier": (
             verifier if verifier is not None else verify_with_complete_inventory
         ),
     }
+    if action_state_callback is not None:
+        kwargs["action_state_callback"] = forward_action_state
     return clean_findings(
         findings,
         timeout=timeout,
@@ -492,6 +711,12 @@ def _build_action(
     elif cascade_unknown:
         reasons.append("cascade_unknown prevents exact thread/delete approval")
 
+    blocker_codes, blocker_codes_error = _record_blocker_codes(record)
+    live_only_blocked = (
+        blocker_codes_error is None
+        and blocker_codes == (LIVE_FRONTEND_REFERENCE,)
+    )
+
     delete_supported, delete_error = _required_bool(
         record,
         ("delete_supported", "deletable"),
@@ -499,7 +724,7 @@ def _build_action(
     )
     if delete_error:
         reasons.append(delete_error)
-    elif not delete_supported:
+    elif not delete_supported and not live_only_blocked:
         reasons.append("inventory marked thread/delete unavailable")
 
     blockers, blockers_error = _required_string_tuple(
@@ -509,7 +734,8 @@ def _build_action(
     )
     if blockers_error:
         reasons.append(blockers_error)
-    reasons.extend(f"inventory blocker: {item}" for item in blockers)
+    elif not live_only_blocked:
+        reasons.extend(f"inventory blocker: {item}" for item in blockers)
 
     root_rollouts, rollout_error = _record_rollouts(record)
     if rollout_error:
@@ -556,6 +782,7 @@ def _build_action(
     rollout_fingerprints: list[str] = []
     metadata_fingerprints: list[str] = []
     frontend_sessions: list[Any] = []
+    live_frontend_sessions: list[Any] = []
     affected_payloads: list[dict[str, Any]] = []
     hint_paths: dict[str, Path] = {}
     root_integrity_approvals: set[str] = set()
@@ -692,16 +919,7 @@ def _build_action(
         for session in sessions:
             session_payload = _frontend_approval_payload(session)
             if session_payload["is_live"] is True:
-                platform = session_payload["platform"]
-                label = (
-                    "live Cindy current or historical reference"
-                    if platform.casefold() == "cindy"
-                    else f"live {platform} frontend reference"
-                )
-                reasons.append(
-                    f"{affected_id}: {label} "
-                    "prevents approval of the complete thread/delete scope"
-                )
+                live_frontend_sessions.append(session)
 
         hints, hints_error = _record_hints(affected)
         if hints_error:
@@ -726,6 +944,45 @@ def _build_action(
             "affected records provide conflicting Codex executable hints"
         )
     codex_bin_hint = next(iter(hint_paths.values())) if hint_paths else None
+
+    frontend_reference_evidence: list[Mapping[str, Any]] = []
+    frontend_evidence_errors: list[str] = []
+    for session in live_frontend_sessions:
+        evidence, evidence_error = _exact_frontend_reference_evidence(session)
+        if evidence_error is not None:
+            frontend_evidence_errors.append(evidence_error)
+        elif evidence is not None:
+            frontend_reference_evidence.append(evidence)
+    frontend_reference_evidence = sorted(
+        frontend_reference_evidence,
+        key=_canonical_json,
+    )
+    frontend_closure_eligible = (
+        bool(live_frontend_sessions)
+        and live_only_blocked
+        and not frontend_evidence_errors
+        and len(frontend_reference_evidence) == len(live_frontend_sessions)
+    )
+    if live_frontend_sessions and not frontend_closure_eligible:
+        if not live_only_blocked:
+            for session in live_frontend_sessions:
+                platform = str(
+                    _frontend_approval_payload(session)["platform"]
+                )
+                label = (
+                    "live Cindy current or historical reference"
+                    if platform.casefold() == "cindy"
+                    else f"live {platform} frontend reference"
+                )
+                reasons.append(
+                    f"{label} prevents approval of the complete "
+                    "thread/delete scope"
+                )
+        reasons.extend(frontend_evidence_errors)
+    elif live_only_blocked and not live_frontend_sessions:
+        reasons.append(
+            "live_frontend_reference blocker has no live frontend evidence"
+        )
 
     frontend_payload = sorted(
         (_frontend_approval_payload(item) for item in frontend_sessions),
@@ -770,6 +1027,7 @@ def _build_action(
             "affected_records": affected_payloads,
             "expected_scope": expected_scope.to_dict(),
             "frontend_sessions": frontend_payload,
+            "frontend_reference_evidence": frontend_reference_evidence,
             "codex_bin_hints": sorted(hint_paths),
             "integrity_approvals": sorted(root_integrity_approvals),
         }
@@ -789,6 +1047,8 @@ def _build_action(
         frontend_snapshot_fingerprint=frontend_fingerprint,
         integrity_approvals=tuple(sorted(root_integrity_approvals)),
         root=record,
+        frontend_closure_eligible=frontend_closure_eligible,
+        frontend_reference_evidence=tuple(frontend_reference_evidence),
         affected_records=tuple(affected_records),
     )
 
@@ -998,6 +1258,119 @@ def _indexed_rollout_path(
     return path
 
 
+def _record_blocker_codes(
+    record: Any,
+) -> tuple[tuple[str, ...], str | None]:
+    """Read machine-readable blocker codes without interpreting text."""
+
+    present, value = _attribute(record, ("blocker_codes",))
+    if not present:
+        return (), None
+    if value is None or isinstance(value, (str, bytes, Mapping)):
+        return (), "ManagedConversation blocker_codes must be an iterable"
+    try:
+        values = tuple(value)
+    except TypeError:
+        return (), "ManagedConversation blocker_codes must be an iterable"
+    if not all(isinstance(item, str) and item.strip() for item in values):
+        return (), "ManagedConversation blocker_codes contain an invalid value"
+    return tuple(sorted(set(item.strip() for item in values))), None
+
+
+def _exact_frontend_reference_evidence(
+    record: Any,
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    """Return exact writer evidence for one live frontend row.
+
+    The details object is an immutable proof boundary.  Missing or unknown
+    fields are blockers; this function never infers a row from display text or
+    a frontend primary key that the writer cannot guard.
+    """
+
+    payload = _frontend_approval_payload(record)
+    platform = str(payload["platform"]).casefold()
+    present, details = _attribute(record, ("details",))
+    if not present or not isinstance(details, Mapping):
+        return None, f"{platform} live frontend reference has no exact details"
+    raw = details.get("frontend_reference")
+    if not isinstance(raw, Mapping):
+        return None, f"{platform} live frontend reference has no exact evidence"
+    evidence = dict(raw)
+    if evidence.get("schema_version") != 1:
+        return None, f"{platform} frontend evidence has an unsupported schema"
+    if str(evidence.get("platform") or "").casefold() != platform:
+        return None, f"{platform} frontend evidence has a mismatched platform"
+    database = evidence.get("database")
+    if not isinstance(database, (str, os.PathLike)) or not os.fspath(database):
+        return None, f"{platform} frontend evidence has no physical database"
+    if _normalize_path(database) != str(payload["database"]):
+        return None, f"{platform} frontend evidence has a mismatched database"
+    expected = evidence.get("expected")
+    if not isinstance(expected, Mapping):
+        return None, f"{platform} frontend evidence has no expected identity"
+    expected_native_id = (
+        expected.get("session_id")
+        if platform == "aionui"
+        else expected.get("native_session_id")
+    )
+    if expected_native_id != payload["thread_id"]:
+        return None, f"{platform} frontend evidence has a mismatched native ID"
+    locator = evidence.get("locator")
+    if not isinstance(locator, Mapping):
+        return None, f"{platform} frontend evidence has no physical locator"
+    if platform == "aionui":
+        if evidence.get("table") != "acp_session" or evidence.get("operation") != "delete_row":
+            return None, "AionUI live reference uses an unsupported cleanup operation"
+        if not isinstance(evidence.get("schema_fingerprint"), str) or not evidence.get("schema_fingerprint"):
+            return None, "AionUI live reference has no schema fingerprint"
+        if not isinstance(evidence.get("row_fingerprint"), str) or not evidence.get("row_fingerprint"):
+            return None, "AionUI live reference has no row fingerprint"
+        kind = locator.get("kind")
+        if kind == "rowid":
+            if not isinstance(locator.get("rowid"), int) or isinstance(locator.get("rowid"), bool):
+                return None, "AionUI live reference has an invalid rowid locator"
+        elif kind == "primary_key":
+            columns = locator.get("columns")
+            values = locator.get("values")
+            if (
+                not isinstance(columns, list)
+                or not columns
+                or not isinstance(values, list)
+                or len(columns) != len(values)
+                or any(not isinstance(column, str) or not column for column in columns)
+            ):
+                return None, "AionUI live reference has an invalid primary-key locator"
+        else:
+            return None, "AionUI live reference has no supported physical locator"
+        if expected.get("session_id") != payload["thread_id"]:
+            return None, "AionUI live reference expected identity is not exact"
+        return evidence, None
+    if platform == "cindy":
+        if evidence.get("exact") is not True:
+            return None, "Cindy live reference does not have exact cleanup evidence"
+        if evidence.get("operation") not in {
+            "clear_session_sdk_session_id",
+            "remove_agent_switch_from_sdk_session_id",
+        }:
+            return None, "Cindy live reference uses an unsupported cleanup operation"
+        if evidence.get("table") not in {"sessions", "messages"}:
+            return None, "Cindy live reference targets an unsupported table"
+        for name in ("session_schema_fingerprint", "session_row_fingerprint"):
+            if not isinstance(evidence.get(name), str) or not evidence.get(name):
+                return None, f"Cindy live reference has no {name}"
+        if not isinstance(locator.get("cindy_session_id"), str) or not locator.get("cindy_session_id"):
+            return None, "Cindy live reference has no session locator"
+        if evidence.get("operation") == "remove_agent_switch_from_sdk_session_id":
+            if evidence.get("table") != "messages" or not isinstance(locator.get("message_id"), str) or not locator.get("message_id"):
+                return None, "Cindy historical reference has no exact message locator"
+            for name in ("message_schema_fingerprint", "message_row_fingerprint", "message_content_sha256"):
+                if not isinstance(evidence.get(name), str) or not evidence.get(name):
+                    return None, f"Cindy historical reference has no {name}"
+        elif evidence.get("table") != "sessions":
+            return None, "Cindy current reference targets an unsupported table"
+        return evidence, None
+    return None, f"{platform} frontend reference has no supported exact writer"
+
 def _record_frontend_sessions(record: Any) -> tuple[tuple[Any, ...], str | None]:
     present, value = _attribute(record, ("frontend_sessions",))
     if not present:
@@ -1120,6 +1493,44 @@ def _frontend_approval_payload(record: Any) -> dict[str, Any]:
         )
     if not isinstance(fields["is_live"], bool):
         raise ManualDeletePlanError("FrontendSessionRecord has invalid is_live")
+    if fields["platform"].casefold() == "codex-desktop":
+        details_present, details = _attribute(record, ("details",))
+        if not details_present or not isinstance(details, Mapping):
+            raise ManualDeletePlanError(
+                "Codex Desktop reference is missing exact state details"
+            )
+        host_id = details.get("host_id")
+        snapshot_fingerprint = details.get("snapshot_fingerprint")
+        reference_count = details.get("global_state_reference_count")
+        if host_id != "local":
+            raise ManualDeletePlanError(
+                "Codex Desktop reference is not an exact local-host row"
+            )
+        if (
+            not isinstance(snapshot_fingerprint, str)
+            or not snapshot_fingerprint.startswith("desktop:v1:")
+        ):
+            raise ManualDeletePlanError(
+                "Codex Desktop reference is missing its exact state fingerprint"
+            )
+        if (
+            not isinstance(reference_count, int)
+            or isinstance(reference_count, bool)
+            or reference_count < 0
+        ):
+            raise ManualDeletePlanError(
+                "Codex Desktop reference has an invalid exact reference count"
+            )
+        fields.update(
+            {
+                "reference_kind": details.get(
+                    "reference_kind", "desktop_host_catalog"
+                ),
+                "host_id": host_id,
+                "snapshot_fingerprint": snapshot_fingerprint,
+                "global_state_reference_count": reference_count,
+            }
+        )
     return {"schema_version": 1, **fields}
 
 
@@ -1223,9 +1634,12 @@ def _json_value(value: Any) -> Any:
 
 __all__ = [
     "ManualDeleteAction",
+    "ManualDeleteClosure",
     "ManualDeletePlan",
     "ManualDeletePlanError",
     "ManualDeleteSelectionError",
+    "build_manual_delete_closure",
+    "build_manual_delete_closures",
     "build_manual_delete_plan",
     "execute_manual_delete",
 ]

@@ -370,17 +370,99 @@ class AgentCliTests(unittest.TestCase):
             ),
             (
                 "agent", "status", "--operation-id", "purge-example",
-                "--codex-home", "C:\\exact\\.codex",
+                "--codex-home", "C:\\exact\\.codex", "--plan", "top-level.json",
             ),
             (
                 "agent", "verify", "--operation-id", "purge-example",
-                "--codex-home", "C:\\exact\\.codex", "--verify-timeout", "180",
+                "--codex-home", "C:\\exact\\.codex", "--plan", "top-level.json",
+                "--verify-timeout", "180",
             ),
         )
         for example in examples:
             with self.subTest(command=example[1]):
                 parsed = parser.parse_args(example)
                 self.assertEqual(parsed.command, "agent")
+
+    def test_child_operation_plan_is_read_only_in_legacy_queries(self) -> None:
+        operation_id = "child-op"
+        operation_directory = (
+            self.codex_home
+            / ".local-agent-record-janitor"
+            / "operations"
+            / operation_id
+        )
+        operation_directory.mkdir(parents=True)
+        sentinels = {
+            "state.json": b"state-before",
+            "events.jsonl": b"events-before\n",
+            "result.json": b"result-before",
+        }
+        for filename, content in sentinels.items():
+            (operation_directory / filename).write_bytes(content)
+
+        plan_path = self.root / "top-level-operation.json"
+        plan_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "larj.child-operation-plan.v1",
+                    "operation_id": operation_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        store_plan_path = operation_directory / "plan.json"
+        store_plan_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "larj.child-operation-plan.v1",
+                    "operation_id": operation_id,
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = {
+            filename: (operation_directory / filename).read_bytes()
+            for filename in sentinels
+        }
+        plan_before = store_plan_path.read_bytes()
+
+        for subcommand in ("status", "verify"):
+            for supplied_plan in (plan_path, None):
+                with self.subTest(
+                    subcommand=subcommand,
+                    plan_mode="explicit" if supplied_plan is not None else "store",
+                ):
+                    argv = [
+                        "agent",
+                        subcommand,
+                        "--operation-id",
+                        operation_id,
+                        "--codex-home",
+                        str(self.codex_home),
+                    ]
+                    if supplied_plan is not None:
+                        argv.extend(("--plan", str(supplied_plan)))
+                    if subcommand == "verify":
+                        argv.extend(("--verify-timeout", "0"))
+                    code, payload, _ = self.invoke(tuple(argv))
+                    self.assertEqual(code, 3)
+                    self.assertEqual(payload["goal_status"], "blocked")
+                    self.assertFalse(payload["modified"])
+                    self.assertFalse(payload["mutation_started"])
+                    blocker = payload["blockers"][0]
+                    self.assertEqual(
+                        blocker["blocker_code"], "incompatible_operation_surface"
+                    )
+                    self.assertEqual(
+                        blocker["remediation"],
+                        "Use operation status/verify with the top-level plan passed by --plan.",
+                    )
+                    after = {
+                        filename: (operation_directory / filename).read_bytes()
+                        for filename in sentinels
+                    }
+                    self.assertEqual(after, before)
+                    self.assertEqual(store_plan_path.read_bytes(), plan_before)
 
     def test_agent_plan_defaults_to_user_state_directory(self) -> None:
         state_root = self.root / "user-state"

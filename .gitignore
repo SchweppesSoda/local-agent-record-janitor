@@ -9,4 +9,4 @@ build/
 venv/
 .idea/
 .vscode/
-
+.codex-artifacts/

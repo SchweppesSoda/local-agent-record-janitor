@@ -61,6 +61,21 @@ class FrontendSessionRecord:
                     "cindy_profile_root": self.details.get("cindy_profile_root"),
                 }
             )
+        if self.platform.casefold() == "codex-desktop":
+            payload.update(
+                {
+                    "reference_kind": self.details.get(
+                        "reference_kind", "desktop_host_catalog"
+                    ),
+                    "host_id": self.details.get("host_id"),
+                    "snapshot_fingerprint": self.details.get(
+                        "snapshot_fingerprint"
+                    ),
+                    "global_state_reference_count": self.details.get(
+                        "global_state_reference_count"
+                    ),
+                }
+            )
         return payload
 
     def to_dict(self) -> dict[str, Any]:
@@ -114,6 +129,9 @@ class ManagedConversation:
     deletable: bool = False
     cascade_unknown: bool = False
     blockers: tuple[str, ...] = ()
+    # Machine-readable counterpart of ``blockers``. Presentation text is
+    # deliberately not used to waive a native-delete blocker.
+    blocker_codes: tuple[str, ...] = ()
     codex_bin_hints: tuple[Path, ...] = ()
 
     @property
@@ -173,6 +191,7 @@ class ManagedConversation:
             "deletable": self.deletable,
             "cascade_unknown": self.cascade_unknown,
             "blockers": list(self.blockers),
+            "blocker_codes": list(self.blocker_codes),
             "codex_bin_hints": [str(path) for path in self.codex_bin_hints],
         }
 
@@ -388,10 +407,12 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             artifact_present = indexed or bool(records)
             descendants = tuple(sorted(_transitive_descendants(graph, thread_id)))
             blockers = list(blocking_messages)
+            blocker_codes: set[str] = set()
             live_references = [
                 reference for reference in references if reference.is_live
             ]
             if live_references:
+                blocker_codes.add("live_frontend_reference")
                 platforms = ", ".join(
                     sorted(
                         {
@@ -471,6 +492,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                     + ", ".join(sorted(live_cindy_descendants))
                 )
             if not artifact_present:
+                blocker_codes.add("no_native_artifact")
                 if any(
                     reference.platform.casefold() == "codex-desktop"
                     for reference in references
@@ -484,6 +506,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                         "No SQLite thread row or verifiable rollout remains"
                     )
             if cascade_unknown:
+                blocker_codes.add("spawn_edge_open")
                 blockers.append("Cascade inventory is incomplete")
             summary = summaries[thread_id]
             desktop_title = next(
@@ -528,6 +551,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                     deletable=artifact_present and not blockers,
                     cascade_unknown=cascade_unknown,
                     blockers=tuple(blockers),
+                    blocker_codes=tuple(sorted(blocker_codes)),
                     codex_bin_hints=hints,
                 )
             )

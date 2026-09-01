@@ -14,6 +14,7 @@ from .codex_desktop_state import (
 from .codex_state import read_rollouts_at_paths, read_thread_index
 from .legacy_index import inventory_legacy_index
 from .frontend_reference_cleanup import verify_frontend_reference_evidence
+from .frontend_session_cleanup import verify_cindy_session_rows
 from .relation_cleanup import verify_relation_evidence
 from .operation_store import plan_sha256
 from .path_identity import canonical_existing_path_key
@@ -175,6 +176,8 @@ def _physical_artifact_count(action: Any) -> int:
         return int(getattr(impact, "frontend_residual_count", 0))
     if enum_value(action.kind) == "remove_broken_relation":
         return len(tuple(getattr(impact, "relation_evidence", ())))
+    if enum_value(action.kind) == "delete_frontend_session":
+        return len(tuple(getattr(impact, "frontend_session_evidence", ())))
     if enum_value(action.kind) in {
         "delete_pi_session",
         "delete_claude_session",
@@ -421,6 +424,23 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
                     "Frontend action has invalid exact reference evidence"
                 )
             markers.extend(verify_frontend_reference_evidence(references))
+        elif kind == "delete_frontend_session":
+            impact = raw.get("impact")
+            sessions = (
+                impact.get("frontend_session_evidence", [])
+                if isinstance(impact, Mapping)
+                else []
+            )
+            if not isinstance(sessions, list) or any(
+                not isinstance(value, Mapping) for value in sessions
+            ):
+                raise ValueError(
+                    "Frontend session action has invalid exact row evidence"
+                )
+            markers.extend(
+                f"frontend-session:{value}"
+                for value in verify_cindy_session_rows(sessions)
+            )
         elif kind == "remove_broken_relation":
             impact = raw.get("impact")
             relations = (

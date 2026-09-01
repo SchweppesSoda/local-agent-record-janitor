@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .adapters.base import FrontendAdapter
+from .action_registry import action_capability
 from .blocker_codes import cleanup_blocker_codes
 from .cleaner import ScanReport, scan_adapters
 from .codex_desktop_state import ClientInspector
@@ -34,6 +35,151 @@ from .planning import (
 ScanEngine = Callable[..., ScanReport]
 PlanEngine = Callable[[ScanReport], CleanupPlan]
 AdapterBuilder = Callable[[], Sequence[FrontendAdapter]]
+
+
+@dataclass(frozen=True)
+class MutationBatch:
+    """A write-coordinated child batch of one immutable operation.
+
+    A batch never spans physical stores or mutation families. The optional
+    resource key further separates frontend/relation writers that target
+    different database files while preserving one user-level operation.
+    """
+
+    storage_id: str
+    mutation_family: str
+    actions: tuple[Any, ...]
+    resource_key: tuple[str, ...] = ()
+
+    @property
+    def batch_id(self) -> str:
+        suffix = ":".join(self.resource_key)
+        return ":".join(
+            item
+            for item in (self.storage_id, self.mutation_family, suffix)
+            if item
+        )
+
+
+def partition_actions(actions: Iterable[Any]) -> tuple[MutationBatch, ...]:
+    """Partition selected actions into stable, write-safe child batches.
+
+    The function is intentionally metadata-only: it does not scan adapters,
+    rebuild catalogs, or inspect the filesystem. Callers can therefore use it
+    after the single immutable plan snapshot and before executing mutations.
+    """
+
+    groups: dict[tuple[str, str, tuple[str, ...]], list[Any]] = {}
+    order: list[tuple[str, str, tuple[str, ...]]] = []
+    storage_order: dict[str, int] = {}
+    family_order: dict[str, int] = {}
+    for action in actions:
+        capability = action_capability(getattr(action, "kind", ""))
+        family = str(capability.mutation_family or "")
+        if not family:
+            family = str(getattr(getattr(action, "kind", ""), "value", ""))
+        storage_id = str(
+            getattr(getattr(action, "target", None), "storage_id", "")
+        )
+        resource_key = _mutation_resource_key(action, family)
+        key = (storage_id, family, resource_key)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+            storage_order.setdefault(storage_id, len(storage_order))
+            family_order.setdefault(family, len(family_order))
+        groups[key].append(action)
+    # Dependency order is part of the operation contract. In particular, a
+    # frontend/reference or relation/index writer must not run before its
+    # native record delete has been durably verified. The secondary keys keep
+    # independent stores deterministic without allowing the incidental input
+    # action order to choose the mutation family order.
+    order.sort(
+        key=lambda key: (
+            _mutation_family_rank(key[1]),
+            storage_order.get(key[0], 0),
+            _mutation_family_tie_breaker(key[1]),
+            family_order.get(key[1], 0),
+            key[1],
+            key[2],
+        )
+    )
+    return tuple(
+        MutationBatch(
+            storage_id=storage_id,
+            mutation_family=family,
+            resource_key=resource_key,
+            actions=tuple(group),
+        )
+        for storage_id, family, resource_key in order
+        for group in (groups[(storage_id, family, resource_key)],)
+    )
+
+
+def _mutation_family_rank(family: str) -> int:
+    """Return the explicit native → frontend → relation/index → project rank."""
+
+    normalized = str(family).strip().casefold()
+    if normalized in {
+        "remove_frontend_reference",
+    } or "frontend" in normalized or "reference" in normalized:
+        return 1
+    if normalized in {
+        "remove_broken_relation",
+        "repair_legacy_index",
+    } or "relation" in normalized or "index" in normalized:
+        return 2
+    if "project" in normalized:
+        return 3
+    # Native conversation/session/desktop mutations are intentionally first;
+    # unknown families are left in the conservative native slot and are still
+    # blocked by the capability registry before they can be executed.
+    return 0
+
+
+def _mutation_family_tie_breaker(family: str) -> int:
+    normalized = str(family).strip().casefold()
+    return {
+        "delete_conversation": 0,
+        "delete_pi_session": 1,
+        "delete_claude_session": 2,
+        "remove_desktop_state": 3,
+        "remove_frontend_reference": 10,
+        "delete_frontend_session": 11,
+        "delete_project_item": 30,
+        "remove_broken_relation": 20,
+        "repair_legacy_index": 21,
+    }.get(normalized, 99)
+
+
+def _mutation_resource_key(action: Any, family: str) -> tuple[str, ...]:
+    impact = getattr(action, "impact", None)
+    if impact is None:
+        return ()
+    attributes: tuple[str, ...]
+    if family == "remove_frontend_reference":
+        attributes = ("frontend_database_paths",)
+    elif family == "delete_frontend_session":
+        attributes = ("frontend_session_database_paths",)
+    elif family == "delete_project_item":
+        attributes = ("frontend_project_database_paths",)
+    elif family == "remove_broken_relation":
+        attributes = ("relation_database_paths",)
+    elif family == "remove_desktop_state":
+        attributes = ("desktop_database_paths", "desktop_global_state_paths")
+    else:
+        attributes = ("external_storage_root",)
+    values: list[str] = []
+    for attribute in attributes:
+        value = getattr(impact, attribute, ())
+        if isinstance(value, (str, Path)):
+            values.append(str(value))
+        else:
+            try:
+                values.extend(str(item) for item in value)
+            except TypeError:
+                continue
+    return tuple(sorted(dict.fromkeys(item for item in values if item)))
 
 
 class Driver(Protocol):
@@ -169,6 +315,7 @@ class CleanupService:
             client_inspector = desktop_state_module.running_related_clients
         self._client_inspector = client_inspector
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._operation_coordinator: Any | None = None
 
     @property
     def client_inspector(self) -> ClientInspector:
@@ -224,6 +371,11 @@ class CleanupService:
             _typed_action(candidate, observations)
             for candidate in plan.actions
         )
+
+    def partition(self, actions: Iterable[Any]) -> tuple[MutationBatch, ...]:
+        """Return write-safe child batches without touching live storage."""
+
+        return partition_actions(actions)
 
     def prepare(
         self,
@@ -341,6 +493,38 @@ class CleanupService:
             catalog_builder=catalog_builder,
             target_root=target_root,
         )
+
+    @property
+    def operation_coordinator(self) -> Any:
+        """Lazily construct the shared plan/apply operation coordinator."""
+
+        if self._operation_coordinator is None:
+            from .operation_coordinator import OperationCoordinator
+
+            self._operation_coordinator = OperationCoordinator(self)
+        return self._operation_coordinator
+
+    def plan_operation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.operation_coordinator.plan_operation(**kwargs)
+
+    def apply_operation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.operation_coordinator.apply_operation(**kwargs)
+
+    def run_operation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.operation_coordinator.run_operation(**kwargs)
+
+    def status_operation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.operation_coordinator.status_operation(**kwargs)
+
+    def verify_operation(self, **kwargs: Any) -> dict[str, Any]:
+        return self.operation_coordinator.verify_operation(**kwargs)
+
+    # Compatibility aliases for callers that used the old verb-specific names.
+    plan_delete = plan_operation
+    apply_delete = apply_operation
+    run_delete = run_operation
+    get_operation_status = status_operation
+    verify_delete = verify_operation
 
 
 def selected_platforms(values: Sequence[str] | None) -> set[str]:
@@ -528,6 +712,8 @@ def _record_kind_for_action(candidate: Any, kind: MutationKind) -> RecordKind:
         return RecordKind.RELATION
     if kind is MutationKind.REMOVE_FRONTEND_REFERENCE:
         return RecordKind.FRONTEND_REFERENCE
+    if kind is MutationKind.DELETE_FRONTEND_SESSION:
+        return RecordKind.FRONTEND_SESSION
     if kind is MutationKind.REMOVE_DESKTOP_STATE:
         return RecordKind.DESKTOP_STATE
     if kind is MutationKind.DELETE_PI_SESSION:
@@ -570,6 +756,9 @@ def _sha256_json(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+from .operation_coordinator import OperationCoordinator, OperationCoordinatorError
+
+
 __all__ = [
     "AdapterBuilder",
     "CleanupContext",
@@ -577,10 +766,14 @@ __all__ = [
     "Driver",
     "Executor",
     "Guard",
+    "MutationBatch",
+    "OperationCoordinator",
+    "OperationCoordinatorError",
     "Planner",
     "StoreSnapshot",
     "Verifier",
     "filter_candidate_platforms",
     "filter_supplied_adapters",
+    "partition_actions",
     "selected_platforms",
 ]

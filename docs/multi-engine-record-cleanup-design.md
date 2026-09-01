@@ -17,8 +17,9 @@ record 管理：
 - Codex thread、Pi JSONL、Claude Code JSONL 三种目标使用不同执行器，禁止按一个
   `session_id` 模型混删。
 
-本阶段不直接删除或改写 Cindy 会话行。Cindy SQLite 只作为归属、生命周期和删除
-保护证据。
+这份历史基线当时不直接删除或改写 Cindy 会话行。当前高层 operation 已补充
+`status=deleted` 会话的精确批量物理删除；`active`、`archived` 和未证明 schema 仍只作为
+归属、生命周期和删除保护证据，具体边界以 [design.md](design.md) 为准。
 
 ### 1.1 规范术语
 

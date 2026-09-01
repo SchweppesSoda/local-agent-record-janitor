@@ -4,6 +4,23 @@
 for an orchestrating Agent. Human and Agent commands share the same
 `CleanupService`; neither command path owns a second scanner or planner.
 
+For a single client spanning multiple projects or stores, use the high-level
+operation surface documented in [operation-cli.md](operation-cli.md):
+`records --client ...`, `delete plan/apply/run`, and `operation status/verify`.
+That surface creates one immutable top-level operation with child batches; a
+child still owns exactly one physical store and mutation family. `doctor` is a
+useful read-only diagnostic but is not a prerequisite for `delete plan` or
+`delete run`, whose core preflight remains authoritative. The high-level CLI
+does not fall back to `agent` purge when its explicit CleanupService operation
+entry point is unavailable. The currently verified deletion paths are
+healthy/native records with a frozen frontend closure and Cindy Pi/Claude
+sessions. AionUI orphan project/conversations rows are executable only for the
+probed supported schema with immutable row evidence and zero `acp_session`
+references; other schemas remain `inventory_only`. With `remote_delete=false`,
+residuals are reported only when the adapter supplies authoritative discovery
+evidence; otherwise the output states the capability boundary without claiming
+residuals, and no remote write is attempted.
+
 ## Commands
 
 `agent doctor` is read-only. It checks the exact target store, scan
@@ -29,12 +46,19 @@ cleanup, and exact frontend-reference cleanup are separate batches. Completing
 one batch never authorizes actions discovered by the next scan.
 
 `agent apply` requires the exact plan, exact hash, and
-`--clients-closed`. It performs:
+`--clients-closed`. Where the selected path supports complete catalog
+verification, it performs:
 
 1. one complete preflight scan;
 2. action-local guards for only the approved rows, files, references, and
    relationship scope;
 3. one complete final scan.
+
+The no-action-loop-full-rebuild rule applies to all supported paths. The
+default planner uses one catalog pass per store; healthy/native records have
+the measured two-pass plan-plus-terminal result. Anomaly sources such as
+stale-index or broken-relation detection may perform source-specific reads,
+so the two-pass figure is not a universal promise.
 
 For a Codex deletion batch, one app-server handles all approved actions.
 Per-action guards do not repeat a complete store scan. Any drift stops the

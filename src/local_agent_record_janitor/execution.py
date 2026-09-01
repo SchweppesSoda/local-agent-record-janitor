@@ -28,6 +28,14 @@ from .frontend_reference_cleanup import (
     FrontendReferenceCleanupResult,
     execute_frontend_reference_cleanup,
 )
+from .frontend_project_cleanup import (
+    FrontendProjectCleanupResult,
+    execute_aionui_project_cleanup,
+)
+from .frontend_session_cleanup import (
+    FrontendSessionCleanupResult,
+    execute_cindy_session_cleanup,
+)
 from .relation_cleanup import (
     RelationCleanupResult,
     execute_relation_cleanup,
@@ -80,6 +88,8 @@ class ExecutionOutcome:
     legacy_repair: LegacyIndexRepairResult | None = None
     desktop_cleanup: DesktopCleanupResult | None = None
     frontend_cleanup: FrontendReferenceCleanupResult | None = None
+    frontend_project_cleanup: FrontendProjectCleanupResult | None = None
+    frontend_session_cleanup: FrontendSessionCleanupResult | None = None
     relation_cleanup: RelationCleanupResult | None = None
     session_engine: str | None = None
     session_cleanup: Any | None = None
@@ -96,8 +106,30 @@ class ExecutionOutcome:
             self.legacy_repair is not None
             or self.desktop_cleanup is not None
             or self.frontend_cleanup is not None
+            or self.frontend_project_cleanup is not None
+            or self.frontend_session_cleanup is not None
             or self.relation_cleanup is not None
         )
+
+    @property
+    def modified(self) -> bool:
+        if self.frontend_session_cleanup is not None:
+            return bool(self.frontend_session_cleanup.deleted_session_count)
+        if self.frontend_project_cleanup is not None:
+            return bool(self.frontend_project_cleanup.deleted_row_count)
+        if self.frontend_cleanup is not None:
+            return bool(self.frontend_cleanup.removed_reference_count)
+        return False
+
+    @property
+    def results(self) -> tuple[Any, ...]:
+        if self.frontend_session_cleanup is not None:
+            return (self.frontend_session_cleanup,)
+        if self.frontend_project_cleanup is not None:
+            return (self.frontend_project_cleanup,)
+        if self.frontend_cleanup is not None:
+            return (self.frontend_cleanup,)
+        return ()
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
@@ -130,6 +162,26 @@ class ExecutionOutcome:
                     str(action.action_id) for action in self.selected_actions
                 ],
                 "result": self.frontend_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
+        if self.frontend_project_cleanup is not None:
+            return {
+                "command": "clean",
+                "mutation_kind": "delete_project_item",
+                "selected_action_ids": [
+                    str(action.action_id) for action in self.selected_actions
+                ],
+                "result": self.frontend_project_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
+        if self.frontend_session_cleanup is not None:
+            return {
+                "command": "delete",
+                "mutation_kind": "delete_frontend_session",
+                "selected_action_ids": [
+                    str(action.action_id) for action in self.selected_actions
+                ],
+                "result": self.frontend_session_cleanup.to_dict(),
                 "plan_fingerprint": str(self.plan.plan_fingerprint),
             }
         if self.relation_cleanup is not None:
@@ -198,6 +250,11 @@ class ExecutionOutcome:
             "results": results,
         }
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize only the compact, body-free mutation receipt."""
+
+        return self.audit_payload()
+
 
 def execute_prevalidated_actions(
     context: CleanupContext,
@@ -261,15 +318,27 @@ def execute_prevalidated_actions(
             native_action: Any,
             item_result: Any | None,
         ) -> None:
-            if action_state_callback is None:
-                return
             candidate = candidate_by_id.get(str(native_action.action_id))
             if candidate is None:
                 raise ExecutionError(
                     "A session checkpoint is not bound to its authorized action.",
                     kind="session_action_binding_failed",
                 )
-            action_state_callback(checkpoint, candidate, item_result)
+            if action_state_callback is not None:
+                action_state_callback(checkpoint, candidate, item_result)
+            if (
+                checkpoint == "verified"
+                and str(getattr(item_result, "status", "")) == "unknown"
+            ):
+                # Pi/Claude executors report an ambiguous per-item outcome
+                # through their callback. Stop the executor at this batch
+                # boundary so no later irreversible request is sent; status
+                # and verify can resolve the already-started operation.
+                raise ExecutionError(
+                    "Session deletion outcome is unknown; stop the remaining batch.",
+                    kind="mutation_outcome_unknown",
+                    matches=[str(candidate.action_id)],
+                )
 
         if session_executor is None:
             if engine == "pi":
@@ -399,22 +468,126 @@ def execute_prevalidated_actions(
         if action_state_callback is not None:
             for action in actions:
                 action_state_callback("guard_started", action, None)
+
+        def forward_frontend_phase(phase: str) -> None:
+            if action_state_callback is None:
+                return
             for action in actions:
-                action_state_callback("mutation_started", action, None)
+                action_state_callback(phase, action, None)
+
         storage = _storage_for_action(actions[0], plan)
         result = execute_frontend_reference_cleanup(
             Path(storage.path),
             reference_evidence,
             client_inspector=client_inspector,
+            phase_callback=forward_frontend_phase,
         )
-        if action_state_callback is not None:
-            for action in actions:
-                action_state_callback("verified", action, None)
         return ExecutionOutcome(
             mutation_kind=mutation_kind,
             selected_actions=actions,
             plan=plan,
             frontend_cleanup=result,
+        )
+
+    if mutation_kind == "delete_frontend_session":
+        database_paths = {
+            str(path)
+            for action in actions
+            for path in getattr(
+                action.impact,
+                "frontend_session_database_paths",
+                (),
+            )
+        }
+        if len(database_paths) != 1:
+            raise ExecutionError(
+                "One frontend session batch must target one physical database.",
+                kind="multiple_frontend_session_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        evidence = tuple(
+            dict(item)
+            for action in actions
+            for item in getattr(
+                action.impact,
+                "frontend_session_evidence",
+                (),
+            )
+        )
+        if len(evidence) != len(actions):
+            raise ExecutionError(
+                "Every frontend session action must bind exact row evidence.",
+                kind="frontend_session_evidence_incomplete",
+                matches=[str(action.action_id) for action in actions],
+            )
+
+        def forward_session_phase(phase: str) -> None:
+            if action_state_callback is None:
+                return
+            for action in actions:
+                action_state_callback(phase, action, None)
+
+        storage = _storage_for_action(actions[0], plan)
+        result = execute_cindy_session_cleanup(
+            evidence,
+            client_root=Path(storage.path),
+            client_inspector=client_inspector,
+            phase_callback=forward_session_phase,
+        )
+        return ExecutionOutcome(
+            mutation_kind=mutation_kind,
+            selected_actions=actions,
+            plan=plan,
+            frontend_session_cleanup=result,
+        )
+
+    if mutation_kind == "delete_project_item":
+        database_paths = {
+            str(path)
+            for action in actions
+            for path in getattr(
+                action.impact,
+                "frontend_project_database_paths",
+                (),
+            )
+        }
+        if len(database_paths) != 1:
+            raise ExecutionError(
+                "One frontend project batch must target one physical database.",
+                kind="multiple_frontend_project_storages",
+                matches=[str(action.action_id) for action in actions],
+            )
+        evidence = tuple(
+            dict(item)
+            for action in actions
+            for item in getattr(
+                action.impact,
+                "frontend_project_evidence",
+                (),
+            )
+        )
+        if len(evidence) != len(actions):
+            raise ExecutionError(
+                "Every project action must bind exact row evidence.",
+                kind="frontend_project_evidence_incomplete",
+                matches=[str(action.action_id) for action in actions],
+            )
+
+        def forward_project_phase(phase: str) -> None:
+            if action_state_callback is None:
+                return
+            for action in actions:
+                action_state_callback(phase, action, None)
+
+        result = execute_aionui_project_cleanup(
+            evidence,
+            phase_callback=forward_project_phase,
+        )
+        return ExecutionOutcome(
+            mutation_kind=mutation_kind,
+            selected_actions=actions,
+            plan=plan,
+            frontend_project_cleanup=result,
         )
 
     if mutation_kind == "remove_broken_relation":
@@ -517,10 +690,31 @@ def execute_prevalidated_actions(
         str(storage.storage_id): Path(storage.path)
         for storage in plan.storages
     }
+    cached_guard_adapters: tuple[Any, ...] | None = None
+
+    def build_guard_adapters() -> Sequence[Any]:
+        nonlocal cached_guard_adapters
+        if cached_guard_adapters is None:
+            try:
+                cached_guard_adapters = tuple(
+                    context.adapter_builder()
+                    if context.adapter_builder is not None
+                    else context.active_adapters
+                )
+            except Exception as exc:
+                raise ExecutionError(
+                    "Could not build the targeted frontend guard set.",
+                    kind="frontend_guard_unavailable",
+                    matches=[str(action.action_id) for action in actions],
+                ) from exc
+        return cached_guard_adapters
+
     reference_guard = TargetedReferenceGuard(
-        active_adapters=context.active_adapters,
+        active_adapters=tuple(context.active_adapters),
         affected_thread_ids=affected_scope_by_finding(actions, storage_paths),
-        adapter_builder=context.adapter_builder,
+        adapter_builder=(
+            build_guard_adapters if context.adapter_builder is not None else None
+        ),
     )
     actions_by_finding = {
         finding_key(finding): action
@@ -532,14 +726,25 @@ def execute_prevalidated_actions(
         finding: Finding,
         result: Any | None,
     ) -> None:
-        if action_state_callback is None:
-            return
         action = actions_by_finding.get(finding_key(finding))
         if action is None:
             raise ExecutionError(
                 "An execution checkpoint could not be bound to its action."
             )
-        action_state_callback(phase, action, result)
+        if action_state_callback is not None:
+            action_state_callback(phase, action, result)
+        if (
+            phase == "verified"
+            and str(getattr(result, "status", "")) == "unknown"
+        ):
+            # ``clean_findings`` invokes this after recording the result. By
+            # raising here its outer batch handler marks pending roots
+            # unknown and exits before the next delete request.
+            raise ExecutionError(
+                "Native deletion outcome is unknown; stop the remaining batch.",
+                kind="mutation_outcome_unknown",
+                matches=[str(action.action_id)],
+            )
 
     run_cleaner = cleaner or clean_findings
     report = run_cleaner(

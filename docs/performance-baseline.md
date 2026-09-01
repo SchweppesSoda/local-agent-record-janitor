@@ -12,7 +12,9 @@
 
 ## 重构验收目标
 
-- `plan` 只做一次完整快照。
-- `apply` 固定一次完整预检和一次完整终检。
-- 每个 action 只读取与其物理存储、记录身份、活动引用和关联范围有关的证据。
-- 100 个 action 的 apply 必须保持两次完整扫描；测试直接统计扫描调用次数。
+- 默认 planner 对每个 store 只做一次 catalog pass。
+- healthy/native 路径已测为计划一次、终验一次两次 full catalog pass。
+- 每个 action 只读取与其物理存储、记录身份、活动引用和关联范围有关的证据；action
+  loop 不重建完整 catalog/plan/frontend。
+- anomaly scanner 可有来源特定读取；两次 full catalog pass 不对所有分类作统一承诺。
+  测试直接统计各路径的扫描调用次数。

@@ -34,6 +34,7 @@ class RecordKind(str, Enum):
     DESKTOP_STATE = "desktop_state"
     PI_SESSION = "pi_session"
     CLAUDE_SESSION = "claude_session"
+    FRONTEND_SESSION = "frontend_session"
 
 
 class MutationKind(str, Enum):
@@ -46,6 +47,8 @@ class MutationKind(str, Enum):
     REPAIR_LEGACY_INDEX = "repair_legacy_index"
     DELETE_PI_SESSION = "delete_pi_session"
     DELETE_CLAUDE_SESSION = "delete_claude_session"
+    DELETE_FRONTEND_SESSION = "delete_frontend_session"
+    DELETE_PROJECT_ITEM = "delete_project_item"
     KEEP = "keep"
 
     # These values remain parseable only while the public 0.1 JSON contract is

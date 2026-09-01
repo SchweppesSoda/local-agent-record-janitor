@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from ..blocker_codes import (
     CASCADE_REQUIRES_EXPLICIT_SCOPE,
@@ -16,6 +17,7 @@ from ..cindy_references import (
 )
 from ..discovery import discover_cindy_codex
 from ..models import Finding, RolloutRecord
+from ..record_identity import EngineCapability, capability_for, normalize_engine
 from .base import (
     AdapterScanError,
     FrontendAdapter,
@@ -25,6 +27,7 @@ from .base import (
 
 class CindyAdapter(FrontendAdapter):
     name = "cindy"
+    supports_all_backends = True
 
     def __init__(
         self,
@@ -33,18 +36,60 @@ class CindyAdapter(FrontendAdapter):
         codex_home: Path,
         cindy_root: Path | None = None,
         codex_bin_hint: Path | None = None,
+        backend: str = "codex",
     ) -> None:
         super().__init__(database=database, codex_home=codex_home)
+        self.backend = normalize_engine(backend)
         root = cindy_root or database.parent
         self.cindy_root = root.expanduser()
         self.codex_bin_hint = codex_bin_hint or discover_cindy_codex(root)
+        self._reference_catalog_cache: Any | None = None
 
-    def list_sessions(self) -> list["FrontendSessionRecord"]:
-        """Read all Cindy Codex rows, including unassigned sessions."""
+    def snapshot_sessions(
+        self,
+        *,
+        refresh: bool = False,
+        all_backends: bool = True,
+    ) -> Any:
+        """Cache one all-backend Cindy metadata snapshot per scan batch.
+
+        Cindy's reference catalog is already a single read of the sessions and
+        historical switch rows. Always asking the shared snapshot layer for
+        all backends prevents a default backend call from poisoning a later
+        Pi/Claude context with a backend-filtered cache.
+        """
+
+        if refresh:
+            self._reference_catalog_cache = None
+        return super().snapshot_sessions(refresh=refresh, all_backends=True)
+
+    def invalidate_frontend_snapshot(self) -> None:
+        super().invalidate_frontend_snapshot()
+        self._reference_catalog_cache = None
+
+    def list_sessions(
+        self,
+        *,
+        backend: str | None = None,
+        all_backends: bool = False,
+    ) -> list["FrontendSessionRecord"]:
+        """Read Cindy references for one backend or every backend."""
 
         from ..inventory import FrontendSessionRecord
 
-        references = self._codex_references()
+        requested_backend = (
+            None
+            if all_backends
+            else normalize_engine(backend or self.backend)
+        )
+        catalog = self._reference_catalog()
+        if catalog.failures:
+            raise AdapterScanError(catalog.failures[0].message)
+        references = tuple(
+            reference
+            for reference in catalog.references
+            if requested_backend is None or reference.backend == requested_backend
+        )
         return [
             FrontendSessionRecord(
                 platform=self.name,
@@ -52,7 +97,7 @@ class CindyAdapter(FrontendAdapter):
                 thread_id=reference.native_session_id,
                 database=self.database,
                 codex_home=self.codex_home,
-                backend="codex",
+                backend=reference.backend,
                 status=reference.session_status,
                 updated_at_ms=reference.session_updated_at_ms,
                 title=_display_string((reference.session_details or {}).get("title")),
@@ -69,26 +114,137 @@ class CindyAdapter(FrontendAdapter):
                     "boundary_created_at_ms": reference.boundary_created_at_ms,
                     "boundary_rewind_at_ms": reference.boundary_rewind_at_ms,
                     "cindy_profile_root": str(reference.profile_root),
+                    "frontend_reference": _cindy_reference_evidence(reference),
+                    "frontend_session": _cindy_session_evidence(reference),
                 },
                 codex_bin_hint=self.codex_bin_hint,
             )
             for reference in references
         ]
 
-    def _codex_references(self) -> tuple[CindyNativeReference, ...]:
-        catalog = build_cindy_reference_catalog(
-            self.database,
-            profile_root=self.cindy_root,
+    def list_references(self) -> list["FrontendSessionRecord"]:
+        """Alias making the frontend-reference boundary explicit."""
+
+        return self.list_sessions()
+
+    def observed_backends(self) -> tuple[str, ...]:
+        """Return Cindy's known backend bindings in this database."""
+
+        catalog = self._reference_catalog()
+        if catalog.failures:
+            raise AdapterScanError(catalog.failures[0].message)
+        return tuple(sorted({reference.backend for reference in catalog.references}))
+
+    def capability_matrix(
+        self,
+        backends: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, EngineCapability]:
+        """Expose reference-writer capabilities without claiming native writes."""
+
+        names = (
+            tuple(backends)
+            if backends is not None
+            else tuple(dict.fromkeys(("codex", "pi", "claude", *self.observed_backends())))
         )
+        return {
+            normalize_engine(name): self.registered_capability(
+                normalize_engine(name)
+            )
+            for name in names
+            if str(name).strip()
+        }
+
+    def registered_capability(
+        self,
+        backend: str | None = None,
+    ) -> EngineCapability:
+        """Report only writers implemented by this adapter/core boundary."""
+
+        engine = normalize_engine(backend or self.backend)
+        if engine in {"codex", "pi", "claude"}:
+            return EngineCapability(
+                "cindy",
+                engine,
+                inventory=True,
+                native_delete=True,
+                frontend_session_delete=True,
+                frontend_reference_delete=True,
+                frontend_project_delete=False,
+                verify=True,
+                reason=(
+                    "Native "
+                    + engine
+                    + " writer, exact Cindy reference cleanup, and soft-deleted "
+                    "session-row cleanup are registered; project-item deletion "
+                    "is not registered"
+                ),
+            )
+        return capability_for("cindy", engine, observed=True)
+
+    def native_catalog_for(self, backend: str) -> Any | None:
+        """Build one ownership-qualified native catalog for a backend."""
+
+        engine = normalize_engine(backend)
+        if engine == "codex":
+            return None
+        catalog = self._reference_catalog()
+        references = catalog.for_backend(engine)
+        if engine == "pi":
+            from ..pi_sessions import build_pi_session_catalog
+
+            root = self.cindy_root / "pi-agent-home"
+            return build_pi_session_catalog(
+                agent_dir=root,
+                session_root=root / "sessions",
+                storage_kind="cindy",
+                cindy_profile_root=self.cindy_root,
+                cindy_references=references,
+                cindy_failures=catalog.failures,
+            )
+        if engine == "claude":
+            from ..claude_sessions import build_claude_session_catalog
+
+            return build_claude_session_catalog(
+                config_dir=self.cindy_root / "claude-home",
+                frontend_references=references,
+                reference_errors=catalog.failures,
+            )
+        return None
+
+    def native_catalog(self) -> Any | None:
+        """Build the configured Cindy native catalog."""
+
+        return self.native_catalog_for(self.backend)
+
+    engine_catalog = native_catalog
+
+    def _codex_references(self) -> tuple[CindyNativeReference, ...]:
+        """Backward-compatible Codex-only reference helper."""
+
+        catalog = self._reference_catalog()
         if catalog.failures:
             raise AdapterScanError(catalog.failures[0].message)
         return catalog.for_backend("codex")
+
+    def _references(self) -> tuple[CindyNativeReference, ...]:
+        catalog = self._reference_catalog()
+        if catalog.failures:
+            raise AdapterScanError(catalog.failures[0].message)
+        return catalog.for_backend(self.backend)
+
+    def _reference_catalog(self) -> Any:
+        if self._reference_catalog_cache is None:
+            self._reference_catalog_cache = build_cindy_reference_catalog(
+                self.database,
+                profile_root=self.cindy_root,
+            )
+        return self._reference_catalog_cache
 
     def scan(self) -> list[Finding]:
         self._replace_live_thread_ids(set())
         if not self.available:
             return []
-        references = self._codex_references()
+        references = self._references()
         live_references = [
             reference
             for reference in references
@@ -322,5 +478,34 @@ def _cindy_reference_evidence(
         ),
         "message_row_fingerprint": reference.message_row_fingerprint,
         "message_content_sha256": reference.message_content_sha256,
+        "exact": exact,
+    }
+
+
+def _cindy_session_evidence(
+    reference: CindyNativeReference,
+) -> dict[str, object]:
+    """Freeze body-free evidence for one terminal Cindy task row."""
+
+    status = _normalized_string(reference.session_status)
+    terminal = status == "deleted"
+    exact = bool(
+        terminal
+        and reference.session_schema_fingerprint
+        and reference.session_row_fingerprint
+    )
+    return {
+        "schema_version": 1,
+        "platform": "cindy",
+        "database": str(reference.database.expanduser().absolute()),
+        "operation": "delete_terminal_session",
+        "table": "sessions",
+        "locator": {"cindy_session_id": reference.cindy_session_id},
+        "expected": {
+            "session_status": status,
+            "agent_kind": reference.agent_kind,
+        },
+        "session_schema_fingerprint": reference.session_schema_fingerprint,
+        "session_row_fingerprint": reference.session_row_fingerprint,
         "exact": exact,
     }

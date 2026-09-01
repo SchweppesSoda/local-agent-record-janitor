@@ -51,6 +51,7 @@ from .discovery import (
 )
 from .models import Finding
 from .path_identity import canonical_existing_path_key
+from .record_identity import RecordClassification
 from .rendering import safe_single_line
 from .execution import ExecutionError
 from .relation_cleanup import RelationCleanupError
@@ -83,6 +84,7 @@ _ACTION_LABELS = {
     "remove_broken_relation": "清除无效的对话关联记录",
     "repair_legacy_index": "修复旧版聚合索引",
     "remove_frontend_reference": "清除前端残留引用",
+    "delete_frontend_session": "永久删除 Cindy 已软删除任务行",
     "remove_desktop_state": "清除 Codex Desktop 宿主残留状态",
     "keep": "保留，不做更改",
 }
@@ -496,6 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_common_arguments(records)
+    _add_operation_scope_arguments(records)
 
     delete = subparsers.add_parser(
         "delete",
@@ -507,7 +510,18 @@ def build_parser() -> argparse.ArgumentParser:
             "仅 --platform claude 时删除精确批准的 Claude 会话文件清单。"
         ),
     )
+    # ``delete`` keeps the historical interactive action-selector surface,
+    # while the optional verb enables the operation-oriented API.  Keeping
+    # the verb optional is intentional: existing integrations using
+    # ``delete --action-id ...`` continue to parse unchanged.
+    delete.add_argument(
+        "delete_action",
+        nargs="?",
+        choices=("plan", "apply", "run"),
+        help="operation API：生成计划、应用计划或直接运行一次删除操作",
+    )
     _add_common_arguments(delete)
+    _add_operation_scope_arguments(delete)
     delete.add_argument(
         "--yes",
         action="store_true",
@@ -553,6 +567,140 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="app-server 请求超时秒数（默认：30）",
     )
+    delete.add_argument(
+        "--out",
+        type=Path,
+        metavar="PLAN.json",
+        help="delete plan 的可选计划文件路径；省略时使用用户状态目录",
+    )
+    delete.add_argument(
+        "--operation-id",
+        metavar="OPERATION_ID",
+        help="delete apply 使用的稳定 operation ID",
+    )
+    delete.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN.json",
+        help=(
+            "delete apply 使用的显式计划文件；仅当 delete plan 使用 --out "
+            "写出计划时需要传入"
+        ),
+    )
+    delete.add_argument(
+        "--authorized-plan-sha256",
+        "--plan-sha256",
+        dest="authorized_plan_sha256",
+        metavar="SHA256",
+        help="内部回传计划哈希；通常不需要用户手工填写",
+    )
+
+    gui = subparsers.add_parser(
+        "gui",
+        help="在简单图形界面中逐项勾选并永久删除 Codex 对话",
+        description=(
+            "只读列出原生 Codex、Cindy 与 AionUI 关联的对话元数据，"
+            "允许用户逐项勾选可删除目标，并在核对完整级联范围、关闭客户端"
+            "和输入专用确认句后执行永久删除。"
+        ),
+    )
+    gui.set_defaults(
+        platform=["all"],
+        thread_id=[],
+        json=False,
+        limit=0,
+        appdata=None,
+        codex_home=None,
+        codex_bin=None,
+        aionui_db=None,
+        aionui_codex_home=None,
+        cindy_root=None,
+        cindy_db=None,
+        cindy_codex_home=None,
+    )
+    gui.add_argument(
+        "--codex-home",
+        type=Path,
+        metavar="PATH",
+        help="显式读取一个原生 Codex 数据目录（默认使用 CODEX_HOME 或 ~/.codex）",
+    )
+    gui.add_argument(
+        "--codex-bin",
+        type=_existing_codex_binary,
+        metavar="PATH",
+        help="显式指定与目标数据目录匹配的 Codex 可执行文件",
+    )
+    gui.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=30.0,
+        metavar="SECONDS",
+        help="app-server 请求超时秒数（默认：30）",
+    )
+    gui.add_argument("--appdata", type=Path, help=argparse.SUPPRESS)
+    gui.add_argument("--aionui-db", type=Path, help=argparse.SUPPRESS)
+    gui.add_argument("--aionui-codex-home", type=Path, help=argparse.SUPPRESS)
+    gui.add_argument("--cindy-root", type=Path, help=argparse.SUPPRESS)
+    gui.add_argument("--cindy-db", type=Path, help=argparse.SUPPRESS)
+    gui.add_argument("--cindy-codex-home", type=Path, help=argparse.SUPPRESS)
+
+    operation = subparsers.add_parser(
+        "operation",
+        help="查询或验证一次删除 operation",
+        description=(
+            "只读查询持久化 operation 状态；verify 绝不重发删除或修复请求。"
+        ),
+    )
+    operation_subparsers = operation.add_subparsers(
+        dest="operation_command",
+        required=True,
+        title="Operation 命令",
+    )
+    operation_status = operation_subparsers.add_parser(
+        "status",
+        help="只读返回 operation 的持久化状态",
+    )
+    operation_status.add_argument("--operation-id", required=True)
+    operation_status.add_argument("--codex-home", type=Path, metavar="PATH")
+    operation_status.add_argument(
+        "--operation-home",
+        type=Path,
+        metavar="PATH",
+        help="Pi/Claude operation 所在的 Agent/config 根目录",
+    )
+    operation_status.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN.json",
+        help="显式传入 delete plan --out 生成的顶层 operation 计划",
+    )
+    operation_status.add_argument("--json", action="store_true")
+
+    operation_verify = operation_subparsers.add_parser(
+        "verify",
+        help="只读验证 operation 目标，不重发 mutation",
+    )
+    operation_verify.add_argument("--operation-id", required=True)
+    operation_verify.add_argument("--codex-home", type=Path, metavar="PATH")
+    operation_verify.add_argument(
+        "--operation-home",
+        type=Path,
+        metavar="PATH",
+        help="Pi/Claude operation 所在的 Agent/config 根目录",
+    )
+    operation_verify.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN.json",
+        help="显式传入 delete plan --out 生成的顶层 operation 计划",
+    )
+    operation_verify.add_argument(
+        "--verify-timeout",
+        type=_nonnegative_int,
+        default=180,
+        metavar="SECONDS",
+    )
+    operation_verify.add_argument("--json", action="store_true")
 
     clean = subparsers.add_parser(
         "clean",
@@ -747,6 +895,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Pi/Claude operation 所在的 Agent/config 根目录",
     )
+    agent_status.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN.json",
+        help="显式传入顶层 operation 计划；child plan 仅能由 operation 查询",
+    )
 
     agent_verify = agent_subparsers.add_parser(
         "verify",
@@ -760,6 +914,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         metavar="PATH",
         help="Pi/Claude operation 所在的 Agent/config 根目录",
+    )
+    agent_verify.add_argument(
+        "--plan",
+        type=Path,
+        metavar="PLAN.json",
+        help="显式传入顶层 operation 计划；child plan 仅能由 operation 查询",
     )
     agent_verify.add_argument(
         "--verify-timeout",
@@ -859,6 +1019,58 @@ def _add_common_arguments(
         )
 
 
+def _add_operation_scope_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    client_required: bool = False,
+    scope_required: bool = False,
+) -> None:
+    """Add stable client/project/record selectors used by operations.
+
+    Legacy commands continue to expose ``--platform`` and ``--thread-id``.
+    These selectors are additive so existing scripts keep parsing while new
+    callers can describe one operation in terms of one client and projects.
+    Execution remains delegated to the cleanup core.
+    """
+
+    parser.add_argument(
+        "--client",
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude"),
+        required=client_required,
+        help=(
+            "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
+            "共享原生存储"
+        ),
+    )
+    scope = parser.add_mutually_exclusive_group(required=scope_required)
+    scope.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        metavar="SELECTOR",
+        help="按项目路径、项目 ID 或唯一项目名选择；可重复",
+    )
+    scope.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="选择所选客户端下的全部项目（不跨客户端）",
+    )
+    scope.add_argument(
+        "--record-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="按稳定原生记录 ID 选择；可重复",
+    )
+    parser.add_argument(
+        "--engine",
+        action="append",
+        default=[],
+        metavar="ENGINE",
+        help="限制引擎（如 codex、claude、pi）；可重复",
+    )
+
+
 def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
     return _create_default_adapters(args)
 
@@ -884,6 +1096,483 @@ def _configure_standard_stream_utf8(stream: TextIO) -> None:
         return
 
 
+_CLIENT_PLATFORM_MAP = {
+    "native": "native",
+    "codex-native": "native",
+    "cindy": "cindy",
+    "aionui": "aionui",
+    "pi": "pi",
+    "claude": "claude",
+}
+_OPERATION_BODY_KEYS = frozenset(
+    {
+        "body",
+        "chat_body",
+        "message_body",
+        "messages",
+        "transcript",
+        "prompt",
+        "response",
+        "content",
+    }
+)
+
+
+def _build_operation_coordinator(
+    *,
+    cleanup_service: CleanupService,
+) -> Any:
+    """Construct the one core coordinator used by operation commands."""
+
+    from .operation_coordinator import OperationCoordinator
+
+    return OperationCoordinator(
+        service=cleanup_service,
+    )
+
+
+def _normalize_client_name(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    try:
+        return _CLIENT_PLATFORM_MAP[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            "--client 必须指定一个受支持的客户端："
+            "native、codex-native、cindy、aionui、pi 或 claude"
+        ) from exc
+
+
+def _normalize_client_selector(args: argparse.Namespace) -> str:
+    """Normalize the new client selector while retaining legacy platform args."""
+
+    client = _normalize_client_name(getattr(args, "client", None))
+    raw_platforms = tuple(
+        str(value).strip().lower()
+        for value in (getattr(args, "platform", None) or ())
+        if str(value).strip()
+    )
+    if raw_platforms and "all" not in raw_platforms:
+        selected = selected_platforms(raw_platforms)
+        if client not in selected:
+            raise ValueError(
+                f"--client {args.client} 与 --platform {','.join(raw_platforms)} 冲突"
+            )
+    args.platform = [client]
+    if hasattr(args, "record_id") and getattr(args, "record_id", None):
+        old_thread_ids = tuple(getattr(args, "thread_id", ()) or ())
+        new_record_ids = tuple(str(value) for value in args.record_id)
+        if old_thread_ids and old_thread_ids != new_record_ids:
+            raise ValueError("--record-id 不能与不同值的 --thread-id 同时使用")
+        args.thread_id = list(new_record_ids)
+    args._operation_client = client
+    args._operation_records = True
+    return client
+
+
+def _operation_scope(args: argparse.Namespace, *, require_selection: bool) -> dict[str, Any]:
+    client_value = getattr(args, "client", None)
+    if not client_value and require_selection:
+        raise ValueError("operation 必须明确指定一个 --client")
+    client = _normalize_client_name(client_value) if client_value else None
+    projects = tuple(
+        str(value).strip()
+        for value in (getattr(args, "project", None) or ())
+        if str(value).strip()
+    )
+    record_ids = tuple(
+        str(value).strip()
+        for value in (getattr(args, "record_id", None) or ())
+        if str(value).strip()
+    )
+    all_projects = bool(getattr(args, "all_projects", False))
+    selected_modes = sum(bool(value) for value in (projects, record_ids, all_projects))
+    if require_selection and selected_modes != 1:
+        raise ValueError(
+            "delete plan/run 必须且只能指定一种范围："
+            "--project、--all-projects 或 --record-id"
+        )
+    if not require_selection and selected_modes > 1:
+        raise ValueError(
+            "项目、全部项目和记录 ID 不能同时作为 operation 范围"
+        )
+    engines = tuple(
+        str(value).strip().lower()
+        for value in (getattr(args, "engine", None) or ())
+        if str(value).strip()
+    )
+    return {
+        "client": client,
+        "projects": projects,
+        "all_projects": all_projects,
+        "record_ids": record_ids,
+        "engines": engines,
+    }
+
+
+def _metadata_only(value: Any, *, key: str | None = None) -> Any:
+    """Convert backend results to body-free JSON-safe metadata."""
+
+    if key is not None and key.lower() in _OPERATION_BODY_KEYS:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(name): cleaned
+            for name, raw in value.items()
+            if (cleaned := _metadata_only(raw, key=str(name))) is not None
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [
+            cleaned
+            for raw in value
+            if (cleaned := _metadata_only(raw)) is not None
+        ]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _metadata_only(to_dict())
+    audit_payload = getattr(value, "audit_payload", None)
+    if callable(audit_payload):
+        return _metadata_only(audit_payload())
+    return safe_single_line(value, max_width=240)
+
+
+def _operation_payload(
+    result: Any,
+    *,
+    command: str,
+    subcommand: str,
+    scope: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    exit_code: int | None = None
+    payload_source = result
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        exit_code, payload_source = int(result[0]), result[1]
+    payload = _metadata_only(payload_source)
+    if not isinstance(payload, Mapping):
+        payload = {"result": payload}
+    output = dict(payload)
+    output.setdefault("schema_version", "larj.operation-result.v1")
+    output.setdefault("document_type", "operation_result")
+    output.setdefault("command", command)
+    output.setdefault("subcommand", subcommand)
+    if scope:
+        output.setdefault("scope", dict(scope))
+    if exit_code is not None:
+        output.setdefault("exit_code", exit_code)
+    output.setdefault("goal_satisfied", output.get("goal_status") == "complete")
+    return output
+
+
+def _operation_error_payload(
+    *,
+    command: str,
+    subcommand: str,
+    message: str,
+    scope: Mapping[str, Any] | None = None,
+    blocker_code: str = "operation_api_unavailable",
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "larj.operation-result.v1",
+        "document_type": "operation_result",
+        "command": command,
+        "subcommand": subcommand,
+        "phase": "failed",
+        "operation_id": "unaccepted",
+        "goal_status": "blocked",
+        "goal_satisfied": False,
+        "modified": False,
+        "mutation_started": False,
+        "scope": dict(scope or {}),
+        "blockers": [
+            {
+                "blocker_code": blocker_code,
+                "scope": "operation",
+                "severity": "error",
+                "retryable": False,
+                "remediation": "使用当前版本支持的 CleanupService operation 接口；未执行任何修改。",
+                "message": safe_single_line(message, max_width=240),
+            }
+        ],
+        "counts": {},
+    }
+    return payload
+
+
+def _write_operation_human(
+    payload: Mapping[str, Any],
+    *,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> None:
+    status = str(payload.get("goal_status") or payload.get("status") or "unknown")
+    operation_id = str(payload.get("operation_id") or "-")
+    stdout.write(f"Operation {operation_id}：{status}\n")
+    scope = payload.get("scope")
+    if isinstance(scope, Mapping):
+        client = scope.get("client") or "-"
+        projects = scope.get("projects") or ("全部项目" if scope.get("all_projects") else "-")
+        engines = scope.get("engines") or ("全部引擎",)
+        stdout.write(
+            f"  客户端：{_display_value(client)}；"
+            f"项目：{_display_value(', '.join(map(str, projects)))}；"
+            f"引擎：{_display_value(', '.join(map(str, engines)))}\n"
+        )
+    for key in ("plan_sha256", "plan_path"):
+        if payload.get(key):
+            stdout.write(f"  {key}：{_display_value(payload[key], max_width=240)}\n")
+    groups = payload.get("batches") or payload.get("child_batches") or payload.get("progress")
+    if isinstance(groups, Mapping):
+        groups = list(groups.values())
+    if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes)):
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            project = group.get("project") or group.get("project_id") or "-"
+            engine = group.get("engine") or group.get("platform") or "-"
+            location = group.get("location") or group.get("storage") or group.get("path") or "-"
+            group_status = group.get("status") or group.get("goal_status") or "unknown"
+            counts = group.get("counts")
+            suffix = f"；计数={counts}" if counts else ""
+            stdout.write(
+                f"  [{_display_value(group_status)}] 项目={_display_value(project)} "
+                f"引擎={_display_value(engine)} 位置={_display_value(location, max_width=180)}"
+                f"{suffix}\n"
+            )
+    blockers = payload.get("blockers")
+    if isinstance(blockers, Sequence) and not isinstance(blockers, (str, bytes)):
+        for blocker in blockers:
+            if isinstance(blocker, Mapping):
+                code = blocker.get("blocker_code") or "unknown"
+                message = blocker.get("message") or blocker.get("remediation") or ""
+                stderr.write(f"  阻塞：{_display_value(code)} {_human_message(message)}\n")
+            else:
+                stderr.write(f"  阻塞：{_human_message(blocker)}\n")
+
+
+def _emit_operation_payload(
+    payload: Mapping[str, Any],
+    *,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if json_output:
+        _write_json(dict(payload), stdout)
+    else:
+        _write_operation_human(payload, stdout=stdout, stderr=stderr)
+    goal = str(payload.get("goal_status") or payload.get("status") or "unknown")
+    if goal == "complete" or (goal == "ready" and not payload.get("blockers")):
+        return EXIT_OK
+    if goal in {"blocked", "completed_with_residuals"}:
+        return EXIT_GOAL_NOT_SATISFIED
+    return EXIT_ERROR
+
+
+def _run_operation_backend(
+    verb: str,
+    args: argparse.Namespace,
+    *,
+    supplied_adapters: Iterable[FrontendAdapter] | None,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    stdout: TextIO,
+    stderr: TextIO,
+    coordinator: Any | None,
+    scope: Mapping[str, Any] | None,
+) -> int:
+    """Dispatch exactly one verb to the core OperationCoordinator.
+
+    The CLI owns argument parsing and body-free rendering only.  The
+    coordinator owns inventory, immutable plans, child batches, journal
+    recovery, mutations, and terminal verification.  There is intentionally
+    no legacy-agent fallback when the coordinator is unavailable.
+    """
+
+    command = "delete" if verb in {"plan", "apply", "run"} else "operation"
+    if coordinator is None:
+        payload = _operation_error_payload(
+            command=command,
+            subcommand=verb,
+            message="当前核心未提供 OperationCoordinator；未执行任何修改。",
+            scope=scope,
+            blocker_code="operation_api_unavailable",
+        )
+        return _emit_operation_payload(
+            payload,
+            json_output=bool(getattr(args, "json", False)),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    try:
+        if verb == "plan":
+            result = coordinator.plan_operation(
+                client=str((scope or {}).get("client") or ""),
+                projects=tuple((scope or {}).get("projects", ())),
+                all_projects=bool((scope or {}).get("all_projects", False)),
+                record_ids=tuple((scope or {}).get("record_ids", ())),
+                engines=tuple((scope or {}).get("engines", ())),
+                plan_path=getattr(args, "out", None),
+                operation_home=getattr(args, "operation_home", None),
+                codex_home=getattr(args, "codex_home", None),
+                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+                adapters=supplied_adapters,
+                app_server_factory=app_server_factory,
+                binary_resolver=binary_resolver,
+            )
+        elif verb == "apply":
+            result = coordinator.apply_operation(
+                scope=scope,
+                operation_id=str(getattr(args, "operation_id", "")),
+                plan_path=getattr(args, "plan", None),
+                operation_home=getattr(args, "operation_home", None),
+                codex_home=getattr(args, "codex_home", None),
+                plan_sha256=(
+                    getattr(args, "authorized_plan_sha256", None)
+                    or getattr(args, "plan_fingerprint", None)
+                ),
+                clients_closed=bool(getattr(args, "clients_closed", False)),
+                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+                adapters=supplied_adapters,
+                app_server_factory=app_server_factory,
+                binary_resolver=binary_resolver,
+            )
+        elif verb == "run":
+            result = coordinator.run_operation(
+                client=str((scope or {}).get("client") or ""),
+                projects=tuple((scope or {}).get("projects", ())),
+                all_projects=bool((scope or {}).get("all_projects", False)),
+                record_ids=tuple((scope or {}).get("record_ids", ())),
+                engines=tuple((scope or {}).get("engines", ())),
+                plan_path=getattr(args, "out", None),
+                operation_home=getattr(args, "operation_home", None),
+                codex_home=getattr(args, "codex_home", None),
+                clients_closed=bool(getattr(args, "clients_closed", False)),
+                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
+                adapters=supplied_adapters,
+                app_server_factory=app_server_factory,
+                binary_resolver=binary_resolver,
+            )
+        elif verb == "status":
+            result = coordinator.status_operation(
+                operation_id=str(getattr(args, "operation_id", "")),
+                plan_path=getattr(args, "plan", None),
+                operation_home=getattr(args, "operation_home", None),
+                codex_home=getattr(args, "codex_home", None),
+            )
+        elif verb == "verify":
+            result = coordinator.verify_operation(
+                operation_id=str(getattr(args, "operation_id", "")),
+                plan_path=getattr(args, "plan", None),
+                operation_home=getattr(args, "operation_home", None),
+                codex_home=getattr(args, "codex_home", None),
+                adapters=supplied_adapters,
+                verify_timeout=int(getattr(args, "verify_timeout", 180) or 0),
+            )
+        else:
+            raise ValueError(f"不支持的 operation 子命令：{verb}")
+        payload = _operation_payload(
+            result,
+            command=command,
+            subcommand=verb,
+            scope=scope,
+        )
+        return _emit_operation_payload(
+            payload,
+            json_output=bool(getattr(args, "json", False)),
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except Exception as exc:
+        payload = _operation_error_payload(
+            command=command,
+            subcommand=verb,
+            message=str(exc) or repr(exc),
+            scope=scope,
+            blocker_code="operation_backend_failed",
+        )
+        return _emit_operation_payload(
+            payload,
+            json_output=bool(getattr(args, "json", False)),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+
+def _run_delete_operation(
+    args: argparse.Namespace,
+    *,
+    supplied_adapters: Iterable[FrontendAdapter] | None,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    stdout: TextIO,
+    stderr: TextIO,
+    coordinator: Any | None,
+) -> int:
+    verb = str(args.delete_action)
+    try:
+        if verb == "apply":
+            if not getattr(args, "operation_id", None):
+                raise ValueError("delete apply 必须指定 --operation-id")
+            scope = _operation_scope(args, require_selection=False)
+        else:
+            scope = _operation_scope(args, require_selection=True)
+        if getattr(args, "action_id", None) or getattr(args, "session_id", None) or getattr(args, "thread_id", None):
+            raise ValueError("delete plan/apply/run 使用 --record-id，不使用旧 action/session/thread selector")
+    except ValueError as exc:
+        payload = _operation_error_payload(
+            command="delete",
+            subcommand=verb,
+            message=str(exc),
+            blocker_code="invalid_operation_scope",
+        )
+        return _emit_operation_payload(
+            payload,
+            json_output=bool(getattr(args, "json", False)),
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    result = _run_operation_backend(
+        verb,
+        args,
+        supplied_adapters=supplied_adapters,
+        app_server_factory=app_server_factory,
+        binary_resolver=binary_resolver,
+        stdout=stdout,
+        stderr=stderr,
+        coordinator=coordinator,
+        scope=scope,
+    )
+    return result
+
+
+def _run_operation_query(
+    args: argparse.Namespace,
+    *,
+    supplied_adapters: Iterable[FrontendAdapter] | None,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    stdout: TextIO,
+    stderr: TextIO,
+    coordinator: Any | None,
+) -> int:
+    return _run_operation_backend(
+        str(args.operation_command),
+        args,
+        supplied_adapters=supplied_adapters,
+        app_server_factory=app_server_factory,
+        binary_resolver=binary_resolver,
+        stdout=stdout,
+        stderr=stderr,
+        coordinator=coordinator,
+        scope=None,
+    )
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -899,6 +1588,8 @@ def main(
     claude_delete_executor: Any | None = None,
     client_inspector: ClientInspector | None = None,
     cleanup_service: CleanupService | None = None,
+    operation_coordinator: Any | None = None,
+    gui_runner: Any | None = None,
 ) -> int:
     if stdout is None:
         _configure_standard_stream_utf8(sys.stdout)
@@ -973,10 +1664,82 @@ def main(
             cleanup_service=cleanup_service,
         )
 
+    if args.command == "gui":
+        try:
+            from .gui import run_gui
+
+            if adapters is not None:
+                supplied_gui_adapters = tuple(adapters)
+                adapter_builder = lambda: list(supplied_gui_adapters)
+            else:
+                adapter_builder = lambda: create_default_adapters(args)
+            runner = gui_runner or run_gui
+            return int(
+                runner(
+                    args,
+                    adapter_builder=adapter_builder,
+                    app_server_factory=app_server_factory,
+                    binary_resolver=binary_resolver,
+                )
+            )
+        except Exception as exc:
+            error_output.write(f"错误：无法启动图形界面：{exc}\n")
+            return EXIT_ERROR
+
     service = cleanup_service or CleanupService(
         scanner=scan_adapters,
         client_inspector=client_inspector,
     )
+
+    coordinator = operation_coordinator
+    if coordinator is None and (
+        args.command == "operation"
+        or (args.command == "delete" and getattr(args, "delete_action", None))
+    ):
+        try:
+            coordinator = _build_operation_coordinator(
+                cleanup_service=service,
+            )
+        except (ImportError, ModuleNotFoundError):
+            # A missing core coordinator is a capability blocker.  Do not
+            # invoke the legacy agent command or attempt a partial mutation.
+            coordinator = None
+
+    # The operation-oriented commands are dispatched before the legacy
+    # scan/clean/purge branches through the single core coordinator.
+    if args.command == "operation":
+        return _run_operation_query(
+            args,
+            supplied_adapters=adapters,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+            stdout=output,
+            stderr=error_output,
+            coordinator=coordinator,
+        )
+
+    if args.command == "delete" and getattr(args, "delete_action", None):
+        return _run_delete_operation(
+            args,
+            supplied_adapters=adapters,
+            app_server_factory=app_server_factory,
+            binary_resolver=binary_resolver,
+            stdout=output,
+            stderr=error_output,
+            coordinator=coordinator,
+        )
+
+    if args.command == "records" and getattr(args, "client", None):
+        try:
+            _normalize_client_selector(args)
+        except ValueError as exc:
+            return _emit_fatal_error(
+                "records",
+                exc,
+                json_output=args.json,
+                stdout=output,
+                stderr=error_output,
+            )
 
     unsupported_engine = _explicit_unsupported_scan_engine(args.platform)
     if args.command in {"scan", "clean", "purge"} and unsupported_engine:
@@ -1113,6 +1876,13 @@ def main(
         )
 
     if args.command == "records":
+        if getattr(args, "client", None):
+            return _run_client_records(
+                args,
+                active_adapters=active_adapters,
+                stdout=output,
+                stderr=error_output,
+            )
         return _run_records(
             args,
             active_adapters=active_adapters,
@@ -1540,11 +2310,14 @@ def _next_purge_action_batch(
             ]
         elif mutation_kind in {
             "remove_frontend_reference",
+            "delete_frontend_session",
             "remove_broken_relation",
         }:
             attribute = (
                 "frontend_database_paths"
                 if mutation_kind == "remove_frontend_reference"
+                else "frontend_session_database_paths"
+                if mutation_kind == "delete_frontend_session"
                 else "relation_database_paths"
             )
             by_database: dict[str, list[Any]] = {}
@@ -1573,6 +2346,732 @@ def _purge_stream_document(stream: TextIO) -> object | None:
         return rendered
 
 
+_ANOMALY_CLASSIFICATIONS = {
+    "index_missing_rollout": "stale_index",
+    "rollout_missing_index": "orphan_native",
+    "duplicate_rollout": "orphan_native",
+    "index_rollout_path_mismatch": "stale_index",
+    "index_rollout_metadata_mismatch": "stale_index",
+    "orphaned_subagent_thread": "orphan_native",
+    "residual_spawn_edge": "broken_relation",
+    "legacy_index_only": "stale_index",
+    "frontend_deleted_reference": "orphan_frontend",
+    "desktop_state_orphan": "orphan_frontend",
+    "broken_relation": "broken_relation",
+    "stale_index": "stale_index",
+    "partial_remote": "partial_remote",
+    "corrupt_unreadable": "corrupt_unreadable",
+}
+
+
+def _record_classification(record: Any) -> str:
+    explicit = _record_field(
+        record,
+        "classification",
+        "record_classification",
+        "anomaly_classification",
+        default=None,
+    )
+    if explicit:
+        return str(explicit)
+    details = _record_field(record, "details", default={})
+    if isinstance(details, Mapping):
+        for key in ("classification", "finding_type", "problem_type", "status"):
+            value = details.get(key)
+            if value:
+                mapped = _ANOMALY_CLASSIFICATIONS.get(str(value), str(value))
+                if mapped in {
+                    "healthy",
+                    "orphan_native",
+                    "orphan_frontend",
+                    "orphan_project",
+                    "broken_relation",
+                    "stale_index",
+                    "partial_remote",
+                    "corrupt_unreadable",
+                    "unknown_operation",
+                }:
+                    return mapped
+    blockers = tuple(_record_field(record, "blockers", default=()) or ())
+    blocker_text = " ".join(str(value).lower() for value in blockers)
+    if "relation" in blocker_text or "spawn edge" in blocker_text:
+        return "broken_relation"
+    if "index" in blocker_text and "rollout" not in blocker_text:
+        return "stale_index"
+    indexed = bool(_record_field(record, "indexed", "codex_indexed", default=False))
+    artifact_present = bool(
+        _record_field(record, "artifact_present", "has_codex_artifacts", default=False)
+    )
+    rollouts = tuple(_record_field(record, "rollouts", "rollout_records", default=()) or ())
+    frontend = tuple(
+        _record_field(record, "frontend_sessions", "frontend_references", default=())
+        or ()
+    )
+    has_native = indexed or artifact_present or bool(rollouts)
+    has_frontend = bool(frontend)
+    if has_native and has_frontend:
+        return "healthy"
+    if has_native:
+        return "orphan_native"
+    if has_frontend:
+        return "orphan_frontend"
+    if bool(_record_field(record, "legacy_indexed", default=False)):
+        return "stale_index"
+    return "healthy"
+
+
+def _record_metadata_payload(record: Any) -> dict[str, Any]:
+    payload = _metadata_only(_object_dict(record))
+    if not isinstance(payload, dict):
+        payload = {"record": payload}
+    payload["classification"] = _record_classification(record)
+    return payload
+
+
+def _backend_record_metadata(
+    record: Any,
+    *,
+    default_classification: str,
+) -> dict[str, Any]:
+    payload = _metadata_only(_object_dict(record))
+    if not isinstance(payload, dict):
+        payload = {"record": payload}
+    payload.setdefault("classification", _record_classification(record))
+    if not payload.get("classification"):
+        payload["classification"] = default_classification
+    return payload
+
+
+def _filter_operation_records(
+    records: Iterable[Any],
+    args: argparse.Namespace,
+) -> tuple[Any, ...]:
+    """Filter inventory metadata without another scan or catalog rebuild."""
+
+    projects = tuple(
+        str(value).strip().casefold()
+        for value in (getattr(args, "project", None) or ())
+        if str(value).strip()
+    )
+    record_ids = tuple(
+        str(value).strip().casefold()
+        for value in (getattr(args, "record_id", None) or ())
+        if str(value).strip()
+    )
+    engines = tuple(
+        str(value).strip().casefold()
+        for value in (getattr(args, "engine", None) or ())
+        if str(value).strip()
+    )
+    if not projects and not record_ids and not engines:
+        return tuple(records)
+
+    def text_values(record: Any, *names: str) -> set[str]:
+        values: set[str] = set()
+        for name in names:
+            value = _record_field(record, name, default=None)
+            if value is not None:
+                values.add(str(value).strip().casefold())
+        return {value for value in values if value}
+
+    result: list[Any] = []
+    for record in records:
+        summary = _record_field(record, "summary", default=None)
+        ids = text_values(
+            record,
+            "thread_id",
+            "session_id",
+            "record_id",
+            "native_session_id",
+        )
+        ids.update(text_values(summary, "thread_id", "session_id", "record_id"))
+        if record_ids and not any(
+            candidate == wanted or candidate.startswith(wanted)
+            for candidate in ids
+            for wanted in record_ids
+        ):
+            continue
+
+        if projects:
+            project_values = text_values(
+                record,
+                "project",
+                "project_id",
+                "project_label",
+                "cwd",
+                "working_dir",
+                "working_directory",
+            )
+            project_values.update(
+                text_values(
+                    summary,
+                    "project",
+                    "project_id",
+                    "project_label",
+                    "cwd",
+                    "working_dir",
+                    "working_directory",
+                )
+            )
+            if not any(
+                candidate == wanted
+                or candidate.startswith(wanted)
+                or wanted in candidate
+                for candidate in project_values
+                for wanted in projects
+            ):
+                continue
+
+        if engines:
+            engine_values = text_values(
+                record,
+                "engine",
+                "backend",
+                "agent_kind",
+                "platform",
+            )
+            engine_values.update(
+                text_values(summary, "engine", "backend", "agent_kind", "originator")
+            )
+            if not any(
+                candidate == wanted or candidate.startswith(wanted)
+                for candidate in engine_values
+                for wanted in engines
+            ):
+                continue
+        result.append(record)
+    return tuple(result)
+
+
+_CLIENT_RECORD_CLASSIFICATIONS = tuple(
+    value.value for value in RecordClassification
+)
+
+
+def _run_client_records(
+    args: argparse.Namespace,
+    *,
+    active_adapters: Sequence[FrontendAdapter],
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    """Render the shared client inventory contract for --client records."""
+
+    from .client_inventory import (
+        ClientInventoryError,
+        build_client_engine_contexts,
+        build_client_inventory,
+    )
+    from .record_identity import StoreKey
+
+    client = _normalize_client_name(getattr(args, "client", None))
+    engines = tuple(getattr(args, "engine", ()) or ())
+    try:
+        if client in {"pi", "claude"} and not active_adapters:
+            inventory, contexts = _build_native_client_contexts(
+                args,
+                client=client,
+                engines=engines,
+            )
+        elif client == "native" and active_adapters:
+            inventory, contexts = _build_native_client_contexts(
+                args,
+                client=client,
+                engines=engines,
+                adapters=active_adapters,
+            )
+        else:
+            inventory = build_client_inventory(
+                active_adapters,
+                client=client,
+                engines=engines,
+            )
+            contexts = build_client_engine_contexts(
+                active_adapters,
+                client=client,
+                engines=engines,
+                inventory=inventory,
+            )
+        record_ids = tuple(
+            getattr(args, "record_id", ()) or ()
+        ) or tuple(getattr(args, "thread_id", ()) or ())
+        has_scope = bool(
+            getattr(args, "project", ())
+            or getattr(args, "all_projects", False)
+            or record_ids
+        )
+        if has_scope:
+            selection = inventory.select(
+                project_selectors=tuple(getattr(args, "project", ()) or ()),
+                all_projects=bool(getattr(args, "all_projects", False)),
+                record_ids=record_ids,
+                engines=engines,
+            )
+            selected = tuple(selection.targets)
+        else:
+            selected = tuple(
+                target for target in inventory.targets
+                if not engines or target.engine in {
+                    str(value).strip().casefold() for value in engines
+                }
+            )
+    except ClientInventoryError as exc:
+        message = str(exc) or repr(exc)
+        code = (
+            "ambiguous_project"
+            if "ambiguous" in message.casefold()
+            else "client_inventory_failed"
+        )
+        payload = {
+            "schema_version": "larj.client-records.v1",
+            "document_type": "client_records",
+            "command": "records",
+            "client": client,
+            "goal_status": "blocked",
+            "goal_satisfied": False,
+            "groups": [],
+            "targets": [],
+            "records": [],
+            "classifications": {
+                key: 0 for key in _CLIENT_RECORD_CLASSIFICATIONS
+            },
+            "blockers": [
+                {
+                    "blocker_code": code,
+                    "scope": "selection" if code == "ambiguous_project" else "inventory",
+                    "severity": "error",
+                    "retryable": False,
+                    "message": message,
+                }
+            ],
+        }
+        if args.json:
+            _write_json(payload, stdout)
+        else:
+            stderr.write(f"错误：{_human_message(message)}\n")
+        return EXIT_ERROR
+    except Exception as exc:
+        return _emit_fatal_error(
+            "records",
+            exc,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    selected_ids = {
+        value
+        for target in selected
+        for value in target.identifiers
+    }
+    selected_projects = {
+        target.project_key.stable_id
+        for target in selected
+        if target.project_key is not None
+    }
+    def target_store(target: Any, context: Any) -> dict[str, Any] | None:
+        if target.record_key is not None:
+            return target.record_key.store.to_dict()
+        references = set(target.frontend_reference_ids)
+        for session in context.frontend_sessions:
+            reference = f"{session.platform}:{session.platform_session_id}"
+            if reference in references:
+                return StoreKey(
+                    target.engine,
+                    session.database,
+                    kind="sqlite",
+                ).to_dict()
+        return None
+
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    group_locations: dict[tuple[str, str, str], set[str]] = {}
+    rendered_targets: list[dict[str, Any]] = []
+    total_classifications = {
+        key: 0 for key in _CLIENT_RECORD_CLASSIFICATIONS
+    }
+    for context in contexts:
+        for target in context.targets:
+            if has_scope:
+                target_ids = set(target.identifiers)
+                if not target_ids.intersection(selected_ids):
+                    if (
+                        target.project_key is None
+                        or target.project_key.stable_id not in selected_projects
+                    ):
+                        continue
+            project = target.project_key
+            store = target_store(target, context)
+            project_id = project.stable_id if project is not None else "<projectless>"
+            store_id = str((store or {}).get("value") or "<unknown-store>")
+            key = (project_id, target.engine, store_id)
+            group = groups.setdefault(
+                key,
+                {
+                    "project": project.to_dict() if project else None,
+                    "engine": target.engine,
+                    "store": store,
+                    "capability": context.capability.to_dict(),
+                    "classifications": {
+                        name: 0 for name in _CLIENT_RECORD_CLASSIFICATIONS
+                    },
+                    "targets": [],
+                    "native_record_count": len(context.native_records),
+                },
+            )
+            locations = group_locations.setdefault(key, set())
+            if target.record_key is not None:
+                locations.add(canonical_existing_path_key(
+                    Path(target.record_key.store.path)
+                ))
+            for session in context.frontend_sessions:
+                reference = f"{session.platform}:{session.platform_session_id}"
+                if reference in set(target.frontend_reference_ids):
+                    locations.add(canonical_existing_path_key(Path(session.codex_home)))
+                    locations.add(canonical_existing_path_key(Path(session.database)))
+            target_payload = _metadata_only(target.to_dict())
+            group["targets"].append(target_payload)
+            rendered_targets.append(target_payload)
+            classification = str(target.classification.value)
+            if classification not in group["classifications"]:
+                group["classifications"][classification] = 0
+            group["classifications"][classification] += 1
+            total_classifications.setdefault(classification, 0)
+            total_classifications[classification] += 1
+
+    def error_locations(error: Any) -> set[str]:
+        locations: set[str] = set()
+        for value in (
+            getattr(error, "codex_home", None),
+            getattr(error, "database", None),
+        ):
+            if value is None:
+                continue
+            try:
+                locations.add(canonical_existing_path_key(Path(value)))
+            except (OSError, TypeError, ValueError):
+                locations.add(str(value).casefold())
+        return locations
+
+    error_groups: dict[tuple[str, str, str], list[Any]] = {}
+    for group_key, locations in group_locations.items():
+        for error in inventory.errors:
+            if locations.intersection(error_locations(error)):
+                error_groups.setdefault(group_key, []).append(error)
+    for group_key, errors in error_groups.items():
+        groups[group_key]["errors"] = [
+            _metadata_only(error.to_dict()) for error in errors
+        ]
+        groups[group_key]["warning"] = "store_inventory_error"
+
+    selected_group_keys = set(groups)
+    relevant_errors: list[Any] = []
+    for error in inventory.errors:
+        locations = error_locations(error)
+        if not locations:
+            relevant_errors.append(error)
+            continue
+        if not has_scope or bool(getattr(args, "all_projects", False)):
+            relevant_errors.append(error)
+            continue
+        if any(locations.intersection(group_locations.get(key, set()))
+               for key in selected_group_keys):
+            relevant_errors.append(error)
+    relevant_errors = list(dict.fromkeys(relevant_errors))
+
+    payload = {
+        "schema_version": "larj.client-records.v1",
+        "document_type": "client_records",
+        "command": "records",
+        "client": client,
+        "engines": [context.engine for context in contexts],
+        "projects": [project.to_dict() for project in inventory.projects],
+        "groups": list(groups.values()),
+        "targets": rendered_targets,
+        "records": rendered_targets,
+        "classifications": total_classifications,
+        "capabilities": {
+            engine: capability.to_dict()
+            for engine, capability in sorted(inventory.capabilities.items())
+        },
+        "frontend_sessions": [
+            _metadata_only(session.to_dict())
+            for session in inventory.frontend_sessions
+        ],
+        "unmapped_frontend_sessions": [
+            _metadata_only(session.to_dict())
+            for session in inventory.unmapped_frontend_sessions
+        ],
+        "frontend_snapshots": [
+            _metadata_only(snapshot.to_dict())
+            for snapshot in inventory.frontend_snapshots
+        ],
+        "errors": [
+            _metadata_only(error.to_dict()) for error in inventory.errors
+        ],
+        "store_errors": [
+            _metadata_only(error.to_dict()) for error in relevant_errors
+        ],
+        "count": len(rendered_targets),
+        "total_count": len(rendered_targets),
+        "goal_status": "complete" if not relevant_errors else "blocked",
+        "goal_satisfied": not bool(relevant_errors),
+        "blockers": [
+            {
+                "blocker_code": "inventory_error",
+                "scope": "inventory",
+                "severity": "error",
+                "retryable": True,
+                "message": str(error.message),
+            }
+            for error in relevant_errors
+        ],
+    }
+    if args.json:
+        _write_json(payload, stdout)
+        return EXIT_OK if not relevant_errors else EXIT_ERROR
+    stdout.write(
+        f"客户端 {client}：{len(rendered_targets)} 个目标，"
+        f"{len(groups)} 个项目/引擎/存储分组\n"
+    )
+    visible = rendered_targets
+    if args.limit:
+        visible = rendered_targets[:args.limit]
+    for target in visible:
+        project = target.get("project_key") or {}
+        stdout.write(
+            f"  [{target.get('classification', 'unknown')}] "
+            f"引擎={target.get('engine')} "
+            f"项目={project.get('display_name') or project.get('value') or '-'} "
+            f"记录={target.get('record_id') or '-'}\n"
+        )
+    for blocker in payload["blockers"]:
+        stderr.write(
+            f"  阻塞：{blocker['blocker_code']} "
+            f"{_human_message(blocker['message'])}\n"
+        )
+    return EXIT_OK if not relevant_errors else EXIT_ERROR
+
+
+def _build_native_client_contexts(
+    args: argparse.Namespace,
+    *,
+    client: str,
+    engines: Sequence[str],
+    adapters: Sequence[Any] = (),
+) -> tuple[Any, tuple[Any, ...]]:
+    """Project the legacy Pi/Claude catalogs into the client target shape."""
+
+    from .client_inventory import (
+        ClientEngineContext,
+        ClientInventory,
+        ClientTarget,
+    )
+    from .inventory import FrontendSessionRecord
+    from .record_identity import (
+        ProjectKey,
+        RecordKey,
+        StoreKey,
+        classify_record_state,
+        capability_for,
+    )
+
+    engine = "codex" if client == "native" else client
+    if engine == "codex":
+        from .inventory import build_session_catalog
+
+        catalog = build_session_catalog(tuple(adapters))
+    else:
+        catalog = (
+            _build_pi_catalog(args)
+            if engine == "pi"
+            else _build_claude_catalog(args)
+        )
+    capability = capability_for("native", engine)
+    targets: list[ClientTarget] = []
+    projects: dict[str, ProjectKey] = {}
+    for record in tuple(
+        getattr(catalog, "records", getattr(catalog, "sessions", ())) or ()
+    ):
+        record_id = (
+            getattr(record, "thread_id", None)
+            if engine == "codex"
+            else getattr(record, "session_id", None)
+        )
+        if not isinstance(record_id, str) or not record_id.strip():
+            continue
+        if engine == "codex":
+            root = Path(getattr(record, "codex_home"))
+            path = None
+            kind = "codex_home"
+            native_present = bool(getattr(record, "artifact_present", False))
+            project_value = getattr(
+                getattr(record, "summary", None), "cwd", None
+            )
+        elif engine == "pi":
+            root = Path(getattr(record, "session_root"))
+            path = Path(getattr(record, "path"))
+            kind = "session_root"
+            native_present = path.is_file()
+            project_value = getattr(record, "cwd", None)
+        else:
+            root = Path(getattr(record, "config_dir"))
+            paths = tuple(getattr(record, "transcript_paths", ()) or ())
+            path = Path(paths[0]) if paths else None
+            kind = "config_dir"
+            native_present = bool(paths) or bool(getattr(record, "manifest", ()))
+            project_paths = tuple(getattr(record, "project_paths", ()) or ())
+            project_value = project_paths[0] if project_paths else None
+        project = None
+        if isinstance(project_value, (str, os.PathLike)) and str(project_value).strip():
+            project = ProjectKey.from_path(
+                client,
+                project_value,
+                display_name=Path(project_value).name,
+            )
+            projects.setdefault(project.stable_id, project)
+        raw_references = (
+            getattr(record, "frontend_sessions", ())
+            if engine == "codex"
+            else getattr(record, "frontend_references", ())
+        )
+        refs = tuple(
+            _native_reference_id(reference)
+            for reference in tuple(raw_references or ())
+        )
+        refs = tuple(value for value in refs if value)
+        classification = classify_record_state(
+            native_present=native_present,
+            frontend_present=bool(refs),
+            project_present=project is not None,
+        )
+        deletable = bool(getattr(record, "deletable", True))
+        native_action_id = getattr(record, "action_id", None)
+        action_ids = (
+            (str(native_action_id), "delete_native")
+            if engine == "codex" and native_action_id and deletable
+            else (str(native_action_id), "delete_pi_session")
+            if engine == "pi" and native_action_id and deletable
+            else (str(native_action_id), "delete_claude_session")
+            if engine == "claude" and native_action_id and deletable
+            else ()
+        )
+        target = ClientTarget(
+            client=client,
+            engine=engine,
+            record_key=RecordKey(
+                StoreKey(engine, root, kind=kind),
+                record_id,
+                kind="session",
+                path=path,
+            ),
+            project_key=project,
+            native_thread_id=record_id,
+            frontend_reference_ids=tuple(
+                (
+                    str(getattr(reference, "platform", ""))
+                    + ":"
+                    + str(getattr(reference, "platform_session_id", ""))
+                )
+                if engine == "codex"
+                else f"cindy:{value}"
+                for reference, value in (
+                    zip(tuple(raw_references or ()), refs)
+                    if engine == "codex"
+                    else ((None, value) for value in refs)
+                )
+                if value
+            ),
+            classification=classification,
+            capability=capability,
+            action_ids=tuple(
+                value for value in action_ids
+                if value and value != "None"
+            ),
+            blocker_codes=(),
+            blockers=(),
+        )
+        targets.append(target)
+    catalog_records = tuple(
+        getattr(catalog, "records", getattr(catalog, "sessions", ())) or ()
+    )
+    catalog_frontend_sessions = (
+        tuple(
+            session
+            for record in catalog_records
+            for session in (
+                getattr(record, "frontend_sessions", ())
+                if engine == "codex"
+                else getattr(
+                    record,
+                    "frontend_references",
+                    getattr(record, "cindy_references", ()),
+                )
+                or ()
+            )
+            if isinstance(session, FrontendSessionRecord)
+        )
+        if engine == "codex"
+        else ()
+    )
+    if engine == "codex":
+        frontend_reference_ids = tuple(
+            dict.fromkeys(
+                f"{session.platform}:{session.platform_session_id}"
+                for session in catalog_frontend_sessions
+            )
+        )
+    else:
+        frontend_reference_ids = tuple(
+            dict.fromkeys(f"cindy:{value}" for value in refs)
+        )
+    # The native catalog is itself the authoritative metadata snapshot for
+    # the standalone/native compatibility clients. Keep those records and
+    # exact frontend rows in the shared contract instead of exposing only the
+    # projected targets. Pi/Claude catalogs carry Cindy reference objects
+    # rather than FrontendSessionRecord instances, so their legacy projection
+    # remains target-only until a frontend adapter is explicitly selected.
+    inventory = ClientInventory(
+        client=client,
+        engines=(engine,),
+        projects=tuple(projects[key] for key in sorted(projects)),
+        records=(catalog_records if engine == "codex" else ()),
+        frontend_sessions=catalog_frontend_sessions,
+        unmapped_frontend_sessions=(),
+        targets=tuple(targets),
+        capabilities={engine: capability},
+        errors=(tuple(getattr(catalog, "errors", ()) or ())
+                if engine == "codex" else ()),
+        frontend_snapshots=(),
+    )
+    context = ClientEngineContext(
+        inventory=inventory,
+        engine=engine,
+        targets=tuple(targets),
+        frontend_sessions=catalog_frontend_sessions,
+        native_catalog=catalog,
+        capability=capability,
+    )
+    return inventory, (context,)
+
+
+def _native_reference_id(reference: Any) -> str | None:
+    for name in (
+        "cindy_session_id",
+        "frontend_session_id",
+        "platform_session_id",
+        "session_id",
+        "id",
+    ):
+        value = (
+            reference.get(name)
+            if isinstance(reference, Mapping)
+            else getattr(reference, name, None)
+        )
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _run_records(
     args: argparse.Namespace,
     *,
@@ -1590,7 +3089,11 @@ def _run_records(
         catalog: Any | None = None
         conversations: tuple[Any, ...] = ()
         unmapped_sessions: tuple[Any, ...] = ()
-        if (_is_exact_pi_platform(args.platform) or _is_exact_claude_platform(args.platform)) and args.thread_id:
+        if (
+            (_is_exact_pi_platform(args.platform) or _is_exact_claude_platform(args.platform))
+            and args.thread_id
+            and not getattr(args, "_operation_records", False)
+        ):
             engine_label = "Pi" if _is_exact_pi_platform(args.platform) else "Claude"
             raise ActionSelectionError(
                 f"{engine_label} records 不支持 --thread-id；"
@@ -1610,6 +3113,7 @@ def _run_records(
                 platform_conversations,
                 tuple(args.thread_id),
             )
+            conversations = _filter_operation_records(conversations, args)
             unmapped_sessions = _platform_visible_frontend_sessions(
                 tuple(catalog.unmapped_frontend_sessions),
                 args.platform,
@@ -1643,16 +3147,21 @@ def _run_records(
         }
         payload["command"] = "records"
         payload["records"] = [
-            _object_dict(conversation) for conversation in conversations
+            _record_metadata_payload(conversation)
+            for conversation in conversations
         ]
         payload["unmapped_frontend_sessions"] = [
-            _object_dict(session) for session in unmapped_sessions
+            {
+                **_metadata_only(_object_dict(session)),
+                "classification": "orphan_frontend",
+            }
+            for session in unmapped_sessions
         ]
         payload["count"] = len(conversations)
         if pi_catalog is not None:
-            payload.update(_pi_catalog_payload(pi_catalog))
+            payload.update(_pi_catalog_payload(pi_catalog, args=args))
         if claude_catalog is not None:
-            payload.update(_claude_catalog_payload(claude_catalog))
+            payload.update(_claude_catalog_payload(claude_catalog, args=args))
         payload["total_count"] = len(conversations) + int(
             payload.get("pi_count", 0)
         ) + int(payload.get("claude_count", 0))
@@ -1688,13 +3197,22 @@ def _build_pi_catalog(args: argparse.Namespace, builder: Any | None = None) -> A
     return build_pi_catalog(args, builder)
 
 
-def _pi_catalog_payload(catalog: Any) -> dict[str, Any]:
+def _pi_catalog_payload(
+    catalog: Any,
+    *,
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any]:
     raw = _object_dict(catalog)
     sessions = raw.get("records", raw.get("sessions", ()))
+    if args is not None:
+        sessions = _filter_operation_records(sessions, args)
     failures = raw.get("errors", raw.get("failures", ()))
     frontend_only = raw.get("frontend_only_references", ())
     return {
-        "pi_sessions": list(sessions),
+        "pi_sessions": [
+            _backend_record_metadata(item, default_classification="healthy")
+            for item in sessions
+        ],
         "pi_failures": list(failures),
         "pi_frontend_only_references": list(frontend_only),
         "pi_count": len(sessions),
@@ -1709,12 +3227,21 @@ def _build_claude_catalog(args: argparse.Namespace, builder: Any | None = None) 
     return build_claude_catalog(args, builder)
 
 
-def _claude_catalog_payload(catalog: Any) -> dict[str, Any]:
+def _claude_catalog_payload(
+    catalog: Any,
+    *,
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any]:
     raw = _object_dict(catalog)
     sessions = raw.get("records", raw.get("sessions", ()))
+    if args is not None:
+        sessions = _filter_operation_records(sessions, args)
     failures = raw.get("errors", raw.get("failures", ()))
     return {
-        "claude_sessions": list(sessions),
+        "claude_sessions": [
+            _backend_record_metadata(item, default_classification="healthy")
+            for item in sessions
+        ],
         "claude_failures": list(failures),
         "claude_count": len(sessions),
     }
@@ -2745,6 +4272,83 @@ def _run_manual_delete(
         )
         return build_session_catalog(latest_adapters)
 
+    # The preview scan is not the apply preflight.  Rebuild one complete
+    # catalog here, compare only the approved roots, then let
+    # ``execute_manual_delete`` perform target-local native guards and one
+    # terminal verification.  Crucially, no action invokes this builder.
+    try:
+        preflight_catalog = rebuild_catalog()
+        preflight_plan = build_manual_delete_plan(preflight_catalog)
+        try:
+            preflight_selected = preflight_plan.with_selected_actions(
+                action.action_id for action in selected_plan.actions
+            )
+        except Exception as exc:
+            if getattr(exc, "kind", None) == "unavailable":
+                raise RuntimeError("unavailable: " + str(exc)) from exc
+            raise
+        unavailable = tuple(
+            action for action in getattr(preflight_selected, "actions", ())
+            if not bool(getattr(action, "available", False))
+        )
+        if unavailable:
+            raise RuntimeError(
+                "preflight selected action unavailable: "
+                + ", ".join(str(getattr(action, "action_id", "")) for action in unavailable)
+            )
+        if preflight_selected.plan_fingerprint != approved_fingerprint:
+            raise RuntimeError(
+                "unavailable: 所选删除计划在批量预检时发生变化；未执行任何删除"
+            )
+    except Exception as exc:
+        return _emit_manual_delete_error(
+            exc,
+            catalog=catalog,
+            plan=selected_plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    guard_adapters: tuple[FrontendAdapter, ...] | None = None
+    guard_target_ids = {
+        str(value)
+        for selected_action in selected_plan.actions
+        for value in getattr(selected_action, "affected_thread_ids", ())
+        if str(value)
+    }
+
+    def targeted_frontend_guard(_action: Any) -> None:
+        nonlocal guard_adapters
+        if guard_adapters is None:
+            guard_adapters = tuple(
+                adapter_builder()
+                if adapter_builder is not None
+                else active_adapters
+            )
+        live_ids: set[str] = set()
+        for adapter in guard_adapters:
+            query = getattr(adapter, "live_thread_ids_for", None)
+            if callable(query):
+                live_ids.update(str(value) for value in query(guard_target_ids))
+        if live_ids:
+            raise RuntimeError(
+                "目标仍被活跃前端引用："
+                + ", ".join(sorted(live_ids))
+            )
+
+    def batch_action_state(_checkpoint: str, _action: Any, result: Any) -> None:
+        # An ambiguous request outcome is a batch boundary.  The cleaner
+        # records the current result and marks pending roots unknown; it must
+        # never proceed to another irreversible request.
+        if result is not None and (
+            str(getattr(result, "status", "")) == "unknown"
+            or bool(getattr(result, "request_error", None))
+        ):
+            raise RuntimeError(
+                "删除结果无法确认；已停止剩余批次，请使用 operation status/verify"
+            )
+
     try:
         report = execute_manual_delete(
             selected_plan,
@@ -2754,6 +4358,10 @@ def _run_manual_delete(
             timeout=args.timeout,
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            preflight_verified=True,
+            targeted_guards_only=True,
+            targeted_guard=targeted_frontend_guard,
+            action_state_callback=batch_action_state,
         )
     except Exception as exc:
         return _emit_manual_delete_error(
@@ -2999,6 +4607,10 @@ def _write_managed_conversation(conversation: Any, *, stdout: TextIO) -> None:
         f"artifacts={'yes' if bool(getattr(conversation, 'artifact_present', False)) else 'no'}",
     ]
     stdout.write(f"    Codex 状态：{', '.join(state)}\n")
+    stdout.write(
+        "    异常分类："
+        f"{_record_classification(conversation)}\n"
+    )
     originator = _record_field(summary, "originator", default=None)
     if originator:
         stdout.write(f"    来源：{_display_value(originator)}\n")
@@ -3388,6 +5000,7 @@ def _run_planned_cleanup(
             "repair_legacy_index",
             "remove_desktop_state",
             "remove_frontend_reference",
+            "delete_frontend_session",
             "remove_broken_relation",
             "keep",
         }
@@ -3473,6 +5086,7 @@ def _run_planned_cleanup(
             "repair_legacy_index",
             "remove_desktop_state",
             "remove_frontend_reference",
+            "delete_frontend_session",
             "remove_broken_relation",
         }
     ]
@@ -3484,7 +5098,7 @@ def _run_planned_cleanup(
         return _emit_action_selection_error(
             ActionSelectionError(
                 "原生 thread 删除、旧版聚合索引清理、Desktop 宿主残留、"
-                "关系边和前端引用清理不能混在同一执行中；"
+                "关系边、前端引用和前端任务行清理不能混在同一执行中；"
                 "请分别复核和执行。",
                 kind="mixed_mutation_kinds",
                 matches=[
@@ -3511,6 +5125,11 @@ def _run_planned_cleanup(
         action
         for action in mutation_actions
         if _enum_value(action.kind) == "remove_frontend_reference"
+    ]
+    frontend_session_actions = [
+        action
+        for action in mutation_actions
+        if _enum_value(action.kind) == "delete_frontend_session"
     ]
     relation_actions = [
         action
@@ -3563,6 +5182,28 @@ def _run_planned_cleanup(
                 "一次前端引用清理只能处理一个物理数据库；请按数据库分别执行。",
                 kind="multiple_frontend_storages",
                 matches=[str(action.action_id) for action in frontend_actions],
+            ),
+            plan=plan,
+            json_output=args.json,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    if frontend_session_actions and len(
+        {
+            path
+            for action in frontend_session_actions
+            for path in getattr(
+                action.impact,
+                "frontend_session_database_paths",
+                (),
+            )
+        }
+    ) > 1:
+        return _emit_action_selection_error(
+            ActionSelectionError(
+                "一次前端任务行清理只能处理一个物理数据库；请按数据库分别执行。",
+                kind="multiple_frontend_session_storages",
+                matches=[str(action.action_id) for action in frontend_session_actions],
             ),
             plan=plan,
             json_output=args.json,

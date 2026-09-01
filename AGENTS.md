@@ -2,31 +2,70 @@
 
 This repository provides a non-interactive cleanup protocol specifically for
 software agents. Use it instead of driving the human `clean`/`purge` prompts.
+The high-level `records`/`delete`/`operation` commands are the preferred
+multi-project surface; the older `agent` commands remain a one-store,
+one-mutation-family compatibility surface.
 
 ## Required agent workflow
 
-1. Work on one exact `CODEX_HOME` at a time. For official OpenAI Codex and
-   ChatGPT Desktop, use `--platform native` and the official native
+1. Work on one exact client selection at a time. For official OpenAI Codex and
+   ChatGPT Desktop, use client `native`/`codex-native` and the official native
    `CODEX_HOME`; do not substitute a Cindy or AionUI store.
-2. Run `agent doctor` and resolve every structured blocker.
-3. Run `agent plan --operation purge`. A plan authorizes at most one immutable
-   mutation batch for one physical store and one mutation family. Review its
-   target, counts, blockers, root actions, affected thread IDs, and
-   `plan_sha256` without reading or exposing chat bodies. `--out` is optional;
-   without it, use the returned `plan_path` in the user state directory. Treat
-   an empty plan as a snapshot only; `apply` still re-scans the complete target
-   before reporting success.
-4. Call `agent apply` only when the cleanup is within the user's authorization
-   and the clients for that exact store are closed. Pass the plan's exact
-   `plan_sha256`; never invent or assume `--clients-closed`.
+2. `delete plan` and `delete run` perform their own read-only preflight.
+   `agent doctor` is an optional diagnostic and is not a prerequisite for the
+   high-level operation path. If a diagnostic or preflight reports a
+   structured blocker, the operation remains blocked until that blocker is
+   resolved.
+3. A high-level plan covers one selected client and may contain multiple
+   immutable child batches. Each child batch still targets exactly one
+   physical store and one mutation family. Review target, counts, blockers,
+   progress groups, and `plan_sha256` without reading or exposing chat bodies.
+4. Apply only within the user's frozen authorization and after the owning
+   clients are closed. The operation store binds the plan hash internally;
+   callers must not invent a hash or a `--clients-closed` acknowledgement.
+   If an apply request repeats a client/project/engine/record scope, the core
+   must compare it with the frozen plan in full; a mismatched selector blocks
+   the operation rather than silently narrowing or widening it.
 5. Treat `goal_status`, `goal_satisfied`, structured blockers, and the exit code
    as authoritative. Do not decide from human message text.
-6. If apply returns `unknown`, never repeat it. Run `agent status`, then
-   `agent verify`. A repeated apply is intentionally prevented from sending a
-   second deletion.
-7. After a verified batch completes, create a fresh plan. Newly discovered
+6. If any mutation result is `unknown`, never repeat it. Run
+   `operation status`, then `operation verify`. A repeated apply is
+   intentionally prevented from sending a second deletion.
+7. After a verified operation completes, create a fresh plan. Newly discovered
    actions are never absorbed into an old authorization. Continue only while
-   the user's authorized scope still covers the new batch.
+   the user's authorized client/project scope still covers the new operation.
+
+The legacy `agent` workflow below keeps its stricter one-store contract for
+existing integrations. Its `doctor`/`plan`/`apply` commands are not an
+additional execution path for the high-level operation API.
+
+```powershell
+local-agent-record-janitor records --client native [--project SELECTOR]
+
+local-agent-record-janitor delete plan --client native --all-projects `
+  --out .\operation-plan.json
+local-agent-record-janitor delete apply --operation-id '<operation-id>' `
+  --plan .\operation-plan.json --clients-closed
+local-agent-record-janitor delete run --client cindy --project '<project-id>' `
+  --clients-closed
+
+local-agent-record-janitor operation status --operation-id '<operation-id>'
+local-agent-record-janitor operation verify --operation-id '<operation-id>'
+```
+
+The high-level operation output is grouped by project, engine, and physical
+location and contains metadata only. It uses the stable classifications
+`healthy`, `orphan_native`, `orphan_frontend`, `orphan_project`,
+`broken_relation`, `stale_index`, `partial_remote`, `corrupt_unreadable`, and
+`unknown_operation`. These are stable classifications, not a promise that
+every adapter discovers or deletes every class. Unsupported backends and
+unproven schemas are inventory-only. AionUI orphan project/conversations rows
+are executable only when the adapter proves the supported schema, immutable
+row evidence, and zero `acp_session` references; all other schemas remain
+inventory-only. When an adapter supplies authoritative remote discovery
+evidence, `remote_delete=false` reports those residuals without performing
+remote writes; without that evidence, report the capability boundary only and
+make no residual claim.
 
 ```powershell
 local-agent-record-janitor agent doctor `

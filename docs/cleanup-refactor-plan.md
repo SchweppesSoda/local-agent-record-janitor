@@ -54,9 +54,11 @@ AionUI 无主键旧 schema 只接受重验证的 `rowid + 完整行指纹`。Cin
 
 ## 性能约束
 
-`plan` 一次完整快照；`apply` 一次完整预检、N 次 action-local guard 和一次完整终检。
-同一 Codex 删除批次只启动一个 app-server。发现漂移后停止剩余动作，不重新扫描整个
-store。100 个 action 的性能测试必须固定为两次 full scan。
+默认 planner 对每个 store 做一次 catalog pass；healthy/native 路径的已测 apply 结果是
+计划一次、终验一次两次 full catalog pass。N 次 action 只做 action-local guard，同一
+Codex 删除批次只启动一个 app-server；action loop 不重建完整 catalog/plan/frontend。
+发现漂移后停止剩余动作。异常 scanner 可能有来源特定读取，因此不能把两次 full scan
+承诺扩展到所有分类或所有客户端。
 
 ## 分阶段提交
 
@@ -76,7 +78,7 @@ store。100 个 action 的性能测试必须固定为两次 full scan。
 - 默认单元测试不读取真实宿主进程；
 - 所有确定且精确的问题有删除动作，不确定项只返回明确 blocker；
 - AionUI/Cindy 只改变批准行或字段；
-- 100 个 action 的 apply 只有两次完整扫描；
+- healthy/native 路径的 1/10/100 个 action 保持已测的两次 full catalog pass；
 - 崩溃/超时后的未知动作不会重复发送；
 - 成功后没有长期备份、隔离文件或完整 journal；
 - 新扫描显示真实零目标或剩余未授权目标；
