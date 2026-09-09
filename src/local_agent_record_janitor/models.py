@@ -16,6 +16,8 @@ class RolloutRecord:
     cwd: str | None
     timestamp: str | None
     archived: bool
+    parent_thread_id: str | None = None
+    thread_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -89,8 +91,6 @@ class ConversationSummary:
             "thread_id": self.thread_id,
             "name": self.name,
             "title": self.title,
-            "display_name": self.display_name,
-            "display_name_source": self.display_name_source,
             "cwd": self.cwd,
             "git_origin_url": self.git_origin_url,
             "is_subagent": self.is_subagent,

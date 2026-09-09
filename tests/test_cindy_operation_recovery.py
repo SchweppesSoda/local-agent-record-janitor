@@ -26,6 +26,7 @@ from local_agent_record_janitor.planning import (
     storage_id_for_path,
 )
 from local_agent_record_janitor.cleanup_service import CleanupService
+from local_agent_record_janitor.record_identity import canonical_path
 
 
 class CindyOperationRecoveryTests(unittest.TestCase):
@@ -131,6 +132,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
         )
         plan = CleanupPlan(storages=(storage,), actions=actions)
         context = SimpleNamespace(
+            frontend_scan_coverage=((canonical_path(database), "sessions"),),
             snapshot=SimpleNamespace(snapshot_id="cindy-fixture"),
             plan=plan,
             actions=actions,
@@ -281,7 +283,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
             patch.object(
                 fresh,
                 "_terminal_context",
-                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=())), None),
+                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=(), storages=fresh_context.plan.storages), frontend_scan_coverage=fresh_context.frontend_scan_coverage), None),
             ),
         ):
             result = fresh.apply_operation(
@@ -372,7 +374,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
             with patch.object(
                 coordinator,
                 "_terminal_context",
-                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=())), None),
+                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=(), storages=fresh_context.plan.storages), frontend_scan_coverage=fresh_context.frontend_scan_coverage), None),
             ):
                 result = coordinator._execute_live(
                     live,

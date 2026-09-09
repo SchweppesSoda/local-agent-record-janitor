@@ -1,4 +1,6 @@
 from __future__ import annotations
+from .codex_state import rollout_lineage, row_lineage, source_lineage_evidence
+
 
 import hashlib
 import json
@@ -51,6 +53,7 @@ class ActionKind(str, Enum):
     DELETE_CLAUDE_SESSION = "delete_claude_session"
     DELETE_FRONTEND_SESSION = "delete_frontend_session"
     DELETE_PROJECT_ITEM = "delete_project_item"
+    DELETE_NATIVE_PROJECT = "delete_native_project"
     KEEP = "keep"
 
 
@@ -308,6 +311,12 @@ class CandidateAction:
                     if self.legacy_inventory is not None
                     else None
                 ),
+            }
+        elif self.resource_kind == "native_project":
+            resource = {
+                "kind": "native_project", "target": self.target.to_dict(),
+                "codex_home": self.impact.external_storage_root,
+                "evidence": _json_value(self.impact.external_action_payload.get("native_project_evidence", {})),
             }
         elif self.resource_kind == "project_item":
             resource = {
@@ -771,7 +780,7 @@ def build_cleanup_plan(
                     )
                     evidence.rollout_source_identities[thread_id].add(
                         json.dumps(
-                            _json_value(record.source),
+                            _json_value({"source": record.source, "parent_thread_id": record.parent_thread_id, "thread_source": record.thread_source}),
                             ensure_ascii=False,
                             sort_keys=True,
                             separators=(",", ":"),
@@ -2294,7 +2303,7 @@ def _descendant_evidence_block_reason(
             parent_id
             for record in records
             if record.thread_id == thread_id
-            for parent_id in _structured_source_parent_ids(record.source)
+            for parent_id in rollout_lineage(record).parent_thread_ids
         }
         allowed_parent_ids = affected_set - {thread_id}
         if (
@@ -2347,6 +2356,8 @@ def _current_rollout_snapshot(
                 "metadata_thread_id": record.thread_id,
                 "originator": record.originator,
                 "source": _json_value(record.source),
+                "parent_thread_id": record.parent_thread_id,
+                "thread_source": record.thread_source,
                 "cwd": record.cwd,
                 "timestamp": record.timestamp,
                 "archived": record.archived,
@@ -2410,22 +2421,10 @@ def _residual_delete_contract_issue(
         for item in declared_source_parent_ids
         if isinstance(item, str) and item
     }
-    current_source_parent_values = [
-        record.source
-        for record in evidence.current_rollout_records.get(
-            target.thread_id,
-            (),
-        )
-        if record.thread_id == target.thread_id
-    ]
-    indexed_row = evidence.current_index_rows.get(target.thread_id)
-    if indexed_row is not None:
-        current_source_parent_values.append(indexed_row.get("source"))
-    current_source_parent_ids = {
-        source_parent_id
-        for value in current_source_parent_values
-        for source_parent_id in _structured_source_parent_ids(value)
-    }
+    current_source_parent_ids = source_lineage_evidence(
+        evidence.current_index_rows.get(target.thread_id),
+        evidence.current_rollout_records.get(target.thread_id, ()),
+    )[1]
     if (
         current_source_parent_ids != declared_parent_set
         or len(current_source_parent_ids) > 1
@@ -2516,24 +2515,7 @@ def _current_subagent_evidence(
     thread_id: str,
     evidence: _StorageEvidence,
 ) -> set[str]:
-    result: set[str] = set()
-    indexed_row = evidence.current_index_rows.get(thread_id)
-    if indexed_row is not None:
-        thread_source = indexed_row.get("thread_source")
-        if (
-            isinstance(thread_source, str)
-            and thread_source.lower() == "subagent"
-        ):
-            result.add("threads.thread_source")
-        if _source_declares_subagent(indexed_row.get("source")):
-            result.add("threads.source")
-    if any(
-        record.thread_id == thread_id
-        and _source_declares_subagent(record.source)
-        for record in evidence.current_rollout_records.get(thread_id, ())
-    ):
-        result.add("session_meta.source")
-    return result
+    return set(source_lineage_evidence(evidence.current_index_rows.get(thread_id), evidence.current_rollout_records.get(thread_id, ()))[2])
 
 
 def _source_declares_subagent(value: Any) -> bool:
@@ -2579,18 +2561,9 @@ def _source_parent_scope_block_reason(
     affected_set = set(thread_ids)
     for thread_id in thread_ids:
         indexed_row = evidence.current_index_rows.get(thread_id)
-        source_values = [
-            record.source
-            for record in evidence.current_rollout_records.get(thread_id, ())
-            if record.thread_id == thread_id
-        ]
-        if indexed_row is not None:
-            source_values.append(indexed_row.get("source"))
-        source_parent_ids = {
-            parent_id
-            for source in source_values
-            for parent_id in _structured_source_parent_ids(source)
-        }
+        source_parent_ids = source_lineage_evidence(
+            indexed_row, evidence.current_rollout_records.get(thread_id, ()),
+        )[1]
         outside_parent_ids = source_parent_ids - affected_set
         if outside_parent_ids and (
             thread_id != thread_ids[0]
@@ -2663,7 +2636,7 @@ def _is_approved_missing_parent_orphan(
         )
     return (
         edge_present is False
-        and evidence_strength == "source_consensus"
+        and evidence_strength in {"source_consensus", "indexed_rollout_parent"}
         and details.get("requires_explicit_selection") is True
     )
 

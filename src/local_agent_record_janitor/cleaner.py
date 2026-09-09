@@ -1,4 +1,6 @@
 from __future__ import annotations
+from .codex_state import rollout_lineage, row_lineage, source_lineage_evidence, indexed_rollout_parent_confirmed
+
 
 import json
 import os
@@ -2079,17 +2081,7 @@ def _with_verification_scope(
                     "index_rollout_path_mismatch approval"
                 )
 
-            source_parent_values = [
-                record.source
-                for record in records
-            ]
-            if indexed_row is not None:
-                source_parent_values.append(indexed_row.get("source"))
-            source_parents = {
-                parent
-                for source in source_parent_values
-                for parent in _structured_source_parent_ids(source)
-            }
+            source_parents = source_lineage_evidence(indexed_row, records)[1]
             orphan_parent_allowed = False
             orphan_details = _native_finding_details(
                 finding,
@@ -2351,10 +2343,14 @@ def _orphaned_root_parent_scope_issue(
         ):
             return "the current incoming edge differs from the approved observation"
     elif (
-        evidence_strength != "source_consensus"
+        evidence_strength not in {"source_consensus", "indexed_rollout_parent"}
         or details.get("requires_explicit_selection") is not True
     ):
         return "the edge-free exception lacks approved source consensus"
+    if evidence_strength == "indexed_rollout_parent" and not indexed_rollout_parent_confirmed(
+        indexed_row, records, approved_parent, finding.codex_home,
+    ):
+        return "the indexed rollout and structured parent evidence changed"
     return None
 
 
@@ -2506,19 +2502,7 @@ def _current_subagent_evidence(
     records: Sequence[Any],
     indexed_row: Mapping[str, Any] | None,
 ) -> set[str]:
-    evidence: set[str] = set()
-    if indexed_row is not None:
-        thread_source = indexed_row.get("thread_source")
-        if (
-            isinstance(thread_source, str)
-            and thread_source.lower() == "subagent"
-        ):
-            evidence.add("threads.thread_source")
-        if _source_declares_subagent(indexed_row.get("source")):
-            evidence.add("threads.source")
-    if any(_source_declares_subagent(record.source) for record in records):
-        evidence.add("session_meta.source")
-    return evidence
+    return set(source_lineage_evidence(indexed_row, records)[2])
 
 
 def _source_declares_subagent(value: object) -> bool:

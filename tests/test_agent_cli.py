@@ -1184,9 +1184,9 @@ class AgentCliTests(unittest.TestCase):
             cleanup_service=service,
         )
 
-        self.assertEqual(code, 0)
-        self.assertEqual(result["goal_status"], "complete")
-        self.assertEqual(full_scan_calls, 2)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertEqual(full_scan_calls, 2, result)
         self.assertEqual(len(server.deleted_thread_ids), 100)
         self.assertEqual(server.enter_count, 1)
         receipt = self.operation_directory(document) / "receipt.json"

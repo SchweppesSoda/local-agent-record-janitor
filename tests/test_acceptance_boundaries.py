@@ -431,7 +431,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             with patch.object(
                 coordinator,
                 "_terminal_context",
-                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=())), None),
+                return_value=(SimpleNamespace(plan=SimpleNamespace(actions=(), storages=live.context.plan.storages)), None),
             ):
                 result = coordinator._execute_live(
                     live,

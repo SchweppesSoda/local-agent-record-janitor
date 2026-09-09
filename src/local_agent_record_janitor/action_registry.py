@@ -100,6 +100,13 @@ ACTION_REGISTRY: Mapping[str, ActionCapability] = {
         requires_clients_closed=True,
         verifies_by="approved_project_rows_absent",
     ),
+    "delete_native_project": ActionCapability(
+        kind="delete_native_project",
+        implemented=True,
+        mutation_family="delete_native_project",
+        requires_clients_closed=True,
+        verifies_by="approved_native_project_markers_absent",
+    ),
     "keep": ActionCapability(
         kind="keep",
         implemented=True,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .adapters.base import FrontendBatchSnapshot
+from .display_metadata import display_title
 from .inventory import (
     FrontendSessionRecord,
     InventoryFailure,
@@ -28,6 +29,7 @@ from .record_identity import (
     RecordClassification,
     RecordKey,
     StoreKey,
+    canonical_path,
     classify_record_state,
     normalize_client,
     normalize_engine,
@@ -55,6 +57,11 @@ class ClientTarget:
     blocker_codes: tuple[str, ...] = ()
     blockers: tuple[Mapping[str, Any], ...] = ()
     project_row_evidence: tuple[Mapping[str, Any], ...] = ()
+    display_name: str | None = None
+    display_name_source: str | None = None
+    is_subagent: bool = False
+    parent_thread_ids: tuple[str, ...] = ()
+    descendant_thread_ids: tuple[str, ...] = ()
 
     @property
     def record_id(self) -> str | None:
@@ -62,7 +69,10 @@ class ClientTarget:
 
     @property
     def identifiers(self) -> tuple[str, ...]:
-        values: list[str] = list(self.action_ids)
+        values: list[str] = [value for value in self.action_ids if value not in {
+            "delete_native", "delete_pi_session", "delete_claude_session",
+            "delete_frontend_session", "delete_frontend_reference", "delete_frontend_project",
+        }]
         if self.record_key is not None:
             values.extend((self.record_key.value, self.record_key.record_id))
         if self.native_thread_id:
@@ -77,6 +87,17 @@ class ClientTarget:
             "record_key": self.record_key.to_dict() if self.record_key else None,
             "project_key": self.project_key.to_dict() if self.project_key else None,
             "native_thread_id": self.native_thread_id,
+            "record_id": self.record_id,
+            "display_name": display_title(self.display_name),
+            "display_name_source": self.display_name_source,
+            "record_kind": "subagent" if self.is_subagent else "conversation",
+            "is_subagent": self.is_subagent,
+            "parent_thread_ids": list(self.parent_thread_ids),
+            "descendant_thread_ids": list(self.descendant_thread_ids),
+            "lineage_status": "conflict" if "lineage_conflict" in self.blocker_codes else (
+                "known" if self.parent_thread_ids else "unknown" if self.is_subagent else "root"
+            ),
+            "cleanup_eligible": bool(self.action_ids) and not self.blockers and not self.blocker_codes,
             "frontend_reference_ids": list(self.frontend_reference_ids),
             "classification": self.classification.value,
             "capability": self.capability.to_dict(),
@@ -104,6 +125,8 @@ class ClientInventory:
     errors: tuple[InventoryFailure, ...] = ()
     frontend_snapshots: tuple[FrontendBatchSnapshot, ...] = ()
     project_items: tuple[Any, ...] = ()
+    scanned_databases: tuple[Path, ...] = ()
+    scanned_resources: tuple[tuple[str, str], ...] = ()
 
     @property
     def catalog(self) -> SessionCatalog:
@@ -523,6 +546,8 @@ def build_client_inventory(
     snapshots: list[FrontendBatchSnapshot] = []
     errors: list[InventoryFailure] = []
     project_items: list[Any] = []
+    scanned_databases: set[Path] = set()
+    scanned_resources: set[tuple[str, str]] = set()
     for adapter in selected_adapters:
         home = _path_or_none(getattr(adapter, "codex_home", None))
         database = _path_or_none(getattr(adapter, "database", None))
@@ -536,10 +561,15 @@ def build_client_inventory(
                         getattr(adapter, "supports_all_backends", False)
                     )
                 )
+                if database is not None and canonical_path(snapshot.database) != canonical_path(database):
+                    raise ClientInventoryError("frontend snapshot database differs from selected database")
                 rows = tuple(snapshot.records)
                 snapshots.append(snapshot)
             else:
                 rows = tuple(adapter.list_sessions())
+            if database is not None and database.is_file():
+                scanned_databases.add(database)
+                scanned_resources.add((canonical_path(database), "sessions"))
         except Exception as exc:
             errors.append(
                 InventoryFailure(
@@ -555,6 +585,9 @@ def build_client_inventory(
         if callable(project_reader):
             try:
                 project_items.extend(tuple(project_reader()))
+                if database is not None and database.is_file():
+                    scanned_databases.add(database)
+                    scanned_resources.add((canonical_path(database), "projects"))
             except Exception as exc:
                 errors.append(
                     InventoryFailure(
@@ -661,7 +694,7 @@ def build_client_inventory(
                     or "Exact frontend project-row writer is registered"
                 ),
             )
-    return ClientInventory(
+    inventory = ClientInventory(
         client=selected_client,
         engines=tuple(sorted(target_engines | set(requested_engines))),
         projects=tuple(project_map[key] for key in sorted(project_map)),
@@ -673,7 +706,13 @@ def build_client_inventory(
         errors=tuple(errors),
         frontend_snapshots=tuple(snapshots),
         project_items=tuple(unique_project_items),
+        scanned_databases=tuple(sorted(scanned_databases, key=str)),
+        scanned_resources=tuple(sorted(scanned_resources)),
     )
+    if selected_client == "native" and (not requested_engines or "codex" in requested_engines):
+        from .native_project_cleanup import append_native_inventory
+        return append_native_inventory(inventory, selected_adapters)
+    return inventory
 
 
 def select_client_targets(

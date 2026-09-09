@@ -95,6 +95,7 @@ class FrontendClosureTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.codex_home = self_home
+                self.database = database
 
             def list_sessions(self) -> list[FrontendSessionRecord]:
                 return aionui.list_sessions()

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -547,12 +548,36 @@ def _running_related_process_records() -> tuple[dict[str, Any], ...]:
     return tuple(records)
 
 
-def _relevant_client_names(
+def _relevant_client_names(owner_process_root: Path, records: Iterable[Mapping[str, Any]], *, owner_client: str | None = None) -> tuple[str, ...]:
+    items = tuple(records)
+    relevant = set(_relevant_process_ids(owner_process_root, items, owner_client=owner_client))
+    return tuple(sorted({str(item.get("name") or "unknown") for item in items
+        if _integer_or_minus_one(item.get("process_id")) in relevant}, key=str.casefold))
+
+
+def inspect_client_ownership(owner_process_root: Path, *, owner_client: str | None = None,
+                             records: Iterable[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Read-only process attribution with no command lines or environment secrets."""
+    items = tuple(records) if records is not None else (_running_related_process_records() if os.name == "nt" else ())
+    relevant = set(_relevant_process_ids(owner_process_root, items, owner_client=owner_client))
+    return {
+        "owner_client": owner_client,
+        "owner_process_root": str(owner_process_root),
+        "check_mode": "process_attribution" if os.name == "nt" or records is not None else "explicit_acknowledgement_required",
+        "clients_closed": not relevant if os.name == "nt" or records is not None else None,
+        "processes": [{"process_id": item.get("process_id"), "parent_process_id": item.get("parent_process_id"),
+            "name": item.get("name"), "executable_path": item.get("executable_path"),
+            "relation": "target_or_unproven" if _integer_or_minus_one(item.get("process_id")) in relevant else "separate_store"}
+            for item in items],
+    }
+
+
+def _relevant_process_ids(
     owner_process_root: Path,
     records: Iterable[Mapping[str, Any]],
     *,
     owner_client: str | None = None,
-) -> tuple[str, ...]:
+) -> tuple[int, ...]:
     """Return process names relevant to one explicit owner identity.
 
     Cindy ownership is proven from the process family's executable identity
@@ -575,7 +600,7 @@ def _relevant_client_names(
         # The generic guard has no owning-client identity and therefore keeps
         # its conservative fail-closed behavior for incomplete snapshots.
         return tuple(
-            sorted({str(item.get("name") or "unknown") for item in items})
+            sorted({_integer_or_minus_one(item.get("process_id")) for item in items})
         )
 
     cindy_root_by_pid: dict[int, int] = {}
@@ -661,7 +686,7 @@ def _relevant_client_names(
             continue
         valid_cindy_families[root_id] = user_data_dirs[0]
 
-    relevant: set[str] = set()
+    relevant: set[int] = set()
     for item in items:
         name = str(item.get("name") or "unknown")
         name_key = name.casefold()
@@ -697,8 +722,8 @@ def _relevant_client_names(
                 # A standalone codex.exe is not Cindy's owner process.
                 continue
         if not separate_cindy_process:
-            relevant.add(name)
-    return tuple(sorted(relevant, key=str.casefold))
+            relevant.add(process_id)
+    return tuple(sorted(relevant))
 
 
 def _same_existing_path(first: Path, second: Path) -> bool | None:
@@ -728,13 +753,14 @@ def sha256_file(path: Path) -> str:
 def _discover_catalog_database(codex_home: Path) -> Path | None:
     sqlite_root = codex_home / "sqlite"
     try:
-        if not sqlite_root.exists():
-            return None
-        if not sqlite_root.is_dir():
+        directory_state = sqlite_root.stat()
+        if not stat.S_ISDIR(directory_state.st_mode):
             raise DesktopStateError(
                 f"Codex Desktop sqlite path is not a directory: {sqlite_root}"
             )
-        candidates = sorted(sqlite_root.glob("*.db"), key=lambda path: path.name)
+        candidates = sorted((path for path in sqlite_root.iterdir() if path.suffix == ".db"), key=lambda path: path.name)
+    except FileNotFoundError:
+        return None
     except OSError as exc:
         raise DesktopStateError(
             f"Could not inspect Codex Desktop sqlite directory {sqlite_root}: {exc}"
@@ -979,12 +1005,14 @@ def _global_state_paths(codex_home: Path) -> tuple[Path, ...]:
         codex_home / ".codex-global-state.json.bak",
     ):
         try:
-            if path.exists():
-                if not path.is_file():
-                    raise DesktopStateError(
-                        f"Codex Desktop state path is not a regular file: {path}"
-                    )
-                paths.append(path.resolve())
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode):
+                raise DesktopStateError(
+                    f"Codex Desktop state path is not a regular file: {path}"
+                )
+            paths.append(path.resolve())
+        except FileNotFoundError:
+            continue
         except OSError as exc:
             raise DesktopStateError(
                 f"Could not inspect Codex Desktop state path {path}: {exc}"

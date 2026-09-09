@@ -41,6 +41,7 @@ from .relation_cleanup import (
     execute_relation_cleanup,
 )
 from .models import Finding
+from .native_project_cleanup import NativeProjectCleanupResult, execute_native_project_cleanup
 from .planning import normalize_storage_path
 from .targeted_guard import (
     TargetedReferenceGuard,
@@ -89,6 +90,7 @@ class ExecutionOutcome:
     desktop_cleanup: DesktopCleanupResult | None = None
     frontend_cleanup: FrontendReferenceCleanupResult | None = None
     frontend_project_cleanup: FrontendProjectCleanupResult | None = None
+    native_project_cleanup: NativeProjectCleanupResult | None = None
     frontend_session_cleanup: FrontendSessionCleanupResult | None = None
     relation_cleanup: RelationCleanupResult | None = None
     session_engine: str | None = None
@@ -107,12 +109,15 @@ class ExecutionOutcome:
             or self.desktop_cleanup is not None
             or self.frontend_cleanup is not None
             or self.frontend_project_cleanup is not None
+            or self.native_project_cleanup is not None
             or self.frontend_session_cleanup is not None
             or self.relation_cleanup is not None
         )
 
     @property
     def modified(self) -> bool:
+        if self.native_project_cleanup is not None:
+            return bool(self.native_project_cleanup.entries_removed)
         if self.frontend_session_cleanup is not None:
             return bool(self.frontend_session_cleanup.deleted_session_count)
         if self.frontend_project_cleanup is not None:
@@ -123,6 +128,8 @@ class ExecutionOutcome:
 
     @property
     def results(self) -> tuple[Any, ...]:
+        if self.native_project_cleanup is not None:
+            return (self.native_project_cleanup,)
         if self.frontend_session_cleanup is not None:
             return (self.frontend_session_cleanup,)
         if self.frontend_project_cleanup is not None:
@@ -133,6 +140,14 @@ class ExecutionOutcome:
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
+
+        if self.native_project_cleanup is not None:
+            return {
+                "command": "delete", "mutation_kind": "delete_native_project",
+                "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
+                "result": self.native_project_cleanup.to_dict(),
+                "plan_fingerprint": str(self.plan.plan_fingerprint),
+            }
 
         if self.legacy_repair is not None:
             action = self.selected_actions[0]
@@ -652,6 +667,21 @@ def execute_prevalidated_actions(
             plan=plan,
             frontend_session_cleanup=result,
         )
+
+    if mutation_kind == "delete_native_project":
+        evidence = tuple(a.impact.external_action_payload["native_project_evidence"] for a in actions)
+
+        def forward_native_project_phase(phase: str) -> None:
+            if action_state_callback is not None:
+                for action in actions:
+                    action_state_callback(phase, action, None)
+
+        result = execute_native_project_cleanup(
+            evidence, client_inspector=client_inspector,
+            phase_callback=forward_native_project_phase,
+        )
+        return ExecutionOutcome(mutation_kind=mutation_kind, selected_actions=actions,
+                                plan=plan, native_project_cleanup=result)
 
     if mutation_kind == "delete_project_item":
         database_paths = {

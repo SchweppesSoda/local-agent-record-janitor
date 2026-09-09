@@ -89,12 +89,14 @@ class CoreBatchFastTests(unittest.TestCase):
         first_storage = SimpleNamespace(
             storage_id="first-store",
             path=first_home,
-            to_dict=lambda: {"storage_id": "first-store", "path": str(first_home)},
+            scan_status="ok",
+            to_dict=lambda: {"storage_id": "first-store", "path": str(first_home), "scan_status": "ok"},
         )
         second_storage = SimpleNamespace(
             storage_id="second-store",
             path=second_home,
-            to_dict=lambda: {"storage_id": "second-store", "path": str(second_home)},
+            scan_status="ok",
+            to_dict=lambda: {"storage_id": "second-store", "path": str(second_home), "scan_status": "ok"},
         )
         context = SimpleNamespace(
             snapshot=SimpleNamespace(snapshot_id="snapshot:recovery"),
@@ -398,7 +400,7 @@ class CoreBatchFastTests(unittest.TestCase):
             )
             coordinator._terminal_context = lambda _live: (
                 SimpleNamespace(
-                    plan=SimpleNamespace(actions=(), scan_complete=True),
+                    plan=SimpleNamespace(actions=(), scan_complete=True, storages=context.plan.storages),
                 ),
                 None,
             )
@@ -1338,6 +1340,7 @@ class CoreBatchFastTests(unittest.TestCase):
         context = SimpleNamespace(
             plan=SimpleNamespace(
                 actions=fresh_actions,
+                storages=(SimpleNamespace(storage_id="store", path=storage, scan_status="ok"),),
                 scan_complete=True,
                 errors=(),
             )
@@ -1362,7 +1365,7 @@ class CoreBatchFastTests(unittest.TestCase):
             impact=SimpleNamespace(external_storage_root="PLACEHOLDER"),
         )
 
-    def test_verify_action_disappears_is_complete_without_fresh_binding(self) -> None:
+    def test_verify_empty_successfully_scanned_store_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             coordinator, plan_path = self._verify_plan_fixture(root)

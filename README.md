@@ -44,6 +44,26 @@ Codex Desktop 还可能维护一层宿主目录/UI 状态。它不是公开 app-
 精确删除该目录行及 JSON 中的结构化精确 ID 引用；提示历史正文中仅仅包含该 ID 的
 普通字符串会保留。验证成功后临时副本立即删除，不形成长期备份。
 
+### ChatGPT Desktop 本地环境旧登记
+
+`records --client native` 也会列出「设置 → 编码 → 环境」使用的本地项目登记。
+目录仍存在的项目仅供盘点；目录已不存在、原生数据库没有项目/会话引用，且 JSON
+结构可验证的旧登记可通过 `delete_native_project` 动作清除。删除范围包括官方
+`CODEX_HOME` 下 `.codex-global-state.json` 及现有 `.bak` 中对应的 `local-projects`
+条目、已识别的侧栏展开状态和本机旧 ID 映射。不会删除项目文件、环境脚本或云端项目。
+
+```powershell
+local-agent-record-janitor records --client native --json
+local-agent-record-janitor delete plan --client native --record-id '<完整项目 ID>' --out .\environment-plan.json
+# 核对计划并完全退出官方客户端后执行：
+local-agent-record-janitor delete apply --operation-id '<operation-id>' --plan .\environment-plan.json --clients-closed
+local-agent-record-janitor operation verify --operation-id '<operation-id>' --plan .\environment-plan.json
+```
+
+计划冻结两份配置的文件集合、哈希和精确修改项；不支持的字段、额外引用、不可用的卷、
+链接目录或仍在运行的客户端会阻止修改。临时回滚副本只用于验证/恢复，验证通过后立即删除。
+详见 [本地环境清理契约](docs/native-project-cleanup.md)。
+
 ### 术语与身份边界
 
 | 层 | 本项目中的含义 |

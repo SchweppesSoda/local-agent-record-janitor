@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .codex_state import parse_thread_source, read_thread_metadata
+from .codex_state import parse_thread_source, read_thread_metadata, read_native_lineage, rollout_lineage
 from .models import ConversationSummary, RolloutRecord, ThreadSourceInfo
 from .path_identity import canonical_existing_path_key
 
@@ -89,6 +89,7 @@ def read_conversation_summaries(
     | None = None,
     legacy_names: Mapping[str, str | Iterable[str]] | None = None,
     strict: bool = True,
+    native_lineage: Mapping[str, ThreadSourceInfo] | None = None,
 ) -> dict[str, ConversationSummary]:
     """Merge SQLite, supplied rollout metadata and legacy index names.
 
@@ -110,6 +111,9 @@ def read_conversation_summaries(
     rows = read_thread_metadata(codex_home, ids, strict=strict)
     rollout_mapping = rollout_records_by_thread or {}
     legacy_mapping = legacy_names or {}
+    lineage = native_lineage if native_lineage is not None else read_native_lineage(
+        codex_home, rollout_records=[r for value in rollout_mapping.values() for r in _rollout_records(value)], strict=strict,
+    )
     summaries: dict[str, ConversationSummary] = {}
     for thread_id in ids:
         row = rows.get(thread_id)
@@ -120,6 +124,7 @@ def read_conversation_summaries(
             row=row,
             records=records,
             legacy_names=legacy_values,
+            lineage=lineage.get(thread_id),
         )
     return summaries
 
@@ -130,6 +135,7 @@ def _merge_summary(
     row: Mapping[str, Any] | None,
     records: tuple[RolloutRecord, ...],
     legacy_names: tuple[str, ...],
+    lineage: ThreadSourceInfo | None = None,
 ) -> ConversationSummary:
     legacy_names = tuple(sorted(set(legacy_names)))
     sources: set[str] = set()
@@ -149,6 +155,8 @@ def _merge_summary(
                     "path": canonical_existing_path_key(record.path),
                     "originator": record.originator,
                     "source": record.source,
+                    "parent_thread_id": record.parent_thread_id,
+                    "thread_source": record.thread_source,
                     "cwd": record.cwd,
                     "timestamp": record.timestamp,
                     "archived": record.archived,
@@ -168,6 +176,8 @@ def _merge_summary(
     db_originator = _row_text(row, "originator", sources)
 
     source_infos: list[ThreadSourceInfo] = []
+    if lineage is not None:
+        source_infos.append(lineage)
     if row is not None:
         thread_source = _row_text(row, "thread_source", sources)
         if thread_source is not None:
@@ -195,10 +205,7 @@ def _merge_summary(
         _append_text(rollout_originators, record.originator)
         rollout_archived.append(record.archived)
         source_infos.append(
-            parse_thread_source(
-                record.source,
-                source_label="session_meta.source",
-            )
+            rollout_lineage(record)
         )
 
     cwd = _prefer_database_value(
@@ -244,7 +251,7 @@ def _merge_summary(
         raw_thread_source = _nonempty_string(row.get("thread_source"))
         if (
             raw_thread_source is not None
-            and raw_thread_source.lower() != "subagent"
+            and not parse_thread_source(raw_thread_source).is_subagent
             and is_subagent
         ):
             conflicts.add(

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from ..codex_state import rollout_lineage, row_lineage, source_lineage_evidence, indexed_rollout_parent_confirmed, parse_thread_source
+
 
 import json
 import os
@@ -253,6 +255,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                     "updated_at",
                     "source",
                     "thread_source",
+                    "parent_thread_id",
                     "agent_nickname",
                     "agent_role",
                 )
@@ -619,6 +622,10 @@ class NativeIntegrityAdapter(FrontendAdapter):
         for edge in edges:
             child_edges_by_parent[edge["parent_thread_id"]].append(edge)
         child_ids = set(threads) | set(rollouts)
+        source_children: dict[str, set[str]] = defaultdict(set)
+        for child in child_ids:
+            for parent in source_lineage_evidence(threads.get(child), rollouts.get(child, ()))[1]:
+                source_children[parent].add(child)
         findings: list[Finding] = []
         claimed_edges: set[tuple[str, str]] = set()
 
@@ -666,6 +673,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
             child_indexed = child_id in threads
             rollout = _preferred_rollout(records) if records else None
             descendant_edges = child_edges_by_parent.get(child_id, [])
+            has_descendants = bool(descendant_edges or source_children.get(child_id))
             edge_is_open = (
                 matching_edge
                 and isinstance(edge.get("status"), str)
@@ -680,11 +688,14 @@ class NativeIntegrityAdapter(FrontendAdapter):
                 edge=edge,
                 codex_home=self.codex_home,
             )
+            indexed_rollout_parent = edge is None and indexed_rollout_parent_confirmed(
+                row, records, parent_id, self.codex_home,
+            )
             source_consensus_cleanup = (
-                source_consensus
+                (source_consensus or indexed_rollout_parent)
                 and not parent_indexed
                 and not parent_rollout_present
-                and not descendant_edges
+                and not has_descendants
                 and thread_delete_supported
             )
             safely_deletable = (
@@ -692,7 +703,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                 and not parent_indexed
                 and not parent_rollout_present
                 and not edge_is_open
-                and not descendant_edges
+                and not has_descendants
                 and (matching_edge or source_consensus_cleanup)
             )
             blocked_reasons: list[str] = []
@@ -703,12 +714,12 @@ class NativeIntegrityAdapter(FrontendAdapter):
             if edge_is_open:
                 blocked_reasons.append("The spawn edge is still open.")
                 blocker_codes.append(SPAWN_EDGE_OPEN)
-            if not matching_edge and not source_consensus:
+            if not matching_edge and not (source_consensus or indexed_rollout_parent):
                 blocked_reasons.append(
                     "No matching spawn edge remains to corroborate the source metadata."
                 )
                 blocker_codes.append(SOURCE_PARENT_UNVERIFIED)
-            if descendant_edges:
+            if has_descendants:
                 blocked_reasons.append(
                     "thread/delete would cascade into spawned descendants."
                 )
@@ -750,7 +761,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                             else (
                                 "source_consensus"
                                 if source_consensus
-                                else "source_only"
+                                else ("indexed_rollout_parent" if indexed_rollout_parent else "source_only")
                             )
                         ),
                         "cleanup_blocked_reason": (
@@ -1102,7 +1113,7 @@ def _has_source_consensus_without_edge(
 
     if edge is not None or row is None or len(records) != 1:
         return False
-    if row.get("thread_source") != "subagent":
+    if not parse_thread_source(row.get("thread_source")).is_subagent:
         return False
 
     indexed_path = _indexed_rollout_path(codex_home, row)
@@ -1115,18 +1126,18 @@ def _has_source_consensus_without_edge(
     ):
         return False
 
-    indexed_is_subagent, indexed_parents = _parse_subagent_source(
-        row.get("source")
-    )
-    rollout_is_subagent, rollout_parents = _parse_subagent_source(
-        rollout.source
-    )
+    indexed_info = row_lineage(row)
+    indexed_is_subagent, indexed_parents = indexed_info.is_subagent, set(indexed_info.parent_thread_ids)
+    rollout_info = rollout_lineage(rollout)
+    rollout_is_subagent, rollout_parents = rollout_info.is_subagent, set(rollout_info.parent_thread_ids)
     expected = {parent_id}
     return (
         indexed_is_subagent
         and rollout_is_subagent
         and indexed_parents == expected
         and rollout_parents == expected
+        and not indexed_info.metadata_conflicts
+        and not rollout_info.metadata_conflicts
     )
 
 
@@ -1134,31 +1145,7 @@ def _subagent_evidence(
     row: dict[str, Any] | None,
     records: list[RolloutRecord],
 ) -> tuple[bool, set[str], list[str]]:
-    is_subagent = False
-    parent_ids: set[str] = set()
-    evidence: list[str] = []
-
-    if row is not None:
-        thread_source = row.get("thread_source")
-        if isinstance(thread_source, str) and thread_source.lower() == "subagent":
-            is_subagent = True
-            evidence.append("threads.thread_source")
-        source_is_subagent, source_parents = _parse_subagent_source(
-            row.get("source")
-        )
-        if source_is_subagent:
-            is_subagent = True
-            evidence.append("threads.source")
-        parent_ids.update(source_parents)
-
-    for record in records:
-        source_is_subagent, source_parents = _parse_subagent_source(record.source)
-        if source_is_subagent:
-            is_subagent = True
-            evidence.append("session_meta.source")
-        parent_ids.update(source_parents)
-
-    return is_subagent, parent_ids, evidence
+    return source_lineage_evidence(row, records)
 
 
 def _parse_subagent_source(value: object) -> tuple[bool, set[str]]:

@@ -23,6 +23,12 @@ residuals, and no remote write is attempted.
 
 ## Commands
 
+Official native local-environment registrations use the high-level operation
+path and the separate `delete_native_project` family. They are not thread IDs
+and must not be passed to legacy thread deletion. See
+[native project cleanup](native-project-cleanup.md) for the supported schema,
+exact file evidence, inventory-only boundaries and recovery verification.
+
 `agent doctor` is read-only. It checks the exact target store, scan
 completeness, and client ownership. A process using another physical store does
 not block this store when executable, parent/child process, and filesystem

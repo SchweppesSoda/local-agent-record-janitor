@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .codex_state import parse_thread_source
+from .codex_state import parse_thread_source, read_native_lineage
 from .conversation_metadata import read_conversation_summaries
 from .models import ConversationSummary, RolloutRecord
 from .path_identity import canonical_existing_path_key
@@ -220,6 +220,7 @@ class SessionCatalog:
     records: tuple[ManagedConversation, ...] = ()
     unmapped_frontend_sessions: tuple[FrontendSessionRecord, ...] = ()
     errors: tuple[InventoryFailure, ...] = ()
+    scanned_session_databases: tuple[Path, ...] = ()
 
     @property
     def conversations(self) -> tuple[ManagedConversation, ...]:
@@ -269,6 +270,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     bin_hints: dict[str, set[Path]] = defaultdict(set)
     frontend_by_home: dict[str, list[FrontendSessionRecord]] = defaultdict(list)
     errors: list[InventoryFailure] = []
+    scanned_session_databases: set[Path] = set()
 
     for adapter in adapter_list:
         raw_home = getattr(adapter, "codex_home", None)
@@ -282,6 +284,10 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             bin_hints[home_key].add(_absolute_path(hint))
         try:
             sessions = list(adapter.list_sessions())
+            database = getattr(adapter, "database", None)
+            if (isinstance(database, Path) and database.is_file()
+                    and all(isinstance(session, FrontendSessionRecord) for session in sessions)):
+                scanned_session_databases.add(database)
         except Exception as exc:  # each source failure must not hide other homes
             errors.append(
                 InventoryFailure(
@@ -366,12 +372,18 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
         graph: dict[str, set[str]] = defaultdict(set)
         for parent, child in native_edges:
             graph[parent].add(child)
-        for rollout in rollouts:
-            for parent in parse_thread_source(
-                rollout.source,
-                source_label="session_meta.source",
-            ).parent_thread_ids:
-                graph[parent].add(rollout.thread_id)
+        try:
+            lineage = read_native_lineage(home, rollout_records=rollouts)
+        except Exception as exc:
+            lineage = {}
+            failure = InventoryFailure(source="codex-lineage", codex_home=home,
+                database=home / "state_5.sqlite", error_type=type(exc).__name__, message=str(exc))
+            errors.append(failure)
+            home_errors.append(failure)
+            state_edge_complete = False
+        for child, info in lineage.items():
+            for parent in info.parent_thread_ids:
+                graph[parent].add(child)
 
         ids = set(state_rows) | set(rollouts_by_thread) | set(legacy_ids) | set(frontend_by_thread)
         for parent, children in graph.items():
@@ -385,6 +397,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 rollout_records_by_thread=rollouts_by_thread,
                 legacy_names=legacy_names,
                 strict=True,
+                native_lineage=lineage,
             )
         except Exception as exc:
             failure = InventoryFailure(
@@ -402,6 +415,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 rollout_records_by_thread=rollouts_by_thread,
                 legacy_names=legacy_names,
                 strict=False,
+                native_lineage=lineage,
             )
 
         cascade_unknown = not state_edge_complete or bool(rollout_errors)
@@ -538,6 +552,13 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 blocker_codes.add("spawn_edge_open")
                 blockers.append("Cascade inventory is incomplete")
             summary = summaries[thread_id]
+            lineage_conflicts = {
+                conflict for affected in (thread_id, *descendants)
+                for conflict in getattr(lineage.get(affected), "metadata_conflicts", ())
+            }
+            if lineage_conflicts:
+                blocker_codes.add("lineage_conflict")
+                blockers.extend(sorted(lineage_conflicts))
             desktop_title = next(
                 (
                     reference.title
@@ -548,21 +569,12 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 ),
                 None,
             )
-            if desktop_title is not None and summary.display_name is None:
+            if desktop_title is not None:
                 summary = replace(
                     summary,
-                    title=desktop_title,
                     display_name=desktop_title,
                     display_name_source=(
                         "codex-desktop.local_thread_catalog"
-                    ),
-                    metadata_sources=tuple(
-                        dict.fromkeys(
-                            (
-                                *summary.metadata_sources,
-                                "codex-desktop.local_thread_catalog",
-                            )
-                        )
                     ),
                 )
             all_records.append(
@@ -590,6 +602,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     )
     return SessionCatalog(
         records=records,
+        scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(
                 _deduplicate_frontend(unmapped),
@@ -822,6 +835,8 @@ def _read_rollouts_partial(
                         cwd=_display_string(payload.get("cwd")),
                         timestamp=_display_string(payload.get("timestamp")),
                         archived=archived,
+                        parent_thread_id=_display_string(payload.get("parent_thread_id")),
+                        thread_source=_display_string(payload.get("thread_source")),
                     )
                 )
             except Exception as exc:

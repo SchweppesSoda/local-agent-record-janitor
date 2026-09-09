@@ -51,6 +51,7 @@ class _LiveOperation:
     action_contexts: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
     completed_child_ids: frozenset[str] = field(default_factory=frozenset)
     result: dict[str, Any] | None = None
+    terminal_context: Any | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ class OperationCoordinator:
                 )
             operation = str(document["operation_id"])
             client_name = str(document["scope"]["client"])
+            codex_home = self._bound_codex_home(document, codex_home)
             live = self._live.get(operation)
             if live is not None:
                 # A plan followed by apply in one process already owns the
@@ -330,12 +332,92 @@ class OperationCoordinator:
                 "run", normalized_scope, "operation_context_unavailable",
                 operation_id=operation_id, blocker_code="operation_context_unavailable",
             )
-        return self._execute_live(
+        result = self._execute_live(
             live,
             timeout=float(timeout),
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
         )
+        return self._finish_native_run(live, result, timeout=float(timeout),
+            app_server_factory=app_server_factory, binary_resolver=binary_resolver)
+
+    def _finish_native_run(self, initial: _LiveOperation, result: dict[str, Any], **execution: Any) -> dict[str, Any]:
+        """Fresh, bounded residual plans; never retry a native deletion request."""
+        if initial.client != "native":
+            return result
+        allowed: set[tuple[str, str]] = set()
+        for action in initial.document.get("actions", ()):
+            target = action.get("target", {})
+            ids = {str(target.get("thread_id", ""))}
+            for key in ("affected_thread_ids", "descendant_thread_ids", "indexed_thread_ids"):
+                ids.update(action.get("impact", {}).get(key, ()))
+            allowed.update((str(target.get("storage_id")), value) for value in ids if value)
+        rounds = []
+        executed_batches = []
+        live = initial
+        seen: set[str] = set()
+        modified = False
+        started = False
+        for round_index in range(3):
+            modified |= bool(result.get("modified"))
+            started |= bool(result.get("mutation_started"))
+            executed_batches.extend(result.get("batches", ()))
+            rounds.append({"operation_id": live.operation_id, "plan_path": live.document["plan_path"],
+                "plan_sha256": live.document["plan_sha256"], "goal_status": result.get("goal_status")})
+            if result.get("goal_status") != "completed_with_residuals" or live.terminal_context is None:
+                break
+            context = live.terminal_context
+            candidates = []
+            for action in context.plan.actions:
+                target = action.target
+                if (str(target.storage_id), str(target.thread_id)) not in allowed:
+                    continue
+                if str(getattr(action.kind, "value", action.kind)) != "remove_desktop_state" or not action.available:
+                    continue
+                impacted = set(getattr(action.impact, "affected_thread_ids", ()) or (target.thread_id,))
+                if any((str(target.storage_id), str(value)) not in allowed for value in impacted):
+                    continue
+                candidates.append(action)
+            signature = json.dumps(sorted(str(action.action_id) for action in candidates))
+            if not candidates or signature in seen or round_index == 2:
+                break
+            seen.add(signature)
+            operation = self._new_operation_id(initial.client)
+            path = Path(initial.document["plan_path"]).with_name(operation + ".json")
+            next_scope = self._scope(None, client=initial.client,
+                record_ids=tuple(str(action.target.thread_id) for action in candidates),
+                projects=(), all_projects=False, engines=())
+            # The terminal context is already a fresh successful scan. Reuse
+            # it for the next immutable plan instead of repeating discovery.
+            document = self._make_plan_document(operation, next_scope, context, candidates, (),
+                plan_path=path, operation_home=None, codex_home=self._bound_codex_home(initial.document, None),
+                active_adapters=initial.adapters, action_contexts={})
+            write_new_json(path, document)
+            live = _LiveOperation(operation_id=operation, document=document, context=context,
+                candidates=tuple(candidates), client=initial.client, adapters=initial.adapters)
+            self._live[operation] = live
+            result = self._execute_live(live, **execution)
+        # A later plan can cover only the executable subset of the first
+        # round's residuals. Its success cannot discharge the original scope.
+        if result.get("goal_status") in {"complete", "completed_with_residuals"}:
+            try:
+                if live.terminal_context is None:
+                    raise OperationCoordinatorError("terminal verification context is unavailable")
+                remaining = self._residual_action_ids(initial.document, live.terminal_context)
+                result = self._result_document(initial.document, initial.document.get("scope", {}),
+                    goal_status="completed_with_residuals" if remaining else "complete",
+                    blockers=[self._blocker("residual_records", "approved records remain")] if remaining else [],
+                    batches=executed_batches, residuals=remaining, modified=modified, mutation_started=started)
+            except Exception as exc:
+                result = self._result_document(initial.document, initial.document.get("scope", {}),
+                    goal_status="unknown", blockers=[self._blocker("terminal_scan_incomplete", str(exc))],
+                    batches=executed_batches, modified=modified, mutation_started=started)
+        result = {**result, "modified": modified, "mutation_started": started,
+            "run_operation_id": initial.operation_id, "rounds": rounds}
+        manifest = Path(initial.document["plan_path"]).with_suffix(".run.json")
+        write_new_json(manifest, self._metadata(result))
+        result["run_receipt_path"] = str(manifest)
+        return result
 
     def status_operation(
         self,
@@ -392,6 +474,7 @@ class OperationCoordinator:
                     codex_home=codex_home,
                 )
                 client_name = str(document["scope"]["client"])
+                codex_home = self._bound_codex_home(document, codex_home)
                 source = None if adapters is None else tuple(adapters)
                 (
                     context,
@@ -434,6 +517,11 @@ class OperationCoordinator:
                     operation_id=operation_id, blocker_code="operation_verify_failed",
                 )
         if terminal is None:
+            try:
+                self._bound_codex_home(live.document, codex_home)
+            except OperationCoordinatorError as exc:
+                return self._result_document(live.document, dict(scope or {}), goal_status="blocked",
+                    blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=())
             terminal, error = self._terminal_context(live)
         if error is not None:
             return self._result_document(
@@ -480,6 +568,8 @@ class OperationCoordinator:
             goal_status="completed_with_residuals" if residuals else "complete",
             blockers=[self._blocker("residual_records", "approved records remain")] if residuals else [],
             batches=(), residuals=residuals,
+            modified=bool(self._status_for_document(live.document).get("modified")),
+            mutation_started=bool(self._status_for_document(live.document).get("mutation_started")),
         )
 
     @staticmethod
@@ -535,6 +625,51 @@ class OperationCoordinator:
                     scope=f"storage:{storage_id}",
                 ))
         return blockers
+
+    @staticmethod
+    def _bound_codex_home(document: Mapping[str, Any], supplied: Path | None) -> Path | None:
+        if document.get("scope", {}).get("client") != "native":
+            return supplied
+        paths = {canonical_path(str(item["path"])) for item in document.get("storages", ()) if item.get("path")}
+        if not paths:
+            raise OperationCoordinatorError("frozen_store_identity_invalid: native plan has no physical store")
+        if len(paths) > 1:
+            if supplied is not None:
+                raise OperationCoordinatorError("frozen_store_mismatch: a single home cannot override multiple frozen stores")
+            return None
+        path = Path(next(iter(paths)))
+        if supplied is not None and canonical_path(supplied) != canonical_path(path):
+            raise OperationCoordinatorError("frozen_store_mismatch: explicit Codex home differs from the approved store")
+        return path
+
+    @staticmethod
+    def _assert_store_coverage(document: Mapping[str, Any], context: Any) -> None:
+        involved = {str(b.get("storage_id")) for b in document.get("child_batches", ())}
+        fresh = {str(s.storage_id): s for s in getattr(context.plan, "storages", ())}
+        for approved in document.get("storages", ()):
+            key = str(approved.get("storage_id"))
+            if key not in involved:
+                continue
+            current = fresh.get(key)
+            status = getattr(current, "scan_status", None)
+            status = getattr(status, "value", status)
+            if (current is None or status != "ok" or
+                    canonical_path(current.path) != canonical_path(approved["path"])):
+                raise OperationCoordinatorError(f"terminal_scan_incomplete: approved store {key} was not successfully scanned")
+        resources = set(getattr(context, "frontend_scan_coverage", ()))
+        families = {
+            "remove_frontend_reference": ("frontend_database_paths", "sessions"),
+            "delete_frontend_session": ("frontend_session_database_paths", "sessions"),
+            "delete_project_item": ("frontend_project_database_paths", "projects"),
+        }
+        for action in document.get("actions", ()):
+            contract = families.get(action.get("kind"))
+            if contract is None:
+                continue
+            field, family = contract
+            paths = action.get("impact", {}).get(field, ())
+            if not paths or any((canonical_path(path), family) not in resources for path in paths):
+                raise OperationCoordinatorError("terminal_scan_incomplete: exact frontend database and discovery family were not successfully scanned")
 
     @staticmethod
     def _action_signature(
@@ -624,12 +759,64 @@ class OperationCoordinator:
     ) -> list[str]:
         """Map terminal residuals back to the immutable plan action IDs."""
 
+        cls._assert_store_coverage(document, context)
         frozen = cls._frozen_action_signatures(document)
         fresh = cls._fresh_action_signatures(context)
         residuals: list[str] = []
         for signature, action_ids in frozen.items():
             if signature in fresh:
                 residuals.extend(action_ids)
+        # Action families change after native deletion (e.g. Desktop state).
+        # Verify record identity, not disappearance of a former action type.
+        present = {(str(item.target.storage_id), str(item.target.thread_id))
+                   for item in getattr(context.plan, "conversations", ())}
+        present.update((sig[0], sig[3]) for sig in fresh)
+        native_actions = [a for a in document.get("actions", ())
+                          if a.get("kind") in {"delete_conversation", "remove_desktop_state"}]
+        ids_by_store: dict[str, set[str]] = {}
+        for action in native_actions:
+            target = action.get("target", {})
+            ids = {str(target.get("thread_id", ""))} - {""}
+            for key in ("affected_thread_ids", "descendant_thread_ids", "indexed_thread_ids"):
+                ids.update(str(value) for value in action.get("impact", {}).get(key, ()))
+            ids_by_store.setdefault(str(target.get("storage_id")), set()).update(ids)
+        # Catalog-free JSON references cannot be rediscovered as conversations.
+        # Ask for the exact frozen IDs, once per physical store.
+        from .codex_desktop_state import read_desktop_state
+        for storage in document.get("storages", ()):
+            key = str(storage.get("storage_id"))
+            ids = ids_by_store.get(key)
+            if ids:
+                snapshot = read_desktop_state(Path(storage["path"]), ids)
+                present.update((key, record_id) for record_id, state in snapshot.threads.items() if state.present)
+        for action in native_actions:
+            target = action.get("target", {})
+            impact = action.get("impact", {})
+            ids = {str(target.get("thread_id", ""))}
+            for key in ("affected_thread_ids", "descendant_thread_ids", "indexed_thread_ids"):
+                ids.update(str(value) for value in impact.get(key, ()))
+            if any((str(target.get("storage_id")), record_id) in present for record_id in ids):
+                residuals.append(str(action["action_id"]))
+        # A crash can leave only sidebar/mapping keys, without a registration
+        # from which normal discovery could construct an action.
+        from .native_project_cleanup import remaining_native_project_markers, verify_native_project_recovery
+        recovery_by_home: dict[str, list[Mapping[str, Any]]] = {}
+        for action in document.get("actions", ()):
+            if action.get("kind") == "delete_native_project":
+                evidence = action["impact"]["external_action_payload"]["native_project_evidence"]
+                recovery_by_home.setdefault(evidence["home"], []).append(evidence)
+        for home, items in recovery_by_home.items():
+            verify_native_project_recovery(Path(home), items)
+        for action in document.get("actions", ()):
+            if action.get("kind") != "delete_native_project":
+                continue
+            evidence = action["impact"]["external_action_payload"]["native_project_evidence"]
+            if remaining_native_project_markers(
+                Path(evidence["home"]), (evidence["project_id"],),
+                required_files=tuple(n for n, h in evidence["file_sha256"].items() if h),
+                mapped_ids=tuple(evidence["mapped_ids"]),
+            ):
+                residuals.append(str(action["action_id"]))
         return list(dict.fromkeys(residuals))
 
     def _persist_verified_child_journals(
@@ -850,6 +1037,7 @@ class OperationCoordinator:
             # every rollout twice before one plan is written.
             from .inventory import build_session_catalog
             from .manual_delete import build_manual_delete_plan
+            from .native_project_cleanup import merge_project_context
 
             catalog = build_session_catalog(selected)
             manual_plan = build_manual_delete_plan(catalog)
@@ -859,6 +1047,9 @@ class OperationCoordinator:
                     catalog,
                     manual_plan,
                 )
+                result = (merge_project_context(result[0], selected, self.service), *result[1:])
+                result = (replace(result[0], frontend_scan_coverage=tuple(
+                    (canonical_path(path), "sessions") for path in catalog.scanned_session_databases)), *result[1:])
                 return (*result, {}) if include_action_contexts else result
             context = self.service.prepare(
                 selected,
@@ -870,6 +1061,9 @@ class OperationCoordinator:
                 catalog=catalog,
                 manual_plan=manual_plan,
             )
+            result = (merge_project_context(result[0], selected, self.service), *result[1:])
+            result = (replace(result[0], frontend_scan_coverage=tuple(
+                (canonical_path(path), "sessions") for path in catalog.scanned_session_databases)), *result[1:])
             return (*result, {}) if include_action_contexts else result
         context = self.service.prepare(
             selected,
@@ -922,6 +1116,19 @@ class OperationCoordinator:
             inventory,
             client=client,
         )
+        # Successful scans remain evidence when their last actionable row is gone.
+        from .planning import StorageLocation, ScanStatus, storage_id_for_path
+        storages = list(context.plan.storages)
+        known = {str(item.storage_id) for item in storages}
+        for database in inventory.scanned_databases:
+            root = database.parent
+            key = storage_id_for_path(root)
+            if key not in known:
+                storages.append(StorageLocation(storage_id=key, label="Frontend database directory",
+                    path=root, scan_status=ScanStatus.OK))
+                known.add(key)
+        context = replace(context, plan=replace(context.plan, storages=tuple(storages)),
+                          frontend_scan_coverage=inventory.scanned_resources)
         engine_contexts = build_client_engine_contexts(
             adapters,
             client=client,
@@ -947,8 +1154,6 @@ class OperationCoordinator:
                 for action_id in target.action_ids
                 if str(action_id)
             }
-            if not target_action_ids:
-                continue
 
             def catalog_builder(
                 *,
@@ -978,8 +1183,6 @@ class OperationCoordinator:
                 for action in getattr(native_context, "actions", ())
                 if str(getattr(action, "action_id", "")) in target_action_ids
             )
-            if not native_actions:
-                continue
             native_contexts.append(native_context)
             for action in native_actions:
                 action_contexts[str(action.action_id)] = native_context
@@ -1519,6 +1722,11 @@ class OperationCoordinator:
         records = tuple(getattr(catalog, "records", ()))
         storage_hints: dict[str, Path | None] = {}
         storage_paths: dict[str, Path] = {}
+        for adapter in adapters:
+            home = getattr(adapter, "codex_home", None)
+            if home is not None:
+                home = Path(home).expanduser().absolute()
+                storage_paths[storage_id_for_path(home)] = home
         conversations: list[ConversationCatalogEntry] = []
         snapshot_records: list[RecordRef] = []
         for record in records:
@@ -1951,6 +2159,8 @@ class OperationCoordinator:
 
             def matches_record(action: Any, selector: str) -> bool:
                 identifiers = {str(action.target.thread_id)}
+                if kind_value(action) == "delete_native_project":
+                    return selector in identifiers  # No partial project IDs.
                 payload = getattr(
                     getattr(action, "impact", None),
                     "external_action_payload",
@@ -2029,6 +2239,9 @@ class OperationCoordinator:
                 ]
                 if matching:
                     matches.append(action)
+                    if str(getattr(action.kind, "value", action.kind)) == "delete_native_project":
+                        identities.add(str(action.target.storage_id) + ":" + str(action.target.thread_id))
+                        continue
                     identities.update(
                         self._project_identity(value) for value in matching
                     )
@@ -2080,6 +2293,9 @@ class OperationCoordinator:
             values = self._project_values(context, action)
             if not values:
                 continue
+            if str(getattr(action.kind, "value", action.kind)) == "delete_native_project":
+                selected.append(action)
+                continue
             path_values = tuple(
                 value
                 for value in values
@@ -2122,7 +2338,7 @@ class OperationCoordinator:
         if isinstance(payload, Mapping):
             keys = (
                 "cwd", "working_directory", "project", "project_path",
-                "project_id", "project_paths",
+                "project_id", "project_paths", "project_label",
             )
             for key in keys:
                 raw_value = payload.get(key)
@@ -2168,6 +2384,8 @@ class OperationCoordinator:
                     and str(details[key]).strip()
                 )
         values = tuple(dict.fromkeys(values))
+        if str(getattr(action.kind, "value", action.kind)) == "delete_native_project":
+            return values
         path_values = tuple(
             value for value in values if _looks_like_project_path(value)
         )
@@ -2291,7 +2509,7 @@ class OperationCoordinator:
                         "value",
                         getattr(action, "kind", ""),
                     )
-                ) == "delete_project_item"
+                ) in {"delete_project_item", "delete_native_project"}
                 and bool(getattr(action, "available", False))
                 for action in candidates
             ):
@@ -2415,7 +2633,7 @@ class OperationCoordinator:
                 "value",
                 getattr(action, "kind", ""),
             )
-        ) == "delete_project_item":
+        ) in {"delete_project_item", "delete_native_project"}:
             return "orphan_project"
         if str(
             getattr(
@@ -3384,8 +3602,11 @@ class OperationCoordinator:
                 outcome_doc = self._metadata(outcome)
                 statuses = self._outcome_statuses(outcome)
                 batch_unknown = "unknown" in statuses
+                batch_status = ("unknown" if batch_unknown else
+                    "completed_with_residuals" if "partial" in statuses else
+                    "blocked" if statuses.intersection({"not_deleted", "failed", "blocked", "unsupported"}) else "complete")
                 batch_modified = bool(
-                    statuses.intersection({"deleted", "cleaned", "repaired"})
+                    statuses.intersection({"deleted", "cleaned", "repaired", "partial"})
                     or getattr(outcome, "modified", False)
                 )
                 any_modified = any_modified or batch_modified
@@ -3418,7 +3639,7 @@ class OperationCoordinator:
                     "child_operation_id": child_id,
                     "storage_id": batch.storage_id,
                     "mutation_family": batch.mutation_family,
-                    "status": "unknown" if batch_unknown else "complete",
+                    "status": batch_status,
                     "action_ids": [str(action.action_id) for action in batch.actions],
                     "result": outcome_doc,
                 }
@@ -3427,12 +3648,12 @@ class OperationCoordinator:
                 store.append_event(
                     {
                         "event": "batch_finished",
-                        "goal_status": "unknown" if batch_unknown else "complete",
+                        "goal_status": batch_status,
                     },
                     state_updates={
                         "phase": "recovery_required" if batch_unknown else "finished",
-                        "goal_status": "unknown" if batch_unknown else "complete",
-                        "goal_satisfied": not batch_unknown,
+                        "goal_status": batch_status,
+                        "goal_satisfied": batch_status == "complete",
                         "modified": any_modified,
                         # The child journal records its own irreversible
                         # marker. The operation-level flag may already be
@@ -3564,6 +3785,7 @@ class OperationCoordinator:
             terminal, terminal_error = None, None
         else:
             terminal, terminal_error = self._terminal_context(live)
+        live.terminal_context = terminal if terminal_error is None else None
         residuals: list[str] = []
         if terminal_error is None and terminal is not None:
             try:
@@ -3632,7 +3854,7 @@ class OperationCoordinator:
             ))
         elif terminal_error is not None:
             goal = "unknown"
-        elif blocked_batches:
+        elif blocked_batches or any(batch.get("status") == "blocked" for batch in batch_results):
             goal = "blocked"
         elif residuals:
             goal = "completed_with_residuals"
@@ -3868,6 +4090,7 @@ class OperationCoordinator:
                         live.document.get("scope", {}).get("engines", ())
                     ),
                     include_action_contexts=True,
+                    codex_home=self._bound_codex_home(live.document, None),
                 )
             )
             return (
@@ -4127,6 +4350,11 @@ class OperationCoordinator:
     def _metadata(value: Any, *, key: str | None = None) -> Any:
         if key is not None and key.casefold() in _BODY_KEYS:
             return None
+        if key in {"title", "display_name", "thread_name", "name"}:
+            from .display_metadata import display_title
+            return display_title(value)
+        if key == "desktop_catalog_titles" and isinstance(value, (list, tuple)):
+            return [OperationCoordinator._metadata(item, key="title") for item in value]
         if isinstance(value, Mapping):
             result: dict[str, Any] = {}
             for name, raw in value.items():

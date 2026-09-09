@@ -147,6 +147,7 @@ def _mutation_family_tie_breaker(family: str) -> int:
         "remove_frontend_reference": 10,
         "delete_frontend_session": 11,
         "delete_project_item": 30,
+        "delete_native_project": 31,
         "remove_broken_relation": 20,
         "repair_legacy_index": 21,
     }.get(normalized, 99)
@@ -254,6 +255,7 @@ class CleanupContext:
     snapshot: StoreSnapshot
     plan: CleanupPlan
     actions: tuple[Action, ...]
+    frontend_scan_coverage: tuple[tuple[str, str], ...] = ()
     adapter_builder: AdapterBuilder | None = field(
         default=None,
         repr=False,
@@ -717,6 +719,8 @@ def _record_kind_for_action(candidate: Any, kind: MutationKind) -> RecordKind:
         return RecordKind.FRONTEND_REFERENCE
     if kind is MutationKind.DELETE_FRONTEND_SESSION:
         return RecordKind.FRONTEND_SESSION
+    if kind is MutationKind.DELETE_NATIVE_PROJECT:
+        return RecordKind.NATIVE_PROJECT
     if kind is MutationKind.REMOVE_DESKTOP_STATE:
         return RecordKind.DESKTOP_STATE
     if kind is MutationKind.DELETE_PI_SESSION:

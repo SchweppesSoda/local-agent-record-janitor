@@ -7,7 +7,7 @@ import sqlite3
 import stat
 from collections.abc import Iterable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,7 @@ def parse_thread_source(
 
     if isinstance(value, str):
         stripped = value.strip()
-        if stripped.lower() == "subagent":
+        if stripped.lower() in {"subagent", "guardian", "guardian_review"}:
             return ThreadSourceInfo(
                 is_subagent=True,
                 metadata_sources=(source_label,),
@@ -111,6 +111,161 @@ def parse_thread_source(
         metadata_sources=(source_label,),
         metadata_conflicts=tuple(conflicts),
     )
+
+
+def parse_thread_lineage(
+    source: object, *, parent_thread_id: object = None,
+    thread_source: object = None, source_label: str = "session_meta",
+) -> ThreadSourceInfo:
+    """Merge independent, structured lineage evidence without reading messages."""
+    info = parse_thread_source(source, source_label=f"{source_label}.source")
+    marker = parse_thread_source(thread_source, source_label=f"{source_label}.thread_source")
+    parent = _source_text(parent_thread_id)
+    parents = set(info.parent_thread_ids) | set(marker.parent_thread_ids)
+    conflicts = set(info.metadata_conflicts) | set(marker.metadata_conflicts)
+    sources = set(info.metadata_sources) | set(marker.metadata_sources)
+    if (info.is_subagent or parent) and thread_source not in (None, "") and not marker.is_subagent:
+        conflicts.add("thread_source conflicts with subagent source metadata")
+    if parent:
+        if parents and parents != {parent}:
+            conflicts.add("parent_thread_ids have conflicting source values")
+        parents.add(parent)
+        sources.add(f"{source_label}.parent_thread_id")
+    if len(parents) > 1:
+        conflicts.add("parent_thread_ids have conflicting source values")
+    return replace(
+        info, is_subagent=info.is_subagent or marker.is_subagent or bool(parent),
+        parent_thread_ids=tuple(sorted(parents)),
+        metadata_sources=tuple(sorted(sources)),
+        metadata_conflicts=tuple(sorted(conflicts)),
+    )
+
+
+def rollout_lineage(record: RolloutRecord) -> ThreadSourceInfo:
+    return parse_thread_lineage(
+        record.source, parent_thread_id=getattr(record, "parent_thread_id", None),
+        thread_source=getattr(record, "thread_source", None),
+    )
+
+
+def row_lineage(row: Any) -> ThreadSourceInfo:
+    row = row or {}
+    return parse_thread_lineage(row.get("source"), parent_thread_id=row.get("parent_thread_id"),
+        thread_source=row.get("thread_source"), source_label="threads")
+
+
+def source_lineage_evidence(row: Any, records: Iterable[RolloutRecord]) -> tuple[bool, set[str], list[str]]:
+    infos = [row_lineage(row), *(rollout_lineage(record) for record in records)]
+    return (any(info.is_subagent for info in infos),
+        {parent for info in infos for parent in info.parent_thread_ids},
+        sorted({source for info in infos for source in info.metadata_sources}))
+
+
+def indexed_rollout_parent_confirmed(
+    row: Any, records: Iterable[RolloutRecord], parent_id: str, codex_home: Path,
+) -> bool:
+    """Exact explicit-selection evidence for newer guardian metadata.
+
+    The native index must independently identify a subagent and its sole
+    rollout. The rollout's structured top-level parent is authoritative when
+    the index does not duplicate it. Conflicting or nested-only evidence does
+    not qualify. Callers must additionally prove the parent absent and freeze
+    the complete descendant scope.
+    """
+    records = tuple(records)
+    if not row or len(records) != 1 or not parent_id:
+        return False
+    record = records[0]
+    if getattr(record, "parent_thread_id", None) != parent_id:
+        return False
+    indexed = row_lineage(row)
+    rollout = rollout_lineage(record)
+    role = parse_thread_source(row.get("source")).is_subagent or parse_thread_source(row.get("thread_source")).is_subagent
+    if (not role or indexed.metadata_conflicts or rollout.metadata_conflicts
+            or set(indexed.parent_thread_ids) - {parent_id}
+            or set(rollout.parent_thread_ids) != {parent_id}):
+        return False
+    raw_path = row.get("rollout_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return False
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = codex_home / path
+    return (row.get("id", record.thread_id) == record.thread_id and path.is_file()
+            and canonical_existing_path_key(path) == canonical_existing_path_key(record.path))
+
+
+def read_native_lineage(
+    codex_home: Path, *, rollout_records: Iterable[RolloutRecord] | None = None,
+    strict: bool = True,
+) -> dict[str, ThreadSourceInfo]:
+    """One lineage contract for inventory, planning and targeted verification."""
+    evidence: dict[str, list[ThreadSourceInfo]] = {}
+    database = codex_home / "state_5.sqlite"
+    if database.is_file():
+        try:
+            with closing(connect_readonly(database)) as connection:
+                if table_exists(connection, "threads"):
+                    columns = {r["name"] for r in connection.execute("PRAGMA table_info(threads)")}
+                    fields = [name for name in ("id", "source", "thread_source", "parent_thread_id") if name in columns]
+                    if "id" not in fields:
+                        raise CodexStateReadError("threads is missing id")
+                    for raw in connection.execute("SELECT " + ", ".join(fields) + " FROM threads"):
+                        row = dict(raw)
+                        evidence.setdefault(row["id"], []).append(parse_thread_lineage(
+                            row.get("source"), parent_thread_id=row.get("parent_thread_id"),
+                            thread_source=row.get("thread_source"), source_label="threads",
+                        ))
+                if table_exists(connection, "thread_spawn_edges"):
+                    columns = {r["name"] for r in connection.execute("PRAGMA table_info(thread_spawn_edges)")}
+                    missing = {"parent_thread_id", "child_thread_id"} - columns
+                    if missing:
+                        if strict:
+                            raise CodexStateReadError("thread_spawn_edges is missing " + ", ".join(sorted(missing)))
+                        continue_edges = False
+                    else:
+                        continue_edges = True
+                    for row in (connection.execute("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges") if continue_edges else ()):
+                        if _source_text(row["parent_thread_id"]) and _source_text(row["child_thread_id"]):
+                            evidence.setdefault(row["child_thread_id"], []).append(ThreadSourceInfo(
+                                is_subagent=True, parent_thread_ids=(row["parent_thread_id"],),
+                                metadata_sources=("thread_spawn_edges",),
+                            ))
+        except (sqlite3.Error, OSError) as exc:
+            if strict:
+                raise CodexStateReadError(f"Could not inspect native lineage in {database}: {exc}") from exc
+    records = iter_rollouts(codex_home) if rollout_records is None else rollout_records
+    for record in records:
+        evidence.setdefault(record.thread_id, []).append(rollout_lineage(record))
+    result: dict[str, ThreadSourceInfo] = {}
+    for child, infos in evidence.items():
+        parents = {parent for info in infos for parent in info.parent_thread_ids}
+        conflicts = {value for info in infos for value in info.metadata_conflicts}
+        if len(parents) > 1:
+            conflicts.add("parent_thread_ids have conflicting source values")
+        if child in parents:
+            conflicts.add("thread cannot be its own parent")
+        result[child] = ThreadSourceInfo(
+            is_subagent=any(info.is_subagent for info in infos),
+            parent_thread_ids=tuple(sorted(parents)),
+            metadata_sources=tuple(sorted({s for info in infos for s in info.metadata_sources})),
+            metadata_conflicts=tuple(sorted(conflicts)),
+        )
+    # A cycle cannot be safely interpreted as a deletion tree.
+    for child in result:
+        pending = list(result[child].parent_thread_ids)
+        seen: set[str] = set()
+        while pending:
+            parent = pending.pop()
+            if parent == child:
+                info = result[child]
+                result[child] = replace(info, metadata_conflicts=tuple(sorted(set(info.metadata_conflicts) | {"cyclic parent relationship"})))
+                break
+            if parent not in seen:
+                seen.add(parent)
+                if parent in result:
+                    pending.extend(result[parent].parent_thread_ids)
+    return result
 
 
 def scan_rollouts(codex_home: Path) -> dict[str, RolloutRecord]:
@@ -221,6 +376,8 @@ def rollout_state_fingerprint(record: RolloutRecord) -> str:
         "originator": record.originator,
         "path": canonical_existing_path_key(record.path),
         "source": record.source,
+        "parent_thread_id": record.parent_thread_id,
+        "thread_source": record.thread_source,
         "st_dev": stat_result.st_dev,
         "st_ino": stat_result.st_ino,
         "st_mtime_ns": stat_result.st_mtime_ns,
@@ -251,61 +408,10 @@ def read_spawn_descendants(
         return {}
 
     graph: dict[str, set[str]] = {}
-    state_db = codex_home / "state_5.sqlite"
-    if state_db.is_file():
-        try:
-            with closing(connect_readonly(state_db)) as connection:
-                if table_exists(connection, "thread_spawn_edges"):
-                    columns = {
-                        row["name"]
-                        for row in connection.execute(
-                            "PRAGMA table_info(thread_spawn_edges)"
-                        )
-                        if isinstance(row["name"], str)
-                    }
-                    required_columns = {
-                        "parent_thread_id",
-                        "child_thread_id",
-                    }
-                    missing_columns = sorted(required_columns - columns)
-                    if missing_columns and strict:
-                        raise CodexStateReadError(
-                            f"{state_db} is incompatible: table "
-                            "'thread_spawn_edges' is missing column(s) "
-                            f"{', '.join(missing_columns)}"
-                        )
-                    if not missing_columns:
-                        rows = connection.execute(
-                            """
-                            SELECT parent_thread_id, child_thread_id
-                            FROM thread_spawn_edges
-                            """
-                        ).fetchall()
-                        for row in rows:
-                            parent = row["parent_thread_id"]
-                            child = row["child_thread_id"]
-                            if (
-                                isinstance(parent, str)
-                                and parent
-                                and isinstance(child, str)
-                                and child
-                            ):
-                                graph.setdefault(parent, set()).add(child)
-        except sqlite3.Error as exc:
-            if strict:
-                raise CodexStateReadError(
-                    f"Could not inspect spawn edges in {state_db}: {exc}"
-                ) from exc
-
-    # Some Codex versions retain the relationship only in session metadata.
-    records = (
-        iter_rollouts(codex_home)
-        if rollout_records is None
-        else rollout_records
-    )
-    for record in records:
-        for parent in _source_parent_ids(record.source):
-            graph.setdefault(parent, set()).add(record.thread_id)
+    lineage = read_native_lineage(codex_home, rollout_records=rollout_records, strict=strict)
+    for child, info in lineage.items():
+        for parent in info.parent_thread_ids:
+            graph.setdefault(parent, set()).add(child)
 
     descendants: dict[str, set[str]] = {}
     for root in roots:
@@ -338,63 +444,12 @@ def read_spawn_edges(
     if not target_ids:
         return set()
 
-    edges: set[tuple[str, str]] = set()
-    state_db = codex_home / "state_5.sqlite"
-    if state_db.is_file():
-        try:
-            with closing(connect_readonly(state_db)) as connection:
-                if table_exists(connection, "thread_spawn_edges"):
-                    columns = {
-                        row["name"]
-                        for row in connection.execute(
-                            "PRAGMA table_info(thread_spawn_edges)"
-                        )
-                        if isinstance(row["name"], str)
-                    }
-                    required = {"parent_thread_id", "child_thread_id"}
-                    missing = sorted(required - columns)
-                    if missing and strict:
-                        raise CodexStateReadError(
-                            f"{state_db} is incompatible: table "
-                            "'thread_spawn_edges' is missing column(s) "
-                            f"{', '.join(missing)}"
-                        )
-                    if not missing:
-                        for row in connection.execute(
-                            """
-                            SELECT parent_thread_id, child_thread_id
-                            FROM thread_spawn_edges
-                            """
-                        ):
-                            parent = row["parent_thread_id"]
-                            child = row["child_thread_id"]
-                            if (
-                                isinstance(parent, str)
-                                and parent
-                                and isinstance(child, str)
-                                and child
-                                and (
-                                    parent in target_ids
-                                    or child in target_ids
-                                )
-                            ):
-                                edges.add((parent, child))
-        except sqlite3.Error as exc:
-            if strict:
-                raise CodexStateReadError(
-                    f"Could not inspect spawn edges in {state_db}: {exc}"
-                ) from exc
-
-    records = (
-        iter_rollouts(codex_home)
-        if rollout_records is None
-        else rollout_records
-    )
-    for record in records:
-        for parent in _source_parent_ids(record.source):
-            if parent in target_ids or record.thread_id in target_ids:
-                edges.add((parent, record.thread_id))
-    return edges
+    lineage = read_native_lineage(codex_home, rollout_records=rollout_records, strict=strict)
+    return {
+        (parent, child) for child, info in lineage.items()
+        for parent in info.parent_thread_ids
+        if parent in target_ids or child in target_ids
+    }
 
 
 def read_spawn_edge_records(
@@ -501,6 +556,8 @@ def _read_rollout_meta(path: Path, *, archived: bool) -> RolloutRecord | None:
         cwd=_optional_string(payload.get("cwd")),
         timestamp=_optional_string(payload.get("timestamp")),
         archived=archived,
+        parent_thread_id=_optional_string(payload.get("parent_thread_id")),
+        thread_source=_optional_string(payload.get("thread_source")),
     )
 
 
@@ -547,6 +604,7 @@ def read_thread_index(
                     "updated_at",
                     "source",
                     "thread_source",
+                    "parent_thread_id",
                 )
             )
             rows = connection.execute(
@@ -569,6 +627,7 @@ def read_thread_index(
 
 
 _THREAD_METADATA_COLUMNS = (
+    "parent_thread_id",
     "rollout_path",
     "archived",
     "source",

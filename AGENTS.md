@@ -109,3 +109,12 @@ schema, immutable row evidence, an exact affected-row count, and post-write
 verification. Successful verification deletes the temporary copy immediately.
 Never offer `repair_index_path` or `quarantine_artifacts`: keep the record, or
 delete the whole verified record and every approved copy.
+
+Official native local-environment registrations are supported through the
+high-level `delete_native_project` family only when the exact JSON schema,
+missing local roots and absence of native project/thread references are proven.
+The main global-state file and its existing `.bak` form one frozen batch. Keep
+existing project directories and unknown references inventory-only. Use exact
+project IDs for selective cleanup; do not call `thread/delete` on a project ID.
+Recovery verification must prove the frozen before/after state before deleting
+temporary evidence or declaring completion. See `docs/native-project-cleanup.md`.

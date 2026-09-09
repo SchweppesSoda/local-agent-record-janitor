@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -499,6 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(records)
     _add_operation_scope_arguments(records)
+    records.add_argument("--inspect-clients", action="store_true", help="附带只读进程归属证据；区分目标客户端与其他存储的进程")
 
     delete = subparsers.add_parser(
         "delete",
@@ -1214,6 +1216,11 @@ def _metadata_only(value: Any, *, key: str | None = None) -> Any:
 
     if key is not None and key.lower() in _OPERATION_BODY_KEYS:
         return None
+    if key in {"title", "display_name", "thread_name", "name"}:
+        from .display_metadata import display_title
+        return display_title(value)
+    if key == "desktop_catalog_titles" and isinstance(value, (list, tuple)):
+        return [_metadata_only(item, key="title") for item in value]
     if isinstance(value, Mapping):
         return {
             str(name): cleaned
@@ -2659,11 +2666,11 @@ def _run_client_records(
             stderr=stderr,
         )
 
-    selected_ids = {
-        value
-        for target in selected
-        for value in target.identifiers
-    }
+    def selection_key(target: Any) -> tuple[Any, ...]:
+        return (target.client, target.engine,
+            target.record_key.value if target.record_key else None,
+            target.native_thread_id, tuple(target.frontend_reference_ids))
+    selected_ids = {selection_key(target) for target in selected}
     selected_projects = {
         target.project_key.stable_id
         for target in selected
@@ -2692,13 +2699,8 @@ def _run_client_records(
     for context in contexts:
         for target in context.targets:
             if has_scope:
-                target_ids = set(target.identifiers)
-                if not target_ids.intersection(selected_ids):
-                    if (
-                        target.project_key is None
-                        or target.project_key.stable_id not in selected_projects
-                    ):
-                        continue
+                if selection_key(target) not in selected_ids:
+                    continue
             project = target.project_key
             store = target_store(target, context)
             project_id = project.stable_id if project is not None else "<projectless>"
@@ -2715,7 +2717,7 @@ def _run_client_records(
                         name: 0 for name in _CLIENT_RECORD_CLASSIFICATIONS
                     },
                     "targets": [],
-                    "native_record_count": len(context.native_records),
+                    "native_record_count": 0,
                 },
             )
             locations = group_locations.setdefault(key, set())
@@ -2730,6 +2732,7 @@ def _run_client_records(
                     locations.add(canonical_existing_path_key(Path(session.database)))
             target_payload = _metadata_only(target.to_dict())
             group["targets"].append(target_payload)
+            group["native_record_count"] += int(target.record_key is not None)
             rendered_targets.append(target_payload)
             classification = str(target.classification.value)
             if classification not in group["classifications"]:
@@ -2784,7 +2787,8 @@ def _run_client_records(
         "command": "records",
         "client": client,
         "engines": [context.engine for context in contexts],
-        "projects": [project.to_dict() for project in inventory.projects],
+        "projects": [project.to_dict() for project in inventory.projects
+                     if not has_scope or project.stable_id in selected_projects],
         "groups": list(groups.values()),
         "targets": rendered_targets,
         "records": rendered_targets,
@@ -2796,14 +2800,19 @@ def _run_client_records(
         "frontend_sessions": [
             _metadata_only(session.to_dict())
             for session in inventory.frontend_sessions
+            if not has_scope or f"{session.platform}:{session.platform_session_id}" in {
+                ref for target in selected for ref in target.frontend_reference_ids
+            }
         ],
         "unmapped_frontend_sessions": [
             _metadata_only(session.to_dict())
             for session in inventory.unmapped_frontend_sessions
+            if not has_scope
         ],
         "frontend_snapshots": [
             _metadata_only(snapshot.to_dict())
             for snapshot in inventory.frontend_snapshots
+            if not has_scope
         ],
         "errors": [
             _metadata_only(error.to_dict()) for error in inventory.errors
@@ -2826,6 +2835,18 @@ def _run_client_records(
             for error in relevant_errors
         ],
     }
+    payload["snapshot_id"] = "inventory:v1:" + hashlib.sha256(
+        json.dumps(rendered_targets, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    if getattr(args, "inspect_clients", False):
+        from .codex_desktop_state import inspect_client_ownership
+        roots = {Path(target.record_key.store.path) for target in selected if target.record_key is not None}
+        payload["client_ownership"] = []
+        for root in sorted(roots, key=str):
+            try:
+                payload["client_ownership"].append(inspect_client_ownership(root, owner_client=client))
+            except Exception as exc:
+                payload["client_ownership"].append({"owner_process_root": str(root), "clients_closed": None, "error": str(exc)})
     if args.json:
         _write_json(payload, stdout)
         return EXIT_OK if not relevant_errors else EXIT_ERROR
@@ -2842,7 +2863,8 @@ def _run_client_records(
             f"  [{target.get('classification', 'unknown')}] "
             f"引擎={target.get('engine')} "
             f"项目={project.get('display_name') or project.get('value') or '-'} "
-            f"记录={target.get('record_id') or '-'}\n"
+            f"记录={target.get('record_id') or '-'} "
+            f"标题={target.get('display_name') or '（无标题）'}\n"
         )
     for blocker in payload["blockers"]:
         stderr.write(
@@ -2987,8 +3009,14 @@ def _build_native_client_contexts(
                 value for value in action_ids
                 if value and value != "None"
             ),
-            blocker_codes=(),
-            blockers=(),
+            blocker_codes=tuple(getattr(record, "blocker_codes", ()) or ()),
+            blockers=tuple({"blocker_code": "record_blocked", "message": str(value)}
+                           for value in (getattr(record, "blockers", ()) or ())),
+            display_name=getattr(getattr(record, "summary", record), "display_name", None),
+            display_name_source=getattr(getattr(record, "summary", record), "display_name_source", None),
+            is_subagent=bool(getattr(getattr(record, "summary", record), "is_subagent", False)),
+            parent_thread_ids=tuple(getattr(getattr(record, "summary", record), "parent_thread_ids", ()) or ()),
+            descendant_thread_ids=tuple(getattr(record, "descendant_thread_ids", ()) or ()),
         )
         targets.append(target)
     catalog_records = tuple(
@@ -3051,6 +3079,22 @@ def _build_native_client_contexts(
         native_catalog=catalog,
         capability=capability,
     )
+    if client == "native" and engine == "codex":
+        from dataclasses import replace
+        from .native_project_cleanup import append_native_inventory
+
+        original_count = len(inventory.targets)
+        inventory = append_native_inventory(inventory, adapters)
+        additional = inventory.targets[original_count:]
+        contexts = [replace(context, inventory=inventory)]
+        for supported in (False, True):
+            group = tuple(t for t in additional if t.capability.frontend_project_delete == supported)
+            if group:
+                contexts.append(ClientEngineContext(
+                    inventory=inventory, engine=engine, targets=group,
+                    frontend_sessions=(), native_catalog=None, capability=group[0].capability,
+                ))
+        return inventory, tuple(contexts)
     return inventory, (context,)
 
 

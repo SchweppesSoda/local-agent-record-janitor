@@ -14,6 +14,10 @@ remain `inventory_only`.
 
 ## Commands
 
+The `native` client also supports exact stale local-environment registrations
+through the independent `delete_native_project` family. See
+[the supported schema and recovery contract](native-project-cleanup.md).
+
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
@@ -97,7 +101,40 @@ transaction together with their supported message, FTS, embedding/vector, and
 session-owned dependency rows. `active`, `archived`, and unproven schemas are
 inventory/protection evidence, not deletion candidates.
 
-## Compatibility boundary
+## Official Desktop inventory and completion
+
+Select the official native `CODEX_HOME` explicitly when the caller itself runs
+inside Cindy. `records --inspect-clients` adds read-only process ownership
+evidence (PID, parent PID, executable and store relation); process names alone
+do not identify which store is open. Apply and verify restore the frozen native
+store when a plan is supplied and reject a conflicting explicit home.
+
+Record output contains the Desktop catalog's UI display title when available,
+its source, the full stable record ID, parent/descendant IDs and a snapshot ID.
+Project and record filters restrict both displayed rows and grouped counts.
+Temporary labels such as M14 belong to the inventory that produced them; resolve
+them to full IDs before generating an immutable plan. Titles containing known
+automatic-review history wrappers are displayed as `自动审查记录`; other long
+display strings are bounded without changing identity fingerprints.
+
+The lineage graph combines native spawn edges, structured source metadata and
+top-level `parent_thread_id`/`thread_source` fields. Conflicting parents, roles
+and cycles block deletion. An explicitly selected guardian whose parent is
+absent can be deleted when its sole rollout matches its native index, the index
+independently marks it as a subagent, and the rollout proves one top-level
+parent. This exception does not enter automatic orphan cleanup and does not
+allow an orphan with remaining descendants.
+
+`delete apply` executes one immutable operation. Native `delete run` may create
+fresh plans for supported Desktop residuals within the original frozen record
+set, up to three rounds. It never resends an unknown native delete. Each round
+has a new operation ID/hash; the run receipt retains every round and verifies
+the entire original scope. Partial native results remain residuals, and exact
+global-state references count even when the Desktop catalog row is gone.
+An empty scan proves completion only for the exact successfully scanned store;
+frontend databases additionally require the matching discovery family.
+
+## Legacy commands
 
 The older `agent doctor/plan/apply/status/verify` commands remain available
 for integrations that need one exact `CODEX_HOME` and one mutation family.
