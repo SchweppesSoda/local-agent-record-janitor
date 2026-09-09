@@ -819,7 +819,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_arguments(
         agent_plan,
         codex_only=False,
-        allow_thread_selector=False,
+        allow_thread_selector=True,
     )
     agent_plan.add_argument(
         "--action-id",

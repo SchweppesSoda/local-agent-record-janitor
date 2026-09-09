@@ -301,8 +301,15 @@ def _run_plan(
             if storage is not None
             and str(action.target.storage_id) == str(storage.storage_id)
         ]
+        selection_blockers = list(context.get("selection_blockers", ()))
+        if context.get("session_engine") is None:
+            target_actions, native_blockers = _select_native_target_actions(
+                target_actions,
+                tuple(getattr(args, "thread_id", ()) or ()),
+            )
+            selection_blockers.extend(native_blockers)
         mutation_kind, selected_actions = _next_frozen_batch(target_actions)
-        if not context["plan"].scan_complete:
+        if not context["plan"].scan_complete or selection_blockers:
             mutation_kind, selected_actions = None, []
         scan_options = _scan_options(args, context["platforms"])
         if context.get("session_engine") is not None:
@@ -317,7 +324,7 @@ def _run_plan(
             selected_actions=selected_actions,
             mutation_kind=mutation_kind,
             scan_options=scan_options,
-            additional_blockers=context.get("selection_blockers", ()),
+            additional_blockers=selection_blockers,
         )
         write_new_json(output_path, document)
         _write_document(
@@ -1779,6 +1786,62 @@ def _next_frozen_batch(actions: Sequence[Any]) -> tuple[str | None, list[Any]]:
     return None, []
 
 
+def _select_native_target_actions(
+    actions: Sequence[Any],
+    selectors: Sequence[str],
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    if not selectors:
+        return list(actions), []
+
+    thread_ids = sorted(
+        {
+            str(action.target.thread_id)
+            for action in actions
+            if str(action.target.thread_id)
+        }
+    )
+    selected_thread_ids: set[str] = set()
+    blockers: list[dict[str, Any]] = []
+    for raw_selector in selectors:
+        selector = str(raw_selector).strip()
+        matches = [
+            thread_id
+            for thread_id in thread_ids
+            if thread_id == selector or thread_id.startswith(selector)
+        ]
+        if len(matches) == 1:
+            selected_thread_ids.add(matches[0])
+            continue
+        blocker_code = (
+            "native_thread_selector_not_found"
+            if not matches
+            else "native_thread_selector_ambiguous"
+        )
+        blockers.append(
+            structured_blocker(
+                blocker_code,
+                scope=f"thread_selector:{selector}",
+                retryable=True,
+                remediation=(
+                    "Run a fresh read-only inventory and provide one complete "
+                    "thread ID or a unique prefix from this exact native store."
+                ),
+                message=(
+                    "No cleanup action matches this selector."
+                    if not matches
+                    else "Selector matches multiple native thread identities."
+                ),
+            )
+        )
+    if blockers:
+        return [], blockers
+    return [
+        action
+        for action in actions
+        if str(action.target.thread_id) in selected_thread_ids
+    ], []
+
+
 def _load_authorized_plan(
     path: Path,
     authorized_hash: str,
@@ -2090,7 +2153,7 @@ def _args_from_scan_options(plan: Mapping[str, Any]) -> argparse.Namespace:
         "action_id": list(options.get("action_ids") or []),
         "session_id": list(options.get("session_ids") or []),
         "agent_command": "apply_context",
-        "thread_id": [],
+        "thread_id": list(options.get("thread_ids") or []),
         "json": True,
         "limit": 0,
     }
@@ -2127,10 +2190,13 @@ def _scan_options(args: argparse.Namespace, platforms: Sequence[str]) -> dict[st
         result["target_home"] = str(_target_home(args))
     action_ids = list(getattr(args, "action_id", ()) or ())
     session_ids = list(getattr(args, "session_id", ()) or ())
+    thread_ids = list(getattr(args, "thread_id", ()) or ())
     if action_ids:
         result["action_ids"] = action_ids
     if session_ids:
         result["session_ids"] = session_ids
+    if thread_ids:
+        result["thread_ids"] = thread_ids
     return result
 
 
