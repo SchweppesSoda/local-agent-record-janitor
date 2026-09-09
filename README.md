@@ -294,7 +294,7 @@ local-agent-record-janitor agent verify --operation-id '<operation-id>' `
 Agent 命令只输出 JSON、不读取 stdin；计划只授权一个不可变动作批次。省略 `--out`
 时，计划写入用户状态目录而不是项目根目录；显式指定的计划文件由调用方管理。`apply`
 在触发修改前持久化 mutation gate，结果为 `unknown` 时会拒绝重复发送删除，只能通过
-`status`/`verify` 收口。已知终态只保留最长 7 天、无正文的最小回执。完整约定见 [AGENTS.md](AGENTS.md) 和
+`status`/`verify` 收口。已知终态只保留最长 7 天、无正文的最小回执。维护入口见 [AGENTS.md](AGENTS.md)，实际清理约定见 [operation contract](docs/agent-operation-contract.md) 和
 [Agent automation protocol](docs/agent-automation.md)。
 
 列出当前支持适配器可见的正常/异常 Codex thread 及 Cindy/AionUI frontend reference：

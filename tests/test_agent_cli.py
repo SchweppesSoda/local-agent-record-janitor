@@ -233,6 +233,64 @@ class AgentCliTests(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
+    def test_native_plan_thread_selector_skips_unrelated_higher_priority_action(self) -> None:
+        write_rollout(self.codex_home, "unrelated-native-thread", originator="test")
+        selected_thread_id = "selected-desktop-reference"
+        self.install_desktop_orphan(selected_thread_id)
+        (self.codex_home / ".codex-global-state.json").unlink()
+        plan_path = self.root / "selected-native-plan.json"
+
+        code, summary, _ = self.invoke(
+            (
+                "agent", "plan", "--operation", "purge", "--platform", "native",
+                "--codex-home", str(self.codex_home), "--thread-id",
+                selected_thread_id, "--out", str(plan_path),
+            )
+        )
+
+        self.assertEqual(code, 0)
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+        self.assertEqual(summary["mutation_kind"], "remove_desktop_state")
+        self.assertEqual(
+            document["authorization"]["mutation_kind"],
+            "remove_desktop_state",
+        )
+        self.assertEqual(
+            {
+                action["thread_id"]
+                for action in document["authorization"]["root_actions"]
+            },
+            {selected_thread_id},
+        )
+        self.assertEqual(
+            document["scan_options"]["thread_ids"],
+            [selected_thread_id],
+        )
+
+    def test_native_plan_missing_thread_selector_fails_closed(self) -> None:
+        write_rollout(self.codex_home, "unrelated-native-thread", originator="test")
+        plan_path = self.root / "missing-native-plan.json"
+
+        code, summary, _ = self.invoke(
+            (
+                "agent", "plan", "--operation", "purge", "--platform", "native",
+                "--codex-home", str(self.codex_home), "--thread-id", "missing",
+                "--out", str(plan_path),
+            )
+        )
+
+        self.assertEqual(code, 0)
+        document = json.loads(plan_path.read_text(encoding="utf-8"))
+        self.assertFalse(summary["authorization_required"])
+        self.assertEqual(document["authorization"]["root_actions"], [])
+        self.assertIn(
+            "native_thread_selector_not_found",
+            {
+                blocker["blocker_code"]
+                for blocker in document["authorization"]["blockers"]
+            },
+        )
+
     def test_empty_plan_is_rescanned_before_it_can_complete(self) -> None:
         plan_path = self.root / "empty-race-plan.json"
         code, summary, _ = self.invoke(

@@ -42,6 +42,12 @@ store. `--out PLAN.json` is optional:
   directory, never the project root;
 - the command returns the exact `plan_path` and `plan_sha256`.
 
+For one native store, repeat `--thread-id ID_OR_UNIQUE_PREFIX` to freeze only
+actions whose root thread identity matches every supplied selector. Any missing
+or ambiguous selector blocks the plan instead of falling back to the unscoped
+purge batch. The selected actions must still form one physical-store mutation
+family; later families require a fresh plan.
+
 The plan contains structured identities, exact scopes, counts, fingerprints,
 and blockers, but no chat message bodies. Its SHA-256 is calculated over the
 canonical UTF-8 JSON object without the top-level `plan_sha256` field.
