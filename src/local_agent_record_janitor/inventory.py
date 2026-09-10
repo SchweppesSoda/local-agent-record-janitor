@@ -424,8 +424,10 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
         cascade_unknown = not state_edge_complete or bool(rollout_errors)
         # A successful empty scan is evidence too. Do not infer coverage from
         # the remaining records: the final native row may just have been deleted.
+        state_file = home / "state_5.sqlite"
         if (home.is_dir() and not cascade_unknown
-                and not any(failure.blocks_delete for failure in home_errors)):
+                and not any(failure.blocks_delete for failure in home_errors)
+                and state_file.is_file() and not state_file.is_symlink()):
             scanned_native_homes.add(home)
         blocking_messages = tuple(
             sorted(

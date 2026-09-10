@@ -58,6 +58,12 @@ class CindyEmptyCompletionTests(unittest.TestCase):
             catalog = build_session_catalog((NativeIntegrityAdapter(codex_home=home),))
             self.assertEqual(catalog.scanned_native_homes, ())
 
+    def test_existing_home_without_state_database_is_not_successful_coverage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            catalog = build_session_catalog((NativeIntegrityAdapter(codex_home=home),))
+            self.assertEqual(catalog.scanned_native_homes, ())
+
 
 if __name__ == "__main__":
     unittest.main()
