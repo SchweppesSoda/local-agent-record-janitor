@@ -1307,17 +1307,48 @@ class OperationCoordinator:
             str(action.action_id): manual_actions[str(action.action_id)]
             for action in candidates if str(action.action_id) in manual_actions
         }
-        covered = {
-            action_id
-            for action_id, child in selected.items()
+
+        # A selected action can only be covered by a parent in the same
+        # physical Codex store whose cascade explicitly names that child's
+        # thread.  Index that relation by the storage-qualified descendant
+        # key so a large flat selection does not compare every pair.  The
+        # path identity is deliberately scoped to this planning phase: it
+        # avoids a global security-identity cache while still reusing the
+        # proof for each action below.
+        home_keys: dict[str, str] = {}
+        storage_by_action: dict[str, str] = {}
+        affected_by_action: dict[str, set[str]] = {}
+
+        def storage_key(action_id: str, action: Any) -> str:
+            raw_home = os.fspath(action.codex_home)
+            if raw_home not in home_keys:
+                home_keys[raw_home] = canonical_path(action.codex_home)
+            storage_by_action[action_id] = home_keys[raw_home]
+            return home_keys[raw_home]
+
+        for action_id, action in selected.items():
+            storage_key(action_id, action)
+            affected_by_action[action_id] = set(action.affected_thread_ids)
+
+        parents_by_descendant: dict[tuple[str, str], list[tuple[str, set[str]]]] = {}
+        for parent_id, parent in selected.items():
+            key = storage_by_action[parent_id]
+            parent_affected = affected_by_action[parent_id]
+            for descendant_id in parent.descendants:
+                parents_by_descendant.setdefault((key, descendant_id), []).append(
+                    (parent_id, parent_affected)
+                )
+
+        covered: set[str] = set()
+        for action_id, child in selected.items():
+            key = (storage_by_action[action_id], child.thread_id)
+            child_affected = affected_by_action[action_id]
             if any(
                 parent_id != action_id
-                and canonical_path(parent.codex_home) == canonical_path(child.codex_home)
-                and child.thread_id in parent.descendants
-                and set(child.affected_thread_ids).issubset(parent.affected_thread_ids)
-                for parent_id, parent in selected.items()
-            )
-        }
+                and child_affected.issubset(parent_affected)
+                for parent_id, parent_affected in parents_by_descendant.get(key, ())
+            ):
+                covered.add(action_id)
         covered_references: set[str] = set()
         retained_references: set[str] = set()
         for action_id, manual in selected.items():
