@@ -19,6 +19,8 @@ from local_agent_record_janitor.codex_desktop_state import (
     read_desktop_state,
 )
 from local_agent_record_janitor.inventory import build_session_catalog
+from local_agent_record_janitor.cleanup_service import CleanupService
+from local_agent_record_janitor.operation_coordinator import OperationCoordinator
 from local_agent_record_janitor.models import Finding
 from local_agent_record_janitor.planning import ActionKind, RiskLevel, build_cleanup_plan
 
@@ -75,6 +77,108 @@ class CodexDesktopStateTests(unittest.TestCase):
 
     def adapter(self) -> NativeIntegrityAdapter:
         return NativeIntegrityAdapter(codex_home=self.codex_home)
+
+    def _json_only_state(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM local_thread_catalog")
+            connection.commit()
+        self.state_path.with_suffix(".json.bak").write_bytes(self.state_path.read_bytes())
+
+    def test_exact_json_only_operation_applies_and_recovers_without_native_delete(self) -> None:
+        self._json_only_state()
+        adapter = self.adapter()
+        service = CleanupService(client_inspector=lambda *_: ())
+        coordinator = OperationCoordinator(service)
+        plan_path = self.codex_home.parent / "json-only-plan.json"
+        plan = coordinator.plan_operation(client="native", record_ids=(THREAD_ID,),
+            adapters=(adapter,), plan_path=plan_path)
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual(len(plan["actions"]), 1)
+        action = plan["actions"][0]
+        self.assertEqual(action["kind"], "remove_desktop_state")
+        self.assertEqual(action["impact"]["desktop_catalog_record_count"], 0)
+        self.assertEqual(action["impact"]["desktop_global_state_reference_count"], 4)
+        self.assertEqual(adapter.desktop_thread_ids, ())
+        with patch("local_agent_record_janitor.codex_desktop_state.running_related_clients", return_value=()), patch(
+            "local_agent_record_janitor.codex_app_server.CodexAppServer.delete_thread",
+            side_effect=AssertionError("JSON-only cleanup must not call thread/delete"),
+        ):
+            result = OperationCoordinator(service).apply_operation(
+                operation_id=plan["operation_id"], plan_path=plan_path,
+                clients_closed=True, adapters=(adapter,))
+        self.assertEqual(result["goal_status"], "complete", result)
+        verified = OperationCoordinator(service).verify_operation(
+            operation_id=plan["operation_id"], plan_path=plan_path, adapters=(adapter,))
+        self.assertEqual(verified["goal_status"], "complete", verified)
+        for path in (self.state_path, self.state_path.with_suffix(".json.bak")):
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(value["projectless-thread-ids"], ["healthy"])
+            self.assertIn(THREAD_ID, value["prompt-history"][0])
+
+    def test_json_only_discovery_requires_full_explicit_id(self) -> None:
+        self._json_only_state()
+        for index, scope in enumerate(({"all_projects": True}, {"record_ids": (THREAD_ID[:8],)})):
+            plan = OperationCoordinator(CleanupService()).plan_operation(
+                client="native", adapters=(self.adapter(),),
+                plan_path=self.codex_home.parent / f"unscoped-{index}.json", **scope)
+            self.assertFalse(plan["actions"], plan)
+
+    def test_json_only_cleanup_rejects_changed_reference_fingerprint(self) -> None:
+        self._json_only_state()
+        state = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
+        self.state_path.write_text(json.dumps({"projectless-thread-ids": [THREAD_ID]}), encoding="utf-8")
+        before = self.state_path.read_bytes()
+        with self.assertRaises(DesktopStateError):
+            execute_desktop_state_cleanup(self.codex_home,
+                {THREAD_ID: state.snapshot_fingerprint}, client_inspector=lambda *_: ())
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_json_only_cleanup_refuses_open_clients(self) -> None:
+        self._json_only_state()
+        state = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
+        before = self.state_path.read_bytes()
+        with self.assertRaises(DesktopStateError):
+            execute_desktop_state_cleanup(self.codex_home,
+                {THREAD_ID: state.snapshot_fingerprint}, client_inspector=lambda *_: ("Codex",))
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_catalog_disappearing_after_plan_is_still_drift(self) -> None:
+        state = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
+        self._json_only_state()
+        with self.assertRaises(DesktopStateError):
+            execute_desktop_state_cleanup(self.codex_home,
+                {THREAD_ID: state.snapshot_fingerprint}, client_inspector=lambda *_: ())
+
+    def test_json_only_cleanup_rejects_reappearing_native_rollout(self) -> None:
+        self._json_only_state()
+        state = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
+        rollout = write_rollout(self.codex_home, THREAD_ID, originator="Codex Desktop")
+        before = self.state_path.read_bytes()
+        with self.assertRaises(DesktopStateError):
+            execute_desktop_state_cleanup(self.codex_home,
+                {THREAD_ID: state.snapshot_fingerprint}, client_inspector=lambda *_: ())
+        self.assertTrue(rollout.exists())
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_json_only_cleanup_rolls_back_both_state_files_on_write_failure(self) -> None:
+        self._json_only_state()
+        state = read_desktop_state(self.codex_home, (THREAD_ID,)).threads[THREAD_ID]
+        before = {path: path.read_bytes() for path in
+            (self.state_path, self.state_path.with_suffix(".json.bak"))}
+        from local_agent_record_janitor import codex_desktop_state as desktop
+        real_write = desktop._atomic_write_json
+
+        def fail_backup_write(path, value):
+            if path == self.state_path.with_suffix(".json.bak"):
+                raise OSError("injected write failure")
+            return real_write(path, value)
+
+        with patch.object(desktop, "_atomic_write_json", side_effect=fail_backup_write):
+            with self.assertRaises(DesktopStateError):
+                execute_desktop_state_cleanup(self.codex_home,
+                    {THREAD_ID: state.snapshot_fingerprint}, client_inspector=lambda *_: ())
+        for path, expected in before.items():
+            self.assertEqual(path.read_bytes(), expected)
 
     def _cindy_process_records(
         self,

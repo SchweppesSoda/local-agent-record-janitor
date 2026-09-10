@@ -1954,9 +1954,15 @@ def _unavailable_reason(
             details.get("desktop_state_snapshot_fingerprint"), str
         ):
             return "No exact Codex Desktop state snapshot is available."
-        if _as_nonnegative_int(
+        catalog_count = _as_nonnegative_int(
             details.get("desktop_catalog_record_count")
-        ) != 1:
+        )
+        explicit_json_only = (
+            details.get("desktop_explicit_json_only") is True
+            and catalog_count == 0
+            and _as_nonnegative_int(details.get("desktop_global_state_reference_count")) > 0
+        )
+        if catalog_count != 1 and not explicit_json_only:
             return "The target does not map to exactly one local Desktop row."
         return None
     if kind in _UNIMPLEMENTED_REASONS:

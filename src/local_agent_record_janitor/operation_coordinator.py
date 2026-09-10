@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import uuid
+from copy import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -1050,7 +1051,29 @@ class OperationCoordinator:
 
             catalog = build_session_catalog(selected)
             manual_plan = build_manual_delete_plan(catalog)
-            if self._native_catalog_is_healthy(catalog, manual_plan):
+            # Exact IDs can outlive both the native record and Desktop catalog
+            # as JSON-only UI references. Keep this discovery explicitly scoped;
+            # project/all-projects selection must not absorb arbitrary JSON IDs.
+            from .adapters import NativeIntegrityAdapter
+            from .codex_desktop_state import read_desktop_state
+
+            catalog_ids = {record.thread_id for record in catalog.records}
+            desktop_ids = tuple(
+                value for value in explicit_session_ids
+                if value not in catalog_ids and self._is_full_thread_id(value)
+            )
+            scoped = []
+            has_desktop_residuals = False
+            for adapter in selected:
+                if isinstance(adapter, NativeIntegrityAdapter):
+                    adapter = copy(adapter)
+                    adapter.desktop_thread_ids = desktop_ids
+                    if desktop_ids:
+                        desktop = read_desktop_state(adapter.codex_home, desktop_ids)
+                        has_desktop_residuals |= any(state.present for state in desktop.threads.values())
+                scoped.append(adapter)
+            selected = tuple(scoped)
+            if not has_desktop_residuals and self._native_catalog_is_healthy(catalog, manual_plan):
                 result = self._native_manual_context(
                     selected,
                     catalog,
@@ -1089,6 +1112,13 @@ class OperationCoordinator:
             explicit_session_ids=explicit_session_ids,
         )
         return result if include_action_contexts else result[:5]
+
+    @staticmethod
+    def _is_full_thread_id(value: str) -> bool:
+        try:
+            return str(uuid.UUID(value)) == value
+        except (ValueError, AttributeError, TypeError):
+            return False
 
     def _merge_client_engine_contexts(
         self,

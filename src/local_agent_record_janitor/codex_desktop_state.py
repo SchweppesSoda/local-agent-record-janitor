@@ -272,9 +272,9 @@ def execute_desktop_state_cleanup(
         raise DesktopStateError("No compatible Codex Desktop catalog was found")
     for thread_id in targets:
         current = snapshot.threads.get(thread_id)
-        if current is None or not current.catalog_records:
+        if current is None or not current.present:
             raise DesktopStateError(
-                f"The approved local Desktop catalog row disappeared: {thread_id}"
+                f"The approved local Desktop state disappeared: {thread_id}"
             )
         if any(record.host_id != "local" for record in current.catalog_records):
             raise DesktopStateError(
@@ -311,7 +311,12 @@ def execute_desktop_state_cleanup(
     deleted_rows = 0
     removed_references = 0
     try:
-        deleted_rows = _delete_catalog_rows(snapshot.database, targets)
+        catalog_targets = tuple(
+            thread_id for thread_id in targets
+            if snapshot.threads[thread_id].catalog_records
+        )
+        if catalog_targets:
+            deleted_rows = _delete_catalog_rows(snapshot.database, catalog_targets)
         for path in snapshot.state_paths:
             expected_hash = manifest["state_files_before"][str(path)]
             if sha256_file(path) != expected_hash:

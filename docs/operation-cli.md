@@ -163,6 +163,14 @@ global-state references count even when the Desktop catalog row is gone.
 An empty scan proves completion only for the exact successfully scanned store;
 frontend databases additionally require the matching discovery family.
 
+For a full explicit native thread ID, planning also probes exact JSON UI
+references when both the native record and Desktop catalog row are absent.
+These use `remove_desktop_state` with zero catalog rows and the same frozen
+state fingerprints, closed-client guard, rollback and verification. A compatible
+Desktop database is still required. Prefix, project and all-projects selectors
+do not discover these catalog-free references; verification checks every frozen
+descendant ID even if ordinary `records` output no longer lists it.
+
 ## Legacy commands
 
 The older `agent doctor/plan/apply/status/verify` commands remain available
