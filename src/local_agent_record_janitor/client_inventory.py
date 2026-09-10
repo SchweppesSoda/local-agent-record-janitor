@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from .adapters.base import FrontendBatchSnapshot
 from .display_metadata import display_title
+from .path_identity import inventory_path_identity_scope
 from .inventory import (
     FrontendSessionRecord,
     InventoryFailure,
@@ -127,6 +128,7 @@ class ClientInventory:
     project_items: tuple[Any, ...] = ()
     scanned_databases: tuple[Path, ...] = ()
     scanned_resources: tuple[tuple[str, str], ...] = ()
+    scanned_native_homes: tuple[Path, ...] = ()
 
     @property
     def catalog(self) -> SessionCatalog:
@@ -134,6 +136,7 @@ class ClientInventory:
             records=self.records,
             unmapped_frontend_sessions=self.unmapped_frontend_sessions,
             errors=self.errors,
+            scanned_native_homes=self.scanned_native_homes,
         )
 
     @property
@@ -516,6 +519,8 @@ def _constrain_capability(
             return _capability_for(client, engine)
     return capability
 
+
+@inventory_path_identity_scope()
 def build_client_inventory(
     adapters: Iterable[object],
     *,
@@ -708,6 +713,7 @@ def build_client_inventory(
         project_items=tuple(unique_project_items),
         scanned_databases=tuple(sorted(scanned_databases, key=str)),
         scanned_resources=tuple(sorted(scanned_resources)),
+        scanned_native_homes=catalog.scanned_native_homes,
     )
     if selected_client == "native" and (not requested_engines or "codex" in requested_engines):
         from .native_project_cleanup import append_native_inventory

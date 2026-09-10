@@ -16,6 +16,7 @@ from typing import Any
 
 from .action_registry import action_capability
 from .agent_operations import action_binding
+from .path_identity import inventory_path_identity_scope
 from .operation_store import OperationStore, plan_sha256, strict_json_load, write_new_json
 from .record_identity import (
     capability_for,
@@ -999,6 +1000,7 @@ class OperationCoordinator:
         if not require_selection and selected > 1:
             raise OperationCoordinatorError("operation scope selectors conflict")
 
+    @inventory_path_identity_scope()
     def _build_context(
         self,
         client: str,
@@ -1168,6 +1170,12 @@ class OperationCoordinator:
             if key not in known:
                 storages.append(StorageLocation(storage_id=key, label="Frontend database directory",
                     path=root, scan_status=ScanStatus.OK))
+                known.add(key)
+        for home in inventory.catalog.scanned_native_homes:
+            key = storage_id_for_path(home)
+            if key not in known:
+                storages.append(StorageLocation(storage_id=key, label="Native record store",
+                    path=home, scan_status=ScanStatus.OK))
                 known.add(key)
         context = replace(context, plan=replace(context.plan, storages=tuple(storages)),
                           frontend_scan_coverage=inventory.scanned_resources)

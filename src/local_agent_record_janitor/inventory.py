@@ -14,7 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .codex_state import parse_thread_source, read_native_lineage
 from .conversation_metadata import read_conversation_summaries
 from .models import ConversationSummary, RolloutRecord
-from .path_identity import canonical_existing_path_key
+from .path_identity import canonical_existing_path_key, inventory_path_identity_scope
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -221,6 +221,7 @@ class SessionCatalog:
     unmapped_frontend_sessions: tuple[FrontendSessionRecord, ...] = ()
     errors: tuple[InventoryFailure, ...] = ()
     scanned_session_databases: tuple[Path, ...] = ()
+    scanned_native_homes: tuple[Path, ...] = ()
 
     @property
     def conversations(self) -> tuple[ManagedConversation, ...]:
@@ -257,6 +258,7 @@ class InventorySelectionError(ValueError):
     pass
 
 
+@inventory_path_identity_scope()
 def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     """Build a read-only union of native artifacts and frontend mappings.
 
@@ -271,6 +273,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     frontend_by_home: dict[str, list[FrontendSessionRecord]] = defaultdict(list)
     errors: list[InventoryFailure] = []
     scanned_session_databases: set[Path] = set()
+    scanned_native_homes: set[Path] = set()
 
     for adapter in adapter_list:
         raw_home = getattr(adapter, "codex_home", None)
@@ -419,6 +422,11 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             )
 
         cascade_unknown = not state_edge_complete or bool(rollout_errors)
+        # A successful empty scan is evidence too. Do not infer coverage from
+        # the remaining records: the final native row may just have been deleted.
+        if (home.is_dir() and not cascade_unknown
+                and not any(failure.blocks_delete for failure in home_errors)):
+            scanned_native_homes.add(home)
         blocking_messages = tuple(
             sorted(
                 {
@@ -603,6 +611,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     return SessionCatalog(
         records=records,
         scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
+        scanned_native_homes=tuple(sorted(scanned_native_homes, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(
                 _deduplicate_frontend(unmapped),
