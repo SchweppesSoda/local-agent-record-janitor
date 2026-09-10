@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
@@ -15,6 +16,7 @@ from local_agent_record_janitor.cli import EXIT_OK, main
 from local_agent_record_janitor.codex_desktop_state import (
     DesktopStateError,
     _relevant_client_names,
+    _running_related_process_records,
     execute_desktop_state_cleanup,
     read_desktop_state,
 )
@@ -77,6 +79,42 @@ class CodexDesktopStateTests(unittest.TestCase):
 
     def adapter(self) -> NativeIntegrityAdapter:
         return NativeIntegrityAdapter(codex_home=self.codex_home)
+
+    def test_process_probe_timeout_fails_closed_and_hides_console_window(self) -> None:
+        from local_agent_record_janitor import codex_desktop_state as desktop
+
+        with (
+            patch.object(desktop.os, "name", "nt"),
+            patch.object(desktop.shutil, "which", return_value="pwsh.exe"),
+            patch.object(
+                desktop.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired("pwsh.exe", 0.25),
+            ) as run,
+        ):
+            with self.assertRaisesRegex(DesktopStateError, "timed out"):
+                _running_related_process_records(timeout=0.25)
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 0.25)
+        self.assertEqual(
+            run.call_args.kwargs["creationflags"],
+            getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def test_process_probe_launch_error_fails_closed(self) -> None:
+        from local_agent_record_janitor import codex_desktop_state as desktop
+
+        with (
+            patch.object(desktop.os, "name", "nt"),
+            patch.object(desktop.shutil, "which", return_value="pwsh.exe"),
+            patch.object(
+                desktop.subprocess,
+                "run",
+                side_effect=OSError("process launch failed"),
+            ),
+        ):
+            with self.assertRaises(DesktopStateError):
+                _running_related_process_records(timeout=0.25)
 
     def _json_only_state(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection:

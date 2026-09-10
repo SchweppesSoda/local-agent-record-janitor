@@ -26,8 +26,17 @@ delete plan --client <client> (--project <selector> ... | --all-projects | --rec
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 operation status --operation-id <id> [--operation-home <path>] [--plan <plan.json>]
-operation verify --operation-id <id> [--operation-home <path>] [--plan <plan.json>] [--verify-timeout <seconds>]
+operation verify --operation-id <id> [--operation-home <path>] [--plan <plan.json>] [--verify-timeout <seconds>] [--progress]
 ```
+
+Add `--progress` to `records`, `delete plan/apply/run`, or
+`operation status/verify` when a live diagnostic stream is useful. The option
+writes metadata-only JSONL events to stderr as inventory, planning, child-batch
+execution, and verification phases start and report completion, failure, or a
+recovery boundary. Events include the phase, status, elapsed seconds, and
+bounded counts; they never include message bodies or alter the one-document
+JSON result on stdout. It is opt-in and has no effect on the default output
+contract.
 
 `--engine` may further limit a client scope. A project selector is resolved by
 the core using a normalized working directory, authoritative project ID, or a
@@ -140,7 +149,9 @@ Unselected retained rows and unproven schemas remain protected.
 Select the official native `CODEX_HOME` explicitly when the caller itself runs
 inside Cindy. `records --inspect-clients` adds read-only process ownership
 evidence (PID, parent PID, executable and store relation); process names alone
-do not identify which store is open. Apply and verify restore the frozen native
+do not identify which store is open. On Windows, the read-only CIM process
+probe is bounded and uses a hidden PowerShell window; a timeout or launch error
+is reported as an inability to prove that clients are closed. Apply and verify restore the frozen native
 store when a plan is supplied and reject a conflicting explicit home.
 
 Record output contains the Desktop catalog's UI display title when available,

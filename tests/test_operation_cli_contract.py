@@ -45,6 +45,77 @@ class FakeOperationCoordinator:
 
 
 class OperationCliContractTests(unittest.TestCase):
+    def test_progress_is_opt_in_and_stays_on_stderr(self) -> None:
+        parser = build_parser()
+        records = parser.parse_args(("records", "--progress"))
+        delete = parser.parse_args(("delete", "plan", "--progress"))
+        verify = parser.parse_args(("operation", "verify", "--operation-id", "op", "--progress"))
+        self.assertTrue(records.progress)
+        self.assertTrue(delete.progress)
+        self.assertTrue(verify.progress)
+        self.assertFalse(parser.parse_args(("records",)).progress)
+
+    def test_progress_events_are_live_metadata_and_do_not_change_json_stdout(self) -> None:
+        errors = StringIO()
+        observed_during_call: list[bool] = []
+
+        class ProgressCoordinator(FakeOperationCoordinator):
+            def plan_operation(self, **kwargs: object) -> dict[str, object]:
+                callback = kwargs["progress_callback"]
+                self.assert_callable(callback)
+                callback({
+                    "stage": "inventory",
+                    "status": "running",
+                    "chat_body": "must not be emitted",
+                    "counts": {"record_count": 1},
+                })
+                observed_during_call.append(bool(errors.getvalue()))
+                return dict(self.result)
+
+            @staticmethod
+            def assert_callable(value: object) -> None:
+                if not callable(value):
+                    raise AssertionError("progress callback was not forwarded")
+
+        coordinator = ProgressCoordinator(
+            {
+                "operation_id": "op-progress",
+                "goal_status": "ready",
+                "plan_sha256": "sha-progress",
+                "chat_body": "secret result body",
+            }
+        )
+        output = StringIO()
+        status = main(
+            (
+                "delete",
+                "plan",
+                "--client",
+                "cindy",
+                "--project",
+                "project-a",
+                "--progress",
+                "--json",
+            ),
+            adapters=(),
+            operation_coordinator=coordinator,
+            stdout=output,
+            stderr=errors,
+            stdin=StringIO(),
+        )
+
+        self.assertEqual(status, EXIT_OK)
+        self.assertEqual(observed_during_call, [True])
+        payload = json.loads(output.getvalue())
+        self.assertNotIn("secret result body", output.getvalue())
+        events = [json.loads(line) for line in errors.getvalue().splitlines()]
+        self.assertTrue(events)
+        self.assertTrue(all(item["event"] == "progress" for item in events))
+        self.assertTrue(all("elapsed_seconds" in item for item in events))
+        self.assertEqual(events[-1]["stage"], "inventory")
+        self.assertNotIn("chat_body", events[-1])
+        self.assertEqual(payload["operation_id"], "op-progress")
+
     def test_parser_exposes_one_client_and_mutually_exclusive_scope(self) -> None:
         parser = build_parser()
         args = parser.parse_args(

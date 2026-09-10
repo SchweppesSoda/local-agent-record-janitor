@@ -7,7 +7,7 @@ import json
 import os
 import uuid
 from copy import copy
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +75,64 @@ class OperationCoordinator:
         self.service = service
         self._live: dict[str, _LiveOperation] = {}
 
+    @staticmethod
+    def _emit_progress(
+        callback: Callable[[Mapping[str, Any]], None] | None,
+        stage: str,
+        status: str,
+        *,
+        operation_id: str | None = None,
+        counts: Mapping[str, Any] | None = None,
+        **metadata: Any,
+    ) -> None:
+        """Report a safe live phase without making callbacks part of results."""
+
+        if not callable(callback):
+            return
+        try:
+            event: dict[str, Any] = {
+                "stage": str(stage),
+                "status": str(status),
+            }
+            if operation_id:
+                event["operation_id"] = str(operation_id)
+            if isinstance(counts, Mapping):
+                event["counts"] = {
+                    str(key): value
+                    for key, value in counts.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                }
+            for key, value in metadata.items():
+                if key.casefold() in _BODY_KEYS:
+                    continue
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    event[str(key)] = value
+            callback(event)
+        except Exception:
+            # Diagnostics are strictly best effort and cannot alter a safe
+            # operation result if the caller's output stream is unavailable.
+            return
+
+    @staticmethod
+    def _progress_counts(context: Any) -> dict[str, int]:
+        plan = getattr(context, "plan", None)
+        snapshot = getattr(context, "snapshot", None)
+        report = getattr(snapshot, "report", None)
+
+        def count(value: Any) -> int:
+            try:
+                return len(value or ())
+            except TypeError:
+                return 0
+
+        return {
+            "storage_count": count(getattr(plan, "storages", ())),
+            "observation_count": count(getattr(plan, "observations", ())),
+            "action_count": count(getattr(plan, "actions", ())),
+            "finding_count": count(getattr(report, "findings", ())),
+            "error_count": count(getattr(plan, "errors", ())),
+        }
+
     def plan_operation(
         self,
         *,
@@ -89,6 +147,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         adapters: Iterable[Any] | None = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -103,6 +162,7 @@ class OperationCoordinator:
             self._validate_scope(normalized_scope, require_selection=True)
             client_name = str(normalized_scope["client"])
             source = None if adapters is None else tuple(adapters)
+            self._emit_progress(progress_callback, "inventory", "started")
             (
                 context,
                 active_adapters,
@@ -118,6 +178,13 @@ class OperationCoordinator:
                 include_action_contexts=True,
                 codex_home=codex_home,
             )
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "completed",
+                counts=self._progress_counts(context),
+            )
+            self._emit_progress(progress_callback, "plan", "started")
             candidates, blockers = self._select_candidates(context, normalized_scope)
             candidates = self._coalesce_manual_candidates(candidates, manual_actions)
             if client_name == "cindy":
@@ -137,6 +204,13 @@ class OperationCoordinator:
                 action_contexts=action_contexts,
             )
             write_new_json(Path(str(document["plan_path"])), document)
+            self._emit_progress(
+                progress_callback,
+                "plan",
+                "completed",
+                operation_id=operation,
+                counts=document.get("counts"),
+            )
             self._live[operation] = _LiveOperation(
                 operation_id=operation,
                 document=document,
@@ -151,6 +225,7 @@ class OperationCoordinator:
             )
             return document
         except Exception as exc:
+            self._emit_progress(progress_callback, "plan", "failed")
             return self._error_document(
                 "plan", normalized_scope, str(exc) or repr(exc), operation_id=operation_id
             )
@@ -174,6 +249,7 @@ class OperationCoordinator:
         timeout: float = 30.0,
         app_server_factory: Any = None,
         binary_resolver: Any = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -200,7 +276,13 @@ class OperationCoordinator:
             self._validate_apply_scope(document, normalized_scope)
             child_inspection = self._inspect_child_states(document)
             if child_inspection.blockers:
-                return self._result_document(
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "started",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                )
+                result = self._result_document(
                     document,
                     normalized_scope,
                     goal_status="unknown",
@@ -209,6 +291,15 @@ class OperationCoordinator:
                     modified=child_inspection.modified,
                     mutation_started=child_inspection.mutation_started,
                 )
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "completed",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                    counts={"batch_count": len(child_inspection.batches)},
+                    goal_status="unknown",
+                )
+                return result
             operation = str(document["operation_id"])
             client_name = str(document["scope"]["client"])
             codex_home = self._bound_codex_home(document, codex_home)
@@ -241,6 +332,12 @@ class OperationCoordinator:
                         return dict(live.result)
             else:
                 source = None if adapters is None else tuple(adapters)
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "started",
+                    operation_id=operation,
+                )
                 (
                     context,
                     active_adapters,
@@ -255,6 +352,13 @@ class OperationCoordinator:
                     explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
+                )
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "completed",
+                    operation_id=operation,
+                    counts=self._progress_counts(context),
                 )
                 candidates, blockers = self._bind_fresh_candidates(
                     document,
@@ -285,8 +389,15 @@ class OperationCoordinator:
                 timeout=float(timeout),
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "failed",
+                operation_id=operation_id,
+            )
             return self._error_document(
                 "apply", normalized_scope, str(exc) or repr(exc),
                 operation_id=operation_id, blocker_code="operation_apply_failed",
@@ -310,6 +421,7 @@ class OperationCoordinator:
         timeout: float = 30.0,
         app_server_factory: Any = None,
         binary_resolver: Any = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -332,6 +444,7 @@ class OperationCoordinator:
             operation_home=operation_home,
             codex_home=codex_home,
             adapters=adapters,
+            progress_callback=progress_callback,
         )
         if planned.get("goal_status") != "ready":
             return planned
@@ -346,9 +459,11 @@ class OperationCoordinator:
             timeout=float(timeout),
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            progress_callback=progress_callback,
         )
         return self._finish_native_run(live, result, timeout=float(timeout),
-            app_server_factory=app_server_factory, binary_resolver=binary_resolver)
+            app_server_factory=app_server_factory, binary_resolver=binary_resolver,
+            progress_callback=progress_callback)
 
     def _finish_native_run(self, initial: _LiveOperation, result: dict[str, Any], **execution: Any) -> dict[str, Any]:
         """Fresh, bounded residual plans; never retry a native deletion request."""
@@ -436,13 +551,32 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         scope: Mapping[str, Any] | None = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
+        self._emit_progress(
+            progress_callback,
+            "status",
+            "started",
+            operation_id=operation_id,
+        )
         live = self._live.get(str(operation_id or ""))
         if live is not None:
-            return dict(live.result) if live.result is not None else self._status_for_document(live.document)
+            result = (
+                dict(live.result)
+                if live.result is not None
+                else self._status_for_document(live.document)
+            )
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "completed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"batch_count": len(result.get("batches", ()) or ())},
+            )
+            return result
         try:
-            return self._status_for_document(
+            result = self._status_for_document(
                 self._load_plan(
                     operation_id,
                     plan_path,
@@ -451,7 +585,21 @@ class OperationCoordinator:
                     codex_home=codex_home,
                 )
             )
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "completed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"batch_count": len(result.get("batches", ()) or ())},
+            )
+            return result
         except Exception as exc:
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "failed",
+                operation_id=operation_id,
+            )
             return self._error_document(
                 "status", dict(scope or {}), str(exc) or repr(exc),
                 operation_id=operation_id, blocker_code="operation_query_unavailable",
@@ -467,9 +615,36 @@ class OperationCoordinator:
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         del verify_timeout
+        self._emit_progress(
+            progress_callback,
+            "verify",
+            "started",
+            operation_id=operation_id,
+        )
+
+        def finish(result: dict[str, Any]) -> dict[str, Any]:
+            residuals = result.get("residuals", ())
+            try:
+                residual_count = len(residuals or ())
+            except TypeError:
+                residual_count = 0
+            goal_status = str(result.get("goal_status") or "unknown")
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "completed" if goal_status in {
+                    "complete", "completed_with_residuals"
+                } else "failed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"residual_count": residual_count},
+                goal_status=goal_status,
+            )
+            return result
+
         live = self._live.get(str(operation_id or ""))
         terminal: Any | None = None
         error: str | None = None
@@ -485,6 +660,12 @@ class OperationCoordinator:
                 client_name = str(document["scope"]["client"])
                 codex_home = self._bound_codex_home(document, codex_home)
                 source = None if adapters is None else tuple(adapters)
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "started",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                )
                 (
                     context,
                     active_adapters,
@@ -500,12 +681,19 @@ class OperationCoordinator:
                     include_action_contexts=True,
                     codex_home=codex_home,
                 )
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "completed",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                    counts=self._progress_counts(context),
+                )
                 storage_blockers = self._frozen_store_blockers(document)
                 if storage_blockers:
-                    return self._result_document(
+                    return finish(self._result_document(
                         document, dict(scope or {}), goal_status="unknown",
                         blockers=storage_blockers, batches=(),
-                    )
+                    ))
                 live = _LiveOperation(
                     operation_id=str(document["operation_id"]),
                     document=document,
@@ -522,48 +710,62 @@ class OperationCoordinator:
                 )
                 terminal = context
             except Exception as exc:
-                return self._error_document(
+                return finish(self._error_document(
                     "verify", dict(scope or {}), str(exc) or repr(exc),
                     operation_id=operation_id, blocker_code="operation_verify_failed",
-                )
+                ))
         if terminal is None:
             try:
                 self._bound_codex_home(live.document, codex_home)
             except OperationCoordinatorError as exc:
-                return self._result_document(live.document, dict(scope or {}), goal_status="blocked",
+                return finish(self._result_document(live.document, dict(scope or {}), goal_status="blocked",
                     blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=())
+                )
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "started",
+                operation_id=live.operation_id,
+            )
             terminal, error = self._terminal_context(live)
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "completed",
+                operation_id=live.operation_id,
+                counts=self._progress_counts(terminal) if terminal is not None else {},
+            )
         if error is not None:
-            return self._result_document(
+            return finish(self._result_document(
                 live.document, dict(scope or {}), goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", error)], batches=(),
-            )
+            ))
         if not bool(getattr(getattr(terminal, "plan", None), "scan_complete", True)):
             errors = getattr(getattr(terminal, "plan", None), "errors", ())
             message = "; ".join(str(value) for value in errors)
             if not message:
                 message = "terminal verification scan is incomplete"
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", message)],
                 batches=(),
-            )
+            ))
         try:
             residuals = self._residual_action_ids(live.document, terminal)
         except Exception as exc:
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", str(exc))],
                 batches=(),
-            )
+            ))
         try:
             self._persist_verified_child_journals(live.document, residuals)
         except Exception as exc:
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
@@ -572,8 +774,8 @@ class OperationCoordinator:
                 )],
                 batches=(),
                 residuals=residuals,
-            )
-        return self._result_document(
+            ))
+        result = self._result_document(
             live.document, dict(scope or {}),
             goal_status="completed_with_residuals" if residuals else "complete",
             blockers=[self._blocker("residual_records", "approved records remain")] if residuals else [],
@@ -581,6 +783,7 @@ class OperationCoordinator:
             modified=bool(self._status_for_document(live.document).get("modified")),
             mutation_started=bool(self._status_for_document(live.document).get("mutation_started")),
         )
+        return finish(result)
 
     @staticmethod
     def _frozen_store_blockers(
@@ -3638,11 +3841,19 @@ class OperationCoordinator:
         timeout: float,
         app_server_factory: Any,
         binary_resolver: Any,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         from .cleanup_service import partition_actions
         from .codex_app_server import CodexAppServer
         from .discovery import choose_codex_binary
 
+        self._emit_progress(
+            progress_callback,
+            "apply",
+            "started",
+            operation_id=live.operation_id,
+            counts={"action_count": len(live.candidates)},
+        )
         child_inspection = self._inspect_child_states(live.document)
         if child_inspection.blockers:
             result = self._result_document(
@@ -3655,6 +3866,13 @@ class OperationCoordinator:
                 mutation_started=child_inspection.mutation_started,
             )
             live.result = result
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "completed",
+                operation_id=live.operation_id,
+                counts={"batch_count": len(child_inspection.batches)},
+            )
             return result
 
         completed_child_ids = (
@@ -3662,6 +3880,9 @@ class OperationCoordinator:
             | set(getattr(live, "completed_child_ids", ()))
         )
         batches = partition_actions(live.candidates)
+        total_action_count = sum(len(batch.actions) for batch in batches)
+        completed_action_count = 0
+        completed_action_ids: set[str] = set()
         from .manual_delete import (
             build_manual_delete_closure,
             frontend_actions_after_native_success,
@@ -3710,6 +3931,20 @@ class OperationCoordinator:
             if isinstance(raw, Mapping)
             and str(raw.get("child_operation_id") or "")
         }
+        # ``frozen_child_ids`` is built after partitioning so its immutable
+        # batch keys can be used to seed progress for already completed
+        # recovery children.
+        completed_action_count = sum(
+            len(batch.actions)
+            for batch in batches
+            if frozen_child_ids.get(batch_key(batch)) in completed_child_ids
+        )
+        completed_action_ids.update(
+            str(action.action_id)
+            for batch in batches
+            if frozen_child_ids.get(batch_key(batch)) in completed_child_ids
+            for action in batch.actions
+        )
         if frozen_child_ids:
             unresolved = [
                 self._blocker(
@@ -3731,6 +3966,13 @@ class OperationCoordinator:
                     mutation_started=child_inspection.mutation_started,
                 )
                 live.result = result
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "completed",
+                    operation_id=live.operation_id,
+                    counts={"batch_count": len(child_inspection.batches)},
+                )
                 return result
         for index, batch in enumerate(batches):
             key = batch_key(batch)
@@ -3753,7 +3995,39 @@ class OperationCoordinator:
                     self._batch_scope_metadata(live.context, batch)
                 )
                 batch_results.append(skipped_batch)
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_skipped",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                        "completed_action_count": completed_action_count,
+                        "total_action_count": total_action_count,
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                )
                 continue
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "batch_started",
+                operation_id=live.operation_id,
+                counts={
+                    "batch_index": index + 1,
+                    "batch_count": len(batches),
+                    "action_count": len(batch.actions),
+                    "completed_action_count": completed_action_count,
+                    "total_action_count": total_action_count,
+                },
+                child_operation_id=child_id,
+                mutation_family=str(batch.mutation_family),
+                storage_id=str(batch.storage_id),
+            )
             batch_mutation_started = False
             store: OperationStore | None = None
             try:
@@ -3770,10 +4044,14 @@ class OperationCoordinator:
                         result: Any | None,
                     ) -> None:
                         nonlocal batch_mutation_started, mutation_started
-                        status = (
-                            str(getattr(result, "status", ""))
+                        nonlocal completed_action_count
+                        raw_status = (
+                            getattr(result, "status", "")
                             if result is not None else ""
                         )
+                        status = str(
+                            getattr(raw_status, "value", raw_status)
+                        ).casefold()
                         batch_mutation_started = (
                             batch_mutation_started
                             or phase == "mutation_started"
@@ -3807,6 +4085,41 @@ class OperationCoordinator:
                         if status:
                             event["result_status"] = status
                         store.append_event(event, state_updates=current)
+                        action_id = str(action.action_id)
+                        if phase == "verified" and action_id not in completed_action_ids:
+                            counts = {
+                                "completed_action_count": completed_action_count,
+                                "total_action_count": total_action_count,
+                                "batch_index": index + 1,
+                                "batch_count": len(batches),
+                            }
+                            if status in {"deleted", "cleaned", "repaired"}:
+                                completed_action_ids.add(action_id)
+                                completed_action_count += 1
+                                counts["completed_action_count"] = completed_action_count
+                                self._emit_progress(
+                                    progress_callback,
+                                    "apply",
+                                    "action_completed",
+                                    operation_id=live.operation_id,
+                                    counts=counts,
+                                    child_operation_id=child_id,
+                                    action_id=action_id,
+                                    action_state=phase,
+                                    result_status=status,
+                                )
+                            elif status:
+                                self._emit_progress(
+                                    progress_callback,
+                                    "apply",
+                                    "action_checked",
+                                    operation_id=live.operation_id,
+                                    counts=counts,
+                                    child_operation_id=child_id,
+                                    action_id=action_id,
+                                    action_state=phase,
+                                    result_status=status,
+                                )
 
                     if str(batch.mutation_family) == "remove_frontend_reference":
                         required_frontend = {
@@ -3877,6 +4190,28 @@ class OperationCoordinator:
                     statuses.intersection({"deleted", "cleaned", "repaired", "partial"})
                     or getattr(outcome, "modified", False)
                 )
+                if batch_status == "complete":
+                    for action in batch.actions:
+                        action_id = str(action.action_id)
+                        if action_id in completed_action_ids:
+                            continue
+                        completed_action_ids.add(action_id)
+                        completed_action_count += 1
+                        self._emit_progress(
+                            progress_callback,
+                            "apply",
+                            "action_completed",
+                            operation_id=live.operation_id,
+                            counts={
+                                "completed_action_count": completed_action_count,
+                                "total_action_count": total_action_count,
+                                "batch_index": index + 1,
+                                "batch_count": len(batches),
+                            },
+                            child_operation_id=child_id,
+                            action_id=action_id,
+                            action_state="verified",
+                        )
                 any_modified = any_modified or batch_modified
                 stopped_unknown = stopped_unknown or batch_unknown
                 if (
@@ -3935,6 +4270,23 @@ class OperationCoordinator:
                         "mutation_started": batch_mutation_started,
                         "blockers": batch_result.get("blockers", []),
                     },
+                )
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_completed",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                        "completed_action_count": completed_action_count,
+                        "total_action_count": total_action_count,
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                    batch_status=batch_status,
                 )
                 if batch_unknown:
                     break
@@ -4047,6 +4399,21 @@ class OperationCoordinator:
                             "persistence_error": str(journal_error) or repr(journal_error),
                         }
                 batch_results.append(failed_batch)
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_completed",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                    batch_status="unknown" if batch_unknown else "blocked",
+                )
                 if batch_unknown:
                     break
                 blocked_batches.append(child_id)
@@ -4058,8 +4425,34 @@ class OperationCoordinator:
         # being mistaken for progress on a stopped operation.
         if stopped_unknown:
             terminal, terminal_error = None, None
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "skipped",
+                operation_id=live.operation_id,
+                reason="recovery_required",
+            )
         else:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "started",
+                operation_id=live.operation_id,
+            )
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "started",
+                operation_id=live.operation_id,
+            )
             terminal, terminal_error = self._terminal_context(live)
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "completed",
+                operation_id=live.operation_id,
+                counts=self._progress_counts(terminal) if terminal is not None else {},
+            )
         live.terminal_context = terminal if terminal_error is None else None
         residuals: list[str] = []
         if terminal_error is None and terminal is not None:
@@ -4146,6 +4539,51 @@ class OperationCoordinator:
             mutation_started=mutation_started,
         )
         live.result = result
+        if stopped_unknown:
+            # The operation is waiting for explicit recovery verification;
+            # no terminal scan ran in this path.
+            pass
+        elif terminal_error is not None:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "failed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+            )
+        elif terminal is not None:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "completed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+            )
+        else:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "failed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+                reason="terminal_context_unavailable",
+            )
+        self._emit_progress(
+            progress_callback,
+            "apply",
+            "completed",
+            operation_id=live.operation_id,
+            counts={
+                "batch_count": len(batch_results),
+                "action_count": sum(
+                    len(item.get("action_ids", ())) for item in batch_results
+                ),
+                "completed_action_count": completed_action_count,
+                "total_action_count": total_action_count,
+                "residual_count": len(residuals),
+            },
+            goal_status=goal,
+        )
         return result
 
     @staticmethod
