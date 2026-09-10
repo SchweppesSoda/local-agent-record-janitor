@@ -45,6 +45,11 @@ does not install or simulate them. The closed-client operation uses the upstream
 persistent fallback, changes only `agent_switch` reference metadata, and deletes
 selected rows. Unrelated indexed message content is preserved.
 
+The optional [0034 rewind trigger](https://github.com/makecindy/cindy/blob/8b512ba5396f83a242838d172dbd7afb19183265/apps/desktop/drizzle/0034_add_chat_embedding_vec.sql)
+is also matched by its complete definition. It only runs on `UPDATE OF rewind_at`,
+which neither content-reference cleanup nor session deletion performs. Its
+presence does not require activating vector cleanup during reference updates.
+
 Trigger names alone are insufficient: complete normalized SQL fingerprints must
 match one supported generation. Unknown triggers, altered index layouts, or
 triggers on the index dependencies block deletion. Reference plans run a set

@@ -66,6 +66,9 @@ FTS_TRIGGER_VERSIONS: dict[str, dict[str, str]] = {
 }
 
 
+# UPDATE OF rewind_at never runs for our content-only updates or row deletions.
+REWIND_TRIGGER_SHA256 = 'f2617cdd0ca50f439fad777b1ad7153ddb25fb943bb52e4811b65a86121892e9'
+
 def guard_cindy_triggers(db: sqlite3.Connection, table: str) -> str | None:
     rows = db.execute(
         "SELECT name, sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?",
@@ -74,6 +77,11 @@ def guard_cindy_triggers(db: sqlite3.Connection, table: str) -> str | None:
     if not rows:
         return None
     observed = {str(row[0]): sql_fingerprint(str(row[1] or "")) for row in rows}
+    if table == "messages" and "trg_chat_rewind_clean_vec" in observed:
+        if observed.pop("trg_chat_rewind_clean_vec") != REWIND_TRIGGER_SHA256:
+            raise CindySchemaError("Unsupported Cindy rewind trigger definition")
+        if not observed:
+            return "0034"
     version = next((name for name, expected in FTS_TRIGGER_VERSIONS.items()
                     if table == "messages" and observed == expected), None)
     if version is None:

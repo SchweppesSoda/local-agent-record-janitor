@@ -112,3 +112,23 @@ class CindySchemaTests(unittest.TestCase):
             self.clean_reference(root, self.evidence(root, database))
             with closing(sqlite3.connect(database)) as db:
                 self.assertEqual(db.execute("SELECT content FROM messages WHERE id='m-keep'").fetchone()[0], "PRIVATE_KEEP_BODY")
+
+    def test_rewind_trigger_is_not_activated_by_reference_update_or_delete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = self.database(root, "0100")
+            with closing(sqlite3.connect(database)) as db:
+                db.executescript("CREATE TABLE embedding_jobs(source TEXT, source_id TEXT); CREATE TABLE chat_messages_vec_v1(embedding BLOB);")
+                db.executescript((FIXTURES / "rewind_0034.sql").read_text())
+                db.execute("INSERT INTO embedding_jobs VALUES ('chat', 'm-switch')")
+                db.execute("INSERT INTO chat_messages_vec_v1 VALUES (X'0102')")
+                db.commit()
+                self.assertEqual(guard_cindy_triggers(db, "messages"), "0100")
+            self.clean_reference(root, self.evidence(root, database))
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("DELETE FROM messages WHERE id='m-switch'")
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM embedding_jobs").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT embedding FROM chat_messages_vec_v1").fetchone()[0], b"\x01\x02")
+                db.executescript("DROP TRIGGER trg_chat_rewind_clean_vec; CREATE TRIGGER trg_chat_rewind_clean_vec AFTER UPDATE OF content ON messages BEGIN DELETE FROM embedding_jobs; END;")
+                with self.assertRaises(CindySchemaError):
+                    guard_cindy_triggers(db, "messages")
