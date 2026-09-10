@@ -2395,10 +2395,23 @@ class OperationCoordinator:
         if scope.get("record_ids"):
             wanted = set(scope["record_ids"])
 
-            def matches_record(action: Any, selector: str) -> bool:
-                identifiers = {str(action.target.thread_id)}
+            # Build the storage-local selector index once.  Record selection
+            # is a read-only operation, so retaining action positions here is
+            # enough to preserve the original action order (and also keeps
+            # duplicate action objects behaving as before).  Native project
+            # IDs deliberately use their exact-only index; every other
+            # action participates in the same prefix namespace as its native
+            # thread ID and optional frontend aliases.
+            from bisect import bisect_left
+
+            project_ids: dict[str, list[int]] = {}
+            identifier_actions: dict[str, list[int]] = {}
+            for index, action in enumerate(actions):
+                thread_id = str(action.target.thread_id)
                 if kind_value(action) == "delete_native_project":
-                    return selector in identifiers  # No partial project IDs.
+                    project_ids.setdefault(thread_id, []).append(index)
+                    continue
+                identifiers = {thread_id}
                 payload = getattr(
                     getattr(action, "impact", None),
                     "external_action_payload",
@@ -2409,18 +2422,47 @@ class OperationCoordinator:
                     if isinstance(frontend_id, str) and frontend_id:
                         identifiers.add(frontend_id)
                         identifiers.add(f"{scope['client']}:{frontend_id}")
-                return selector in identifiers or any(
-                    value.startswith(selector) for value in identifiers
-                )
+                for identifier in identifiers:
+                    identifier_actions.setdefault(identifier, []).append(index)
 
-            found = {
-                selector
-                for selector in wanted
-                if any(matches_record(action, selector) for action in actions)
-            }
+            sorted_identifiers = sorted(identifier_actions)
+
+            def prefix_end(prefix: str) -> str | None:
+                """Return the exclusive lexicographic bound for one prefix."""
+
+                for index in range(len(prefix) - 1, -1, -1):
+                    codepoint = ord(prefix[index])
+                    if codepoint < 0x10FFFF:
+                        return prefix[:index] + chr(codepoint + 1)
+                return None
+
+            selected_indexes: set[int] = set()
+            found: set[str] = set()
+            for selector in wanted:
+                exact_project = project_ids.get(selector)
+                if exact_project:
+                    found.add(selector)
+                    selected_indexes.update(exact_project)
+
+                start = bisect_left(sorted_identifiers, selector)
+                upper = prefix_end(selector)
+                end = (
+                    len(sorted_identifiers)
+                    if upper is None
+                    else bisect_left(sorted_identifiers, upper)
+                )
+                for identifier in sorted_identifiers[start:end]:
+                    # The bounds above are exact for Unicode strings; retain
+                    # this check as a cheap guard if the identifier format is
+                    # extended by a future action family.
+                    if not identifier.startswith(selector):
+                        continue
+                    found.add(selector)
+                    selected_indexes.update(identifier_actions[identifier])
+
             actions = tuple(
-                action for action in actions
-                if any(matches_record(action, selector) for selector in wanted)
+                action for index, action in enumerate(actions)
+                if index in selected_indexes
             )
             for missing in sorted(wanted - found):
                 blockers.append(self._blocker(
