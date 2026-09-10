@@ -527,11 +527,12 @@ def read_spawn_edge_records(
 ) -> tuple[SpawnEdgeRecord, ...]:
     """Return native database spawn rows touching requested conversations."""
 
-    target_ids = sorted({
+    target_id_set = {
         thread_id
         for thread_id in thread_ids
         if isinstance(thread_id, str) and thread_id
-    })
+    }
+    target_ids = sorted(target_id_set)
     if not target_ids:
         return ()
 
@@ -633,8 +634,8 @@ def read_spawn_edge_records(
             and isinstance(row["child_thread_id"], str)
             and row["child_thread_id"]
             and (
-                row["parent_thread_id"] in target_ids
-                or row["child_thread_id"] in target_ids
+                row["parent_thread_id"] in target_id_set
+                or row["child_thread_id"] in target_id_set
             )
         )
     )
