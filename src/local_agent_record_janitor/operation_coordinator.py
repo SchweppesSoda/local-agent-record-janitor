@@ -21,6 +21,7 @@ from .record_identity import (
     canonical_path,
     normalize_client,
     normalize_engine,
+    project_selector_matches,
 )
 
 _BODY_KEYS = frozenset({
@@ -117,6 +118,9 @@ class OperationCoordinator:
             )
             candidates, blockers = self._select_candidates(context, normalized_scope)
             candidates = self._coalesce_manual_candidates(candidates, manual_actions)
+            if client_name == "cindy":
+                from .cindy_operations import preflight_frontend_actions
+                blockers.extend(preflight_frontend_actions(candidates))
             operation = str(operation_id or self._new_operation_id(client_name))
             document = self._make_plan_document(
                 operation,
@@ -2102,18 +2106,20 @@ class OperationCoordinator:
         # native root when selection is by project rather than record ID.
         from .planning import ConversationCatalogEntry, TargetRef
 
-        conversations = list(getattr(context.plan, "conversations", ()))
-        conversation_keys = {
-            (str(entry.target.storage_id), str(entry.target.thread_id))
-            for entry in conversations
+        catalog_summaries = {
+            (storage_id_for_path(record.codex_home), str(record.thread_id)): record.summary
+            for record in getattr(catalog, "records", ())
         }
-        for record in getattr(catalog, "records", ()):
-            key = (storage_id_for_path(record.codex_home), str(record.thread_id))
+        conversations = [
+            replace(entry, summary=catalog_summaries.get(
+                (str(entry.target.storage_id), str(entry.target.thread_id)), entry.summary))
+            for entry in getattr(context.plan, "conversations", ())
+        ]
+        conversation_keys = {(str(entry.target.storage_id), str(entry.target.thread_id))
+                             for entry in conversations}
+        for key, summary in catalog_summaries.items():
             if key not in conversation_keys:
-                conversations.append(ConversationCatalogEntry(
-                    target=TargetRef(*key), summary=record.summary
-                ))
-                conversation_keys.add(key)
+                conversations.append(ConversationCatalogEntry(target=TargetRef(*key), summary=summary))
         merged_actions = tuple((*existing_actions, *manual_candidates))
         # ``ManualDeletePlan.errors`` may contain failures from several
         # physical homes. A failure that names one catalog/source must not
@@ -2552,7 +2558,7 @@ class OperationCoordinator:
         if str(getattr(action.kind, "value", action.kind)) == "delete_native_project":
             return values
         path_values = tuple(
-            value for value in values if _looks_like_project_path(value)
+            value for value in values if _looks_like_project_path(value) and "://" not in value
         )
         # A display label is useful for selection, but once a path is present
         # it must not become a second project identity for the same action.
@@ -2560,21 +2566,7 @@ class OperationCoordinator:
 
     @staticmethod
     def _selector_matches(selector: str, value: str) -> bool:
-        raw, candidate = str(selector).strip(), str(value).strip()
-        if not raw or not candidate:
-            return False
-        if raw.casefold() == candidate.casefold():
-            return True
-        if (
-            candidate.casefold().startswith(raw.casefold())
-            and "/" not in raw
-            and "\\" not in raw
-        ):
-            return True
-        try:
-            return Path(candidate).name.casefold() == raw.casefold()
-        except (OSError, ValueError):
-            return False
+        return project_selector_matches(selector, value)
 
     @staticmethod
     def _project_identity(value: str) -> str:
@@ -3808,6 +3800,12 @@ class OperationCoordinator:
                     "action_ids": [str(action.action_id) for action in batch.actions],
                     "result": outcome_doc,
                 }
+                outcome_errors = self._outcome_errors(outcome)
+                if outcome_errors:
+                    batch_result["blockers"] = [self._blocker(
+                        "mutation_outcome_unknown" if batch_unknown else "batch_execution_blocked",
+                        message, scope=f"child:{child_id}",
+                    ) for message in outcome_errors]
                 batch_result.update(self._batch_scope_metadata(live.context, batch))
                 batch_results.append(batch_result)
                 store.append_event(
@@ -3824,6 +3822,7 @@ class OperationCoordinator:
                         # marker. The operation-level flag may already be
                         # true because an earlier child completed.
                         "mutation_started": batch_mutation_started,
+                        "blockers": batch_result.get("blockers", []),
                     },
                 )
                 if batch_unknown:
@@ -4275,6 +4274,19 @@ class OperationCoordinator:
             return None, str(exc) or repr(exc)
 
     @staticmethod
+    def _outcome_errors(outcome: Any) -> tuple[str, ...]:
+        containers = (
+            getattr(outcome, "results", ()),
+            getattr(getattr(outcome, "cleanup_report", None), "results", ()),
+            getattr(getattr(outcome, "session_cleanup", None), "results", ()),
+        )
+        return tuple(dict.fromkeys(
+            str(error) for results in containers for result in results or ()
+            for error in (getattr(result, "error", None), getattr(result, "request_error", None))
+            if error
+        ))
+
+    @staticmethod
     def _outcome_statuses(outcome: Any) -> set[str]:
         statuses: set[str] = set()
         containers = [
@@ -4285,7 +4297,8 @@ class OperationCoordinator:
             containers.append(getattr(outcome, "results", ()))
         for container in containers:
             for result in container or ():
-                raw_status = getattr(result, "status", "")
+                raw_status = ("blocked" if getattr(result, "preflight_blocked", False) is True
+                              else getattr(result, "status", ""))
                 status = str(getattr(raw_status, "value", raw_status))
                 if status:
                     statuses.add(status)
@@ -4315,6 +4328,7 @@ class OperationCoordinator:
 
         target_id = str(getattr(getattr(action, "target", None), "thread_id", ""))
         containers = (
+            getattr(outcome, "results", ()),
             getattr(getattr(outcome, "cleanup_report", None), "results", ()),
             getattr(getattr(outcome, "session_cleanup", None), "results", ()),
         )
@@ -4323,7 +4337,8 @@ class OperationCoordinator:
                 finding = getattr(result, "finding", None)
                 if str(getattr(finding, "thread_id", "")) != target_id:
                     continue
-                raw_status = getattr(result, "status", "")
+                raw_status = ("blocked" if getattr(result, "preflight_blocked", False) is True
+                              else getattr(result, "status", ""))
                 return str(getattr(raw_status, "value", raw_status))
         statuses = OperationCoordinator._outcome_statuses(outcome)
         if statuses == {"deleted"}:

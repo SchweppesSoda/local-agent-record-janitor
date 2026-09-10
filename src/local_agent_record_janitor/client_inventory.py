@@ -1579,8 +1579,14 @@ def _target_from_record(client: str, record: ManagedConversation) -> ClientTarge
             *((record.action_id,) if native_present else ()),
             *actions,
         ),
-        blocker_codes=capability.blocker_codes,
-        blockers=capability.blockers,
+        is_subagent=bool(record.summary.is_subagent),
+        parent_thread_ids=tuple(record.summary.parent_thread_ids),
+        descendant_thread_ids=tuple(record.descendant_thread_ids),
+        blocker_codes=tuple(dict.fromkeys((*capability.blocker_codes, *record.blocker_codes))),
+        blockers=tuple((*capability.blockers, *(
+            {"blocker_code": code, "message": message}
+            for code, message in zip(record.blocker_codes, record.blockers)
+        ))),
     )
 
 

@@ -284,6 +284,23 @@ class ProjectSelectionError(ValueError):
         super().__init__(message)
 
 
+def project_selector_matches(selector: str, value: str, display_name: str | None = None) -> bool:
+    """Match project evidence consistently in inventory and immutable plans."""
+    raw, candidate = str(selector).strip(), str(value).strip()
+    if not raw or not candidate:
+        return False
+    if raw == candidate:
+        return True
+    path_selector = "/" in raw or '\\' in raw
+    path_candidate = "/" in candidate or '\\' in candidate
+    if path_selector:
+        if not path_candidate or "://" in raw or "://" in candidate:
+            return False
+        return canonical_path(raw) == canonical_path(candidate)
+    names = (display_name, Path(candidate).name if path_candidate else candidate)
+    return any(name and name.casefold().startswith(raw.casefold()) for name in names)
+
+
 def resolve_project_selector(
     projects: Iterable[ProjectKey],
     selector: str,
@@ -309,23 +326,18 @@ def resolve_project_selector(
         project
         for project in candidates
         if raw in {project.stable_id, project.value}
+        or (("/" in raw or '\\' in raw) and project.kind == "path"
+            and project_selector_matches(raw, project.value))
     )
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
         raise ProjectSelectionError(raw, matches=exact)
-    lowered = raw.casefold()
     matches = tuple(
-        project
-        for project in candidates
-        if (
-            project.stable_id.casefold().startswith(lowered)
-            or project.value.casefold().startswith(lowered)
-            or (
-                project.display_name is not None
-                and project.display_name.casefold().startswith(lowered)
-            )
-        )
+        project for project in candidates
+        if project_selector_matches(raw, project.value, project.display_name)
+        or ("/" not in raw and '\\' not in raw
+            and project.stable_id.casefold().startswith(raw.casefold()))
     )
     if len(matches) != 1:
         raise ProjectSelectionError(raw, matches=matches)

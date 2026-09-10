@@ -17,6 +17,7 @@ from typing import Any
 
 from .sqlite_identity import row_fingerprint, schema_fingerprint, table_schema
 from .sqlite_utils import connect_readonly
+from .cindy_schema import CindySchemaError, guard_cindy_session_schema
 
 
 # Retained rows require explicit per-session authorization frozen in the plan.
@@ -468,6 +469,10 @@ def _snapshot(
     *,
     explicitly_selected_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[CindySessionDeleteEvidence, ...]:
+    try:
+        guard_cindy_session_schema(db)
+    except CindySchemaError as exc:
+        raise FrontendSessionGuardError(str(exc)) from exc
     schema = table_schema(db, "sessions")
     columns = tuple(str(item["name"]) for item in schema)
     if not {"id", "status", "agent_kind", "sdk_session_id"}.issubset(columns):

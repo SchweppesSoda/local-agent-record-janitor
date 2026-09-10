@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -267,3 +268,78 @@ class CindyCodexOperationTests(unittest.TestCase):
         self.assertFalse(result["mutation_started"])
         with closing(sqlite3.connect(self.database)) as db:
             self.assertEqual(db.execute("SELECT sdk_session_id FROM sessions WHERE id='ui-delete'").fetchone()[0], "delete")
+
+
+    def test_inventory_exposes_real_subagent_identity(self):
+        out = StringIO()
+        status = main(["records", "--client", "cindy", "--project", "ProxyConfig", "--json"],
+                      adapters=(self.adapter(),), stdout=out, stderr=StringIO())
+        self.assertEqual(status, 0)
+        targets = {target["record_id"]: target for group in json.loads(out.getvalue())["groups"] for target in group["targets"]}
+        self.assertTrue(targets["child"]["is_subagent"])
+        self.assertEqual(targets["child"]["parent_thread_ids"], ["delete"])
+        self.assertEqual(targets["delete"]["descendant_thread_ids"], ["child"])
+
+    def test_project_selection_uses_complete_catalog_without_frontend_references(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("DELETE FROM sessions WHERE id IN ('ui-delete','ui-child')")
+            db.commit()
+        plan = self.plan(projects=(str(self.root / "ProxyConfig"),))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertEqual(self.calls, ["delete"])
+        self.assertFalse(self.paths["child"].exists())
+        self.assertTrue(self.paths["keep"].exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows physical path aliases")
+    def test_normal_project_path_matches_extended_rollout_path(self):
+        project = self.root / "ProxyConfig"
+        project.mkdir()
+        for record_id in ("delete", "child"):
+            path = self.paths[record_id]
+            lines = path.read_text().splitlines()
+            metadata = json.loads(lines[0])
+            metadata["payload"]["cwd"] = chr(92) * 2 + "?" + chr(92) + str(project)
+            path.write_text(json.dumps(metadata) + chr(10) + chr(10).join(lines[1:]) + chr(10))
+        plan = self.plan(projects=(str(project),))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual({a["target"]["thread_id"] for a in plan["actions"] if a["kind"] == "delete_conversation"}, {"delete"})
+
+    def test_unsupported_frontend_trigger_blocks_plan_before_native_request(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.executescript("CREATE TRIGGER unexpected AFTER UPDATE ON sessions BEGIN DELETE FROM sessions WHERE id='ui-keep'; END;")
+        plan = self.plan(projects=("ProxyConfig",))
+        self.assertEqual(plan["goal_status"], "blocked", plan)
+        self.assertIn("frontend_preflight_blocked", {b["blocker_code"] for b in plan["blockers"]})
+        self.assertEqual(self.calls, [])
+        self.assertTrue(self.paths["delete"].exists())
+
+    def test_native_startup_scope_drift_has_actionable_blocked_result(self):
+        plan = self.plan(projects=("ProxyConfig",))
+        normal = self.server
+        def drift(**kwargs):
+            server = normal(**kwargs)
+            path = self.paths["delete"]
+            path.write_text(path.read_text() + '{"type":"event_msg","payload":{"text":"changed"}}' + chr(10))
+            return server
+        self.server = drift
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "blocked", result)
+        self.assertFalse(result["mutation_started"])
+        self.assertEqual(self.calls, [])
+        messages = " ".join(b["message"] for b in result["blockers"])
+        self.assertIn("scope", messages)
+        self.assertIn("no deletion request was sent", messages)
+        status = self.coordinator().get_operation_status(operation_id=plan["operation_id"], plan_path=Path(plan["plan_path"]))
+        self.assertEqual(status["goal_status"], "blocked", status)
+
+    def test_manual_partial_result_releases_only_successful_root(self):
+        from local_agent_record_janitor.cleaner import CleanupReport, CleanupResult
+        from local_agent_record_janitor.models import Finding
+        outcome = CleanupReport(planned=[], results=[
+            CleanupResult(Finding(platform="cindy", platform_session_id="ui-a", thread_id="a", reason="test", platform_db=self.database, codex_home=self.home), "deleted"),
+            CleanupResult(Finding(platform="cindy", platform_session_id="ui-b", thread_id="b", reason="test", platform_db=self.database, codex_home=self.home), "partial"),
+        ])
+        action = SimpleNamespace(target=SimpleNamespace(thread_id="a"))
+        self.assertEqual(OperationCoordinator._outcome_status_for_action(outcome, action), "deleted")

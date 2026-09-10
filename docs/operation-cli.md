@@ -79,6 +79,12 @@ explicit Cindy session IDs as described below.
 Missing-parent subagents use the existing native orphan evidence and guards for
 the same Cindy store rather than a synthetic manual-delete finding.
 
+Cindy frontend references are checked during planning against the supported
+upstream FTS trigger definitions and index layouts. Unknown triggers return a
+`frontend_preflight_blocked` blocker before any native deletion is attempted.
+See [Cindy storage contract](cindy-storage-contract.md) for pinned upstream
+sources, the closed-client CJK fallback, and regression fixtures.
+
 ## Output
 
 JSON output and human summaries contain metadata only: IDs, stores, paths,

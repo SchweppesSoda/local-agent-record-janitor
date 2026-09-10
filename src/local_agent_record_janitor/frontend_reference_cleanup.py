@@ -14,6 +14,7 @@ from typing import Any
 
 from .codex_desktop_state import ClientInspector
 from .sqlite_utils import connect_readonly, table_exists
+from .cindy_schema import CindySchemaError, guard_cindy_triggers
 
 from .sqlite_identity import (
     quote_identifier,
@@ -159,6 +160,13 @@ def execute_frontend_reference_cleanup(
         owner_client=owner_client,
     )
 
+    # Schema blockers require no row scan or rollback copy. Exact row guards
+    # still run once under BEGIN IMMEDIATE, followed by one verification read.
+    if platform == "cindy":
+        with closing(connect_readonly(database)) as connection:
+            for table in {str(item.get("table")) for item in evidence}:
+                _guard_cindy_triggers(connection, table)
+
     backup_directory = Path(
         tempfile.mkdtemp(
             prefix=".larj-frontend-",
@@ -189,15 +197,10 @@ def execute_frontend_reference_cleanup(
                 if phase_callback is not None:
                     phase_callback("mutation_started")
                 mutation_started = True
-                changes_before = connection.total_changes
+                # Each statement checks cursor.rowcount == 1. total_changes
+                # also includes the proven FTS trigger/shadow-table writes.
                 for mutation in prepared:
                     _apply_mutation(connection, mutation)
-                changed = connection.total_changes - changes_before
-                if changed != len(prepared):
-                    raise FrontendReferenceError(
-                        "Frontend transaction affected an unexpected number "
-                        f"of rows: expected {len(prepared)}, got {changed}"
-                    )
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -209,6 +212,11 @@ def execute_frontend_reference_cleanup(
         if phase_callback is not None:
             phase_callback("verified")
     except Exception as exc:
+        if not mutation_started:
+            _discard_backup(backup_path, backup_directory)
+            if isinstance(exc, FrontendReferenceError):
+                raise
+            raise FrontendReferenceError(str(exc)) from exc
         try:
             restore_error = _restore_backup(database, backup_path)
         except Exception as restore_exc:
@@ -873,7 +881,7 @@ def _prepare_cindy_batch(
         str(first.get("session_schema_fingerprint") or ""),
         required={"id", "sdk_session_id", "status", "agent_kind"},
     )
-    _ensure_no_triggers(connection, "sessions")
+    _guard_cindy_triggers(connection, "sessions")
     session_hash = schema_fingerprint(session_schema)
     session_ids: list[str] = []
     for item in evidence:
@@ -916,7 +924,7 @@ def _prepare_cindy_batch(
                 "rewind_at",
             },
         )
-        _ensure_no_triggers(connection, "messages")
+        _guard_cindy_triggers(connection, "messages")
         message_hash = schema_fingerprint(message_schema)
         message_ids: list[str] = []
         for item in message_items:
@@ -1180,7 +1188,7 @@ def _prepare_cindy_mutation(
         str(evidence.get("session_schema_fingerprint") or ""),
         required={"id", "sdk_session_id", "status", "agent_kind"},
     )
-    _ensure_no_triggers(connection, "sessions")
+    _guard_cindy_triggers(connection, "sessions")
     locator = _mapping(evidence.get("locator"))
     session_id = locator.get("cindy_session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -1232,7 +1240,7 @@ def _prepare_cindy_mutation(
             "rewind_at",
         },
     )
-    _ensure_no_triggers(connection, "messages")
+    _guard_cindy_triggers(connection, "messages")
     message_id = locator.get("message_id")
     if not isinstance(message_id, str) or not message_id:
         raise FrontendReferenceError("Cindy history evidence has no message ID")
@@ -1396,6 +1404,13 @@ def _validate_schema(
             f"Frontend table {table!r} schema changed after authorization"
         )
     return schema, columns
+
+
+def _guard_cindy_triggers(connection: sqlite3.Connection, table: str) -> None:
+    try:
+        guard_cindy_triggers(connection, table)
+    except CindySchemaError as exc:
+        raise FrontendReferenceGuardError(str(exc)) from exc
 
 
 def _ensure_no_triggers(

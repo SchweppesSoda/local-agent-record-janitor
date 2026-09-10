@@ -139,6 +139,7 @@ class CleanupResult:
     remaining_artifacts: tuple[str, ...] = ()
     request_error: str | None = None
     impacted_thread_ids: tuple[str, ...] = ()
+    preflight_blocked: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -161,6 +162,7 @@ class CleanupResult:
             "status": self.status,
             "error": self.error,
             "request_error": self.request_error,
+            "preflight_blocked": self.preflight_blocked,
             "remaining_artifacts": list(self.remaining_artifacts),
             "impacted_thread_ids": list(self.impacted_thread_ids),
         }
@@ -1245,6 +1247,7 @@ def _clean_group(
                     CleanupResult(
                         finding=finding,
                         status="unknown",
+                        preflight_blocked=True,
                         error=error,
                         impacted_thread_ids=tuple(
                             sorted({finding.thread_id, *descendants})
