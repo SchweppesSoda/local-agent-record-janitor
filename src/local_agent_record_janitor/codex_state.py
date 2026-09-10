@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import stat
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -27,6 +27,61 @@ class SpawnEdgeRecord:
     parent_thread_id: str
     child_thread_id: str
     status: str | None
+
+
+@dataclass(frozen=True)
+class NativeLineageSnapshot:
+    """A point-in-time native lineage read shared by one safety check.
+
+    The snapshot is deliberately created by the caller for one check phase.
+    It is not cached globally: native app-server writes can change the state
+    database between checks, so callers must create a fresh snapshot after
+    startup and immediately before each mutation.
+    """
+
+    lineage: Mapping[str, ThreadSourceInfo]
+
+    def descendants(self, thread_ids: Iterable[str]) -> dict[str, set[str]]:
+        roots = sorted(set(thread_ids))
+        if not roots:
+            return {}
+
+        graph: dict[str, set[str]] = {}
+        for child, info in self.lineage.items():
+            for parent in info.parent_thread_ids:
+                graph.setdefault(parent, set()).add(child)
+
+        descendants: dict[str, set[str]] = {}
+        for root in roots:
+            seen: set[str] = set()
+            pending = list(graph.get(root, ()))
+            while pending:
+                child = pending.pop()
+                if child == root or child in seen:
+                    continue
+                seen.add(child)
+                pending.extend(graph.get(child, ()))
+            descendants[root] = seen
+        return descendants
+
+    def edges(self, thread_ids: Iterable[str]) -> set[tuple[str, str]]:
+        target_ids = {
+            thread_id
+            for thread_id in thread_ids
+            if isinstance(thread_id, str) and thread_id
+        }
+        if not target_ids:
+            return set()
+        return {
+            (parent, child)
+            for child, info in self.lineage.items()
+            for parent in info.parent_thread_ids
+            if parent in target_ids or child in target_ids
+        }
+
+
+_SQLITE_TARGET_BATCH = 400
+_TEMP_TARGET_TABLE = "_larj_target_thread_ids"
 
 
 def parse_thread_source(
@@ -268,6 +323,30 @@ def read_native_lineage(
     return result
 
 
+def read_native_lineage_snapshot(
+    codex_home: Path,
+    *,
+    rollout_records: Iterable[RolloutRecord] | None = None,
+    strict: bool = True,
+) -> NativeLineageSnapshot:
+    """Read native lineage once for the duration of one safety check.
+
+    ``read_native_lineage`` remains the compatibility API for callers that
+    need the complete mapping.  Code that needs both a descendant closure and
+    direct edge observations should use this helper so those observations are
+    derived from exactly the same database read.  The helper intentionally
+    does not retain the snapshot beyond the caller's check phase.
+    """
+
+    return NativeLineageSnapshot(
+        lineage=read_native_lineage(
+            codex_home,
+            rollout_records=rollout_records,
+            strict=strict,
+        )
+    )
+
+
 def scan_rollouts(codex_home: Path) -> dict[str, RolloutRecord]:
     """Read only the session_meta line from each active or archived rollout."""
     records: dict[str, RolloutRecord] = {}
@@ -407,24 +486,12 @@ def read_spawn_descendants(
     if not roots:
         return {}
 
-    graph: dict[str, set[str]] = {}
-    lineage = read_native_lineage(codex_home, rollout_records=rollout_records, strict=strict)
-    for child, info in lineage.items():
-        for parent in info.parent_thread_ids:
-            graph.setdefault(parent, set()).add(child)
-
-    descendants: dict[str, set[str]] = {}
-    for root in roots:
-        seen: set[str] = set()
-        pending = list(graph.get(root, ()))
-        while pending:
-            child = pending.pop()
-            if child == root or child in seen:
-                continue
-            seen.add(child)
-            pending.extend(graph.get(child, ()))
-        descendants[root] = seen
-    return descendants
+    snapshot = read_native_lineage_snapshot(
+        codex_home,
+        rollout_records=rollout_records,
+        strict=strict,
+    )
+    return snapshot.descendants(roots)
 
 
 def read_spawn_edges(
@@ -444,12 +511,12 @@ def read_spawn_edges(
     if not target_ids:
         return set()
 
-    lineage = read_native_lineage(codex_home, rollout_records=rollout_records, strict=strict)
-    return {
-        (parent, child) for child, info in lineage.items()
-        for parent in info.parent_thread_ids
-        if parent in target_ids or child in target_ids
-    }
+    snapshot = read_native_lineage_snapshot(
+        codex_home,
+        rollout_records=rollout_records,
+        strict=strict,
+    )
+    return snapshot.edges(target_ids)
 
 
 def read_spawn_edge_records(
@@ -460,11 +527,11 @@ def read_spawn_edge_records(
 ) -> tuple[SpawnEdgeRecord, ...]:
     """Return native database spawn rows touching requested conversations."""
 
-    target_ids = {
+    target_ids = sorted({
         thread_id
         for thread_id in thread_ids
         if isinstance(thread_id, str) and thread_id
-    }
+    })
     if not target_ids:
         return ()
 
@@ -495,13 +562,53 @@ def read_spawn_edge_records(
             status_projection = (
                 "status" if "status" in columns else "NULL AS status"
             )
-            rows = connection.execute(
-                """
-                SELECT parent_thread_id, child_thread_id, %s
-                FROM thread_spawn_edges
-                """
-                % status_projection
-            ).fetchall()
+            if len(target_ids) <= _SQLITE_TARGET_BATCH:
+                placeholders = ",".join("?" for _ in target_ids)
+                rows = connection.execute(
+                    f"""
+                    SELECT parent_thread_id, child_thread_id, {status_projection}
+                    FROM thread_spawn_edges
+                    WHERE parent_thread_id IN ({placeholders})
+                       OR child_thread_id IN ({placeholders})
+                    """,
+                    [*target_ids, *target_ids],
+                ).fetchall()
+            else:
+                # A large affected scope can exceed SQLite's host-parameter
+                # limit if it is repeated in an IN/OR expression.  A TEMP
+                # table keeps the main database read-only and, unlike
+                # independent chunks, does not duplicate an edge whose two
+                # endpoints fall in different chunks.  Duplicate native rows
+                # remain duplicate result rows, which is required by the
+                # relation-integrity checks.
+                connection.execute(
+                    f"CREATE TEMP TABLE {_TEMP_TARGET_TABLE} "
+                    "(id TEXT PRIMARY KEY)"
+                )
+                connection.executemany(
+                    f"INSERT INTO {_TEMP_TARGET_TABLE} (id) VALUES (?)",
+                    ((thread_id,) for thread_id in target_ids),
+                )
+                try:
+                    rows = connection.execute(
+                        f"""
+                        SELECT parent_thread_id, child_thread_id,
+                               {status_projection}
+                        FROM thread_spawn_edges
+                        WHERE EXISTS (
+                            SELECT 1 FROM {_TEMP_TARGET_TABLE} targets
+                            WHERE targets.id = thread_spawn_edges.parent_thread_id
+                        )
+                           OR EXISTS (
+                            SELECT 1 FROM {_TEMP_TARGET_TABLE} targets
+                            WHERE targets.id = thread_spawn_edges.child_thread_id
+                        )
+                        """
+                    ).fetchall()
+                finally:
+                    connection.execute(
+                        f"DROP TABLE {_TEMP_TARGET_TABLE}"
+                    )
     except sqlite3.Error as exc:
         if strict:
             raise CodexStateReadError(
