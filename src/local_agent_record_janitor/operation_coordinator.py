@@ -1178,6 +1178,7 @@ class OperationCoordinator:
                     context, adapters, catalog=inventory.catalog
                 )
             )
+        context = self._merge_cindy_orphan_references(context, inventory, client=client)
         engine_contexts = build_client_engine_contexts(
             adapters,
             client=client,
@@ -1276,6 +1277,62 @@ class OperationCoordinator:
                                build_manual_delete_closure(manual).frontend_actions)
         omitted = covered | (covered_references - retained_references)
         return tuple(action for action in candidates if str(action.action_id) not in omitted)
+
+    def _merge_cindy_orphan_references(self, context: Any, inventory: Any, *, client: str) -> Any:
+        """Plan exact references only after a complete native absence proof."""
+        if client != "cindy" or inventory.errors:
+            return context
+        from .planning import ActionImpact, ActionKind, CandidateAction, RiskLevel, TargetRef, storage_id_for_path
+
+        actions = list(context.plan.actions)
+        existing = {
+            (a.target.storage_id, a.target.thread_id, canonical_path(path))
+            for a in actions if a.kind == ActionKind.REMOVE_FRONTEND_REFERENCE
+            for path in a.impact.frontend_database_paths
+        }
+        for record in inventory.records:
+            if (record.indexed or record.legacy_indexed or record.artifact_present or record.rollouts
+                    or record.descendant_thread_ids or record.cascade_unknown):
+                continue
+            grouped: dict[str, list[Any]] = {}
+            for session in record.frontend_sessions:
+                if session.platform != "cindy" or session.database is None:
+                    continue
+                grouped.setdefault(canonical_path(session.database), []).append(session)
+            storage_id = storage_id_for_path(record.codex_home)
+            for database, sessions in grouped.items():
+                if (storage_id, record.thread_id, database) in existing:
+                    continue
+                evidence = tuple(s.details.get("frontend_reference") for s in sessions)
+                owners = {str(s.owner_process_root) for s in sessions if s.owner_process_root}
+                if (len(owners) != 1 or any(s.owner_client != "cindy" or not s.owner_process_root for s in sessions)
+                        or any(not isinstance(e, Mapping) or e.get("exact") is not True
+                               or e.get("platform") != "cindy"
+                               or canonical_path(str(e.get("database") or "")) != database
+                               or e.get("expected", {}).get("agent_kind") != "codex"
+                               or e.get("expected", {}).get("native_session_id") != record.thread_id
+                               for e in evidence)):
+                    continue
+                owner = next(iter(owners))
+                binding = {"store": canonical_path(record.codex_home), "thread": record.thread_id,
+                           "database": database, "owner": owner, "references": self._metadata(evidence)}
+                fingerprint = hashlib.sha256(json.dumps(binding, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+                impact = ActionImpact(
+                    affected_thread_ids=(record.thread_id,), frontend_reference_count=len(evidence),
+                    frontend_residual_count=len(evidence), frontend_references_preserved=False,
+                    frontend_database_paths=(database,), frontend_reference_evidence=evidence,
+                    owner_client="cindy", owner_process_root=owner, resource_path=database,
+                    external_engine="codex", external_action_payload={"cwd": record.summary.cwd},
+                )
+                actions.append(CandidateAction(
+                    action_id="orphan-reference:" + fingerprint, kind=ActionKind.REMOVE_FRONTEND_REFERENCE,
+                    target=TargetRef(storage_id, record.thread_id), risk=RiskLevel.REVIEW,
+                    available=True, unavailable_reason=None, impact=impact,
+                    snapshot_fingerprint=fingerprint, requires_explicit_selection=True,
+                    resource_kind="frontend_reference",
+                ))
+        plan = replace(context.plan, actions=tuple(actions))
+        return replace(context, plan=plan, actions=self.service.typed_actions(plan))
 
     def _merge_cindy_terminal_sessions(
         self,

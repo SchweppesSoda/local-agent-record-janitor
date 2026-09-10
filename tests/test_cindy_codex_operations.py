@@ -204,3 +204,33 @@ class CindyCodexOperationTests(unittest.TestCase):
         self.assertFalse(self.paths["child"].exists())
         self.assertTrue(self.paths["keep"].exists())
         self.assertEqual((self.official / "state_5.sqlite").read_bytes(), self.official_before)
+
+    def test_orphan_reference_cleanup_preserves_session_rows_and_other_project(self):
+        self.server().delete_thread("delete")
+        self.calls.clear()
+        plan = self.plan(record_ids=("delete", "child"))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual({a["kind"] for a in plan["actions"]}, {"remove_frontend_reference"})
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertEqual(self.calls, [])
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(dict(db.execute("SELECT id,sdk_session_id FROM sessions")),
+                             {"ui-delete": None, "ui-child": None, "ui-keep": "keep"})
+
+    def test_reappeared_native_blocks_orphan_reference_plan(self):
+        path = self.paths["delete"]
+        original = path.read_bytes()
+        self.server().delete_thread("delete")
+        self.calls.clear()
+        plan = self.plan(record_ids=("delete",))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        path.write_bytes(original)
+        with closing(sqlite3.connect(self.home / "state_5.sqlite")) as db:
+            db.execute("INSERT INTO threads(id,rollout_path) VALUES('delete',?)", (str(path),))
+            db.commit()
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "blocked", result)
+        self.assertFalse(result["mutation_started"])
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT sdk_session_id FROM sessions WHERE id='ui-delete'").fetchone()[0], "delete")

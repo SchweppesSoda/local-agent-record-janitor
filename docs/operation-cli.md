@@ -70,6 +70,14 @@ requests. Descendant references remain bound to their own native IDs. A
 child-only selection never implicitly selects its parent and remains subject
 to the existing lineage guards.
 
+If a verified native deletion leaves Cindy references, a fresh plan can clear
+those exact references only when a complete inventory proves the native index,
+rollouts, legacy index and descendants absent. Incomplete catalogs and unproven
+row ownership remain blocked. Reappearing native records invalidate the plan.
+This removes SDK references only; active Cindy session/message rows are retained.
+Missing-parent subagents use the existing native orphan evidence and guards for
+the same Cindy store rather than a synthetic manual-delete finding.
+
 ## Output
 
 JSON output and human summaries contain metadata only: IDs, stores, paths,
