@@ -515,7 +515,7 @@ def capability_for(
         if normalized_client == "cindy":
             reason = (
                 "Native Codex/Pi/Claude deletion, exact Cindy reference "
-                "cleanup, and soft-deleted session-row cleanup are supported; "
+                "cleanup, and terminal/explicitly selected session-row cleanup are supported; "
                 "project-item deletion requires a registered writer"
             )
         if normalized_client == "aionui" and normalized_engine in {"pi", "claude"}:

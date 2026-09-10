@@ -111,6 +111,7 @@ class OperationCoordinator:
                 client_name,
                 source,
                 engines=tuple(normalized_scope.get("engines", ())),
+                explicit_session_ids=tuple(normalized_scope.get("record_ids", ())),
                 include_action_contexts=True,
                 codex_home=codex_home,
             )
@@ -244,7 +245,8 @@ class OperationCoordinator:
                 ) = self._build_context(
                     client_name,
                     source,
-                    engines=tuple(normalized_scope.get("engines", ())),
+                    engines=tuple(document.get("scope", {}).get("engines", ())),
+                    explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
                 )
@@ -488,6 +490,7 @@ class OperationCoordinator:
                     client_name,
                     source,
                     engines=tuple(document.get("scope", {}).get("engines", ())),
+                    explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
                 )
@@ -997,6 +1000,7 @@ class OperationCoordinator:
         adapters: tuple[Any, ...] | None,
         *,
         engines: Sequence[str] = (),
+        explicit_session_ids: Sequence[str] = (),
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
     ) -> tuple[Any, ...]:
@@ -1078,6 +1082,7 @@ class OperationCoordinator:
             selected,
             client=client,
             engines=engines,
+            explicit_session_ids=explicit_session_ids,
         )
         return result if include_action_contexts else result[:5]
 
@@ -1088,6 +1093,7 @@ class OperationCoordinator:
         *,
         client: str,
         engines: Sequence[str],
+        explicit_session_ids: Sequence[str] = (),
     ) -> tuple[Any, tuple[Any, ...], None, None, Mapping[str, Any], Mapping[str, Any]]:
         """Add verified native child contexts to one frontend operation.
 
@@ -1116,6 +1122,7 @@ class OperationCoordinator:
             context,
             inventory,
             client=client,
+            explicit_session_ids=explicit_session_ids,
         )
         # Successful scans remain evidence when their last actionable row is gone.
         from .planning import StorageLocation, ScanStatus, storage_id_for_path
@@ -1340,8 +1347,9 @@ class OperationCoordinator:
         inventory: Any,
         *,
         client: str,
+        explicit_session_ids: Sequence[str] = (),
     ) -> Any:
-        """Project exact soft-deleted Cindy rows into cleanup batches."""
+        """Project terminal or explicitly selected Cindy rows into cleanup batches."""
 
         if client != "cindy":
             return context
@@ -1364,7 +1372,8 @@ class OperationCoordinator:
                 continue
             status = str(getattr(session, "status", "") or "").casefold()
             details = getattr(session, "details", {})
-            if status != "deleted" or not isinstance(
+            explicitly_selected = session.platform_session_id in explicit_session_ids
+            if (status != "deleted" and not (explicitly_selected and status in {"active", "archived"})) or not isinstance(
                 details, Mapping
             ):
                 continue
@@ -1425,6 +1434,7 @@ class OperationCoordinator:
                     "database": str(database),
                     "session_id": session.platform_session_id,
                     "expected_status": session.status,
+                    "explicitly_selected": session.platform_session_id in explicit_session_ids,
                     "session_schema_fingerprint": reference.get(
                         "session_schema_fingerprint"
                     ),
@@ -4252,6 +4262,7 @@ class OperationCoordinator:
                     engines=tuple(
                         live.document.get("scope", {}).get("engines", ())
                     ),
+                    explicit_session_ids=tuple(live.document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=self._bound_codex_home(live.document, None),
                 )

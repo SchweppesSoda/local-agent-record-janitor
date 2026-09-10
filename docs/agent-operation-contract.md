@@ -103,6 +103,12 @@ result is compacted to a body-free `receipt.json`; the receipt expires after at
 most seven days and must never be treated as a backup. See
 [agent-automation.md](agent-automation.md) for the JSON and verification contract.
 
+When the user explicitly requests Cindy chat-row deletion, select the exact
+Cindy session IDs with `--record-id`. This permits supported `active` and
+`archived` rows and their bound message/dependency rows; project/all-projects
+cleanup keeps its soft-deleted-only default. A native SDK ID is not a Cindy
+session-row authorization.
+
 Shared SQLite/JSON mutations use temporary rollback copies only. Exact frontend
 reference and relation-edge actions require a closed owning client, a supported
 schema, immutable row evidence, an exact affected-row count, and post-write

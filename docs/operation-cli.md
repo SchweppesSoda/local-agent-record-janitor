@@ -74,7 +74,8 @@ If a verified native deletion leaves Cindy references, a fresh plan can clear
 those exact references only when a complete inventory proves the native index,
 rollouts, legacy index and descendants absent. Incomplete catalogs and unproven
 row ownership remain blocked. Reappearing native records invalidate the plan.
-This removes SDK references only; active Cindy session/message rows are retained.
+Reference actions remove SDK references only. Deleting retained chat rows requires
+explicit Cindy session IDs as described below.
 Missing-parent subagents use the existing native orphan evidence and guards for
 the same Cindy store rather than a synthetic manual-delete finding.
 
@@ -113,11 +114,15 @@ anomaly scan and is not guaranteed to appear as a uniformly executable
 `records` target for every client.
 
 Cindy frontend-session deletion is deliberately narrower than "not active":
-only `sessions.status='deleted'` rows enter `delete_frontend_session` batches.
+project/all-projects cleanup selects only `sessions.status='deleted'` rows.
+An explicit `--record-id <Cindy-session-id>` selection also supports `active` and
+`archived` rows when the user requests their permanent deletion. This selection
+is frozen in the operation scope and in each row's `explicitly_selected` evidence;
+a native SDK thread ID does not authorize deleting its Cindy chat row.
 All approved IDs in one Cindy database are guarded as a set and deleted in one
 transaction together with their supported message, FTS, embedding/vector, and
-session-owned dependency rows. `active`, `archived`, and unproven schemas are
-inventory/protection evidence, not deletion candidates.
+session-owned dependency rows. Status changes invalidate the frozen evidence.
+Unselected retained rows and unproven schemas remain protected.
 
 ## Official Desktop inventory and completion
 

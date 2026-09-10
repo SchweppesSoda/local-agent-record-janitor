@@ -1,4 +1,4 @@
-"""Verified hard deletion for terminal Cindy frontend task rows."""
+"""Verified hard deletion for terminal or explicitly selected Cindy task rows."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ from .sqlite_identity import row_fingerprint, schema_fingerprint, table_schema
 from .sqlite_utils import connect_readonly
 
 
-# Cindy uses ``archived`` for a still-retained task. Only the UI tombstone
-# state is authorized for physical frontend-session deletion.
+# Retained rows require explicit per-session authorization frozen in the plan.
+# Project-wide cleanup continues to select only UI tombstones.
 _TERMINAL = frozenset({"deleted"})
+_RETAINED = frozenset({"active", "archived"})
 
 
 class FrontendSessionCleanupError(RuntimeError):
@@ -63,6 +64,7 @@ class CindySessionDeleteEvidence:
     expected_skill_exposure_count: int = 0
     expected_ghost_card_count: int = 0
     table: str = "sessions"
+    explicitly_selected: bool = False
 
     def __post_init__(self) -> None:
         database = Path(self.database).expanduser().absolute()
@@ -70,8 +72,8 @@ class CindySessionDeleteEvidence:
         status = str(self.expected_status).strip().casefold()
         if not session_id:
             raise ValueError("session_id must not be blank")
-        if status not in _TERMINAL:
-            raise ValueError("Cindy hard deletion requires status=deleted")
+        if status not in _TERMINAL and not (status in _RETAINED and self.explicitly_selected is True):
+            raise ValueError("Retained Cindy sessions require explicit selection")
         if self.table != "sessions":
             raise ValueError("only Cindy sessions rows are supported")
         for name in (
@@ -108,6 +110,7 @@ class CindySessionDeleteEvidence:
             "table": self.table,
             "session_id": self.session_id,
             "expected_status": self.expected_status,
+            "explicitly_selected": self.explicitly_selected,
             "session_schema_fingerprint": self.session_schema_fingerprint,
             "session_row_fingerprint": self.session_row_fingerprint,
             "stable_session_row_fingerprint": self.stable_session_row_fingerprint,
@@ -173,7 +176,7 @@ def build_cindy_session_delete_evidence(
     ids = tuple(seed["session_id"] for seed in seeds)
     by_id = {seed["session_id"]: seed for seed in seeds}
     with closing(_connect(database, readonly=True, vector_extension=vector_extension)) as db:
-        current = _snapshot(db, ids)
+        current = _snapshot(db, ids, explicitly_selected_ids={seed["session_id"] for seed in seeds if seed["explicitly_selected"]})
     for item in current:
         seed = by_id[item.session_id]
         if item.expected_status != seed["expected_status"]:
@@ -202,7 +205,7 @@ def guard_cindy_session_rows(
     database = _one_database(evidence)
     ids = tuple(item.session_id for item in evidence)
     with closing(_connect(database, readonly=True, vector_extension=vector_extension)) as db:
-        current = _snapshot(db, ids)
+        current = _snapshot(db, ids, explicitly_selected_ids={item.session_id for item in evidence if item.explicitly_selected})
         _assert_same(evidence, current)
         _guard_non_cascade_references(db, ids)
     return current
@@ -258,7 +261,7 @@ def execute_cindy_session_cleanup(
     try:
         db = _connect(database, readonly=False, vector_extension=vector_extension)
         db.execute("BEGIN IMMEDIATE")
-        _assert_same(evidence, _snapshot(db, ids))
+        _assert_same(evidence, _snapshot(db, ids, explicitly_selected_ids={item.session_id for item in evidence if item.explicitly_selected}))
         _guard_non_cascade_references(db, ids)
         _temp_targets(db, ids)
         messages = tuple(
@@ -462,6 +465,8 @@ def _inspect_owner_process(
 def _snapshot(
     db: sqlite3.Connection,
     ids: Sequence[str],
+    *,
+    explicitly_selected_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[CindySessionDeleteEvidence, ...]:
     schema = table_schema(db, "sessions")
     columns = tuple(str(item["name"]) for item in schema)
@@ -549,7 +554,7 @@ def _snapshot(
     for row in rows:
         session_id = str(row["id"])
         status = str(row["status"] or "").casefold()
-        if status not in _TERMINAL:
+        if status not in _TERMINAL and not (status in _RETAINED and session_id in explicitly_selected_ids):
             raise FrontendSessionGuardError(
                 f"Cindy session {session_id} is no longer terminal"
             )
@@ -559,6 +564,7 @@ def _snapshot(
                 database=database,
                 session_id=session_id,
                 expected_status=status,
+                explicitly_selected=session_id in explicitly_selected_ids,
                 session_schema_fingerprint=schema_hash,
                 session_row_fingerprint=row_fingerprint(row, columns),
                 stable_session_row_fingerprint=row_fingerprint(
@@ -701,12 +707,14 @@ def _normalize_seeds(records: Sequence[Mapping[str, Any]]) -> tuple[dict[str, An
         status = str(
             raw.get("expected_status") or raw.get("status") or ""
         ).casefold()
-        if not session_id or status not in _TERMINAL:
+        explicit = raw.get("explicitly_selected") is True
+        if not session_id or (status not in _TERMINAL and not (status in _RETAINED and explicit)):
             raise FrontendSessionGuardError("Invalid terminal Cindy session seed")
         item = {
             "database": database,
             "session_id": session_id,
             "expected_status": status,
+            "explicitly_selected": explicit,
             "session_schema_fingerprint": raw.get("session_schema_fingerprint"),
             "session_row_fingerprint": raw.get("session_row_fingerprint"),
         }
@@ -731,6 +739,7 @@ def _normalize_evidence(
                 database=Path(str(raw.get("database") or "")),
                 session_id=str(raw.get("session_id") or ""),
                 expected_status=str(raw.get("expected_status") or ""),
+                explicitly_selected=raw.get("explicitly_selected") is True,
                 session_schema_fingerprint=str(raw.get("session_schema_fingerprint") or ""),
                 session_row_fingerprint=str(raw.get("session_row_fingerprint") or ""),
                 stable_session_row_fingerprint=str(

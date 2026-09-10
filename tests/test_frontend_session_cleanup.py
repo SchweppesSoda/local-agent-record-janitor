@@ -135,6 +135,39 @@ class FrontendSessionCleanupTests(unittest.TestCase):
                     [],
                 )
 
+    def test_explicit_retained_sessions_delete_dependencies_and_preserve_others(self) -> None:
+        for status in ("active", "archived"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                database, ids = self._database(Path(temporary), 1)
+                with closing(sqlite3.connect(database)) as db:
+                    db.execute("UPDATE sessions SET status=? WHERE id=?", (status, ids[0]))
+                    db.commit()
+                seeds = [dict(seed, explicitly_selected=True) for seed in self._seeds(database, ids, status)]
+                evidence = build_cindy_session_delete_evidence(seeds)
+                self.assertTrue(evidence[0].explicitly_selected)
+                result = execute_cindy_session_cleanup([item.to_dict() for item in evidence])
+                self.assertEqual(result.deleted_session_count, 1)
+                self.assertEqual(result.deleted_message_count, 1)
+                with closing(sqlite3.connect(database)) as db:
+                    self.assertEqual(db.execute("SELECT id FROM sessions").fetchall(), [("active",)])
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+
+    def test_explicit_selection_does_not_allow_status_drift_or_unknown_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database, ids = self._database(Path(temporary), 1)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE sessions SET status='active' WHERE id=?", ids)
+                db.commit()
+            seeds = [dict(seed, explicitly_selected=True) for seed in self._seeds(database, ids, "active")]
+            evidence = build_cindy_session_delete_evidence(seeds)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE sessions SET status='archived' WHERE id=?", ids)
+                db.commit()
+            with self.assertRaises(FrontendSessionGuardError):
+                execute_cindy_session_cleanup(evidence)
+            with self.assertRaises(FrontendSessionGuardError):
+                build_cindy_session_delete_evidence([dict(seeds[0], expected_status="mystery")])
+
     def test_active_session_is_never_accepted_for_hard_delete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database, _deleted = self._database(Path(temporary), 1)

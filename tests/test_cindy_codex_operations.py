@@ -104,6 +104,39 @@ class CindyCodexOperationTests(unittest.TestCase):
             self.assertEqual(dict(db.execute("SELECT id,sdk_session_id FROM sessions")),
                              {"ui-delete": None, "ui-child": None, "ui-keep": "keep"})
 
+    def test_explicit_frontend_id_deletes_active_chat_with_fresh_coordinator(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, role TEXT, created_at INTEGER, rewind_at INTEGER)")
+            db.execute("INSERT INTO messages VALUES ('m-delete','ui-delete','BODY_SECRET','user',1,NULL)")
+            db.execute("INSERT INTO messages VALUES ('m-keep','ui-keep','BODY_SECRET','user',1,NULL)")
+            db.execute("UPDATE sessions SET sdk_session_id=NULL WHERE id='ui-delete'")
+            db.commit()
+        plan = self.plan(record_ids=("ui-delete",))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual([a["kind"] for a in plan["actions"]], ["delete_frontend_session"])
+        self.assertNotIn("BODY_SECRET", json.dumps(plan))
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertEqual(self.calls, [])
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT id FROM sessions ORDER BY id").fetchall(), [("ui-child",), ("ui-keep",)])
+            self.assertEqual(db.execute("SELECT id FROM messages").fetchall(), [("m-keep",)])
+        self.assertTrue(self.paths["keep"].exists())
+
+    def test_retained_chat_status_change_invalidates_frozen_plan(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, role TEXT, created_at INTEGER, rewind_at INTEGER)")
+            db.commit()
+        plan = self.plan(record_ids=("ui-delete",))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("UPDATE sessions SET status='archived' WHERE id='ui-delete'")
+            db.commit()
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "blocked", result)
+        self.assertFalse(result["mutation_started"])
+        self.assertEqual(self.calls, [])
+
     def test_record_scope_and_engine_filter(self):
         plan = self.plan(record_ids=("delete",))
         self.assertEqual(plan["goal_status"], "ready", plan)
