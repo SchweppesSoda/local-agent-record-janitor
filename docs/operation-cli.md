@@ -60,6 +60,16 @@ not infer a changed plan or resend an ambiguous native request. If a mutation
 is `unknown`, stop and use `operation status` followed by `operation verify`;
 never invoke `delete apply` again for that operation.
 
+Cindy Codex plans include ordinary native conversations from the same
+client-qualified inventory used by `records`, together with their frozen
+frontend reference closure. Project selection carries the native project's
+metadata to the paired reference actions. When selected roots include both a
+parent and its descendants, the plan retains one encompassing native cascade
+and its complete reference closure; it does not send overlapping deletion
+requests. Descendant references remain bound to their own native IDs. A
+child-only selection never implicitly selects its parent and remains subject
+to the existing lineage guards.
+
 ## Output
 
 JSON output and human summaries contain metadata only: IDs, stores, paths,

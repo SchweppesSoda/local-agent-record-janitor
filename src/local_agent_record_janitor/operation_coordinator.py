@@ -115,6 +115,7 @@ class OperationCoordinator:
                 codex_home=codex_home,
             )
             candidates, blockers = self._select_candidates(context, normalized_scope)
+            candidates = self._coalesce_manual_candidates(candidates, manual_actions)
             operation = str(operation_id or self._new_operation_id(client_name))
             document = self._make_plan_document(
                 operation,
@@ -1129,6 +1130,18 @@ class OperationCoordinator:
                 known.add(key)
         context = replace(context, plan=replace(context.plan, storages=tuple(storages)),
                           frontend_scan_coverage=inventory.scanned_resources)
+        # Cindy's anomaly scan does not propose ordinary Codex conversations.
+        # Reuse the same client-qualified inventory that records exposes and
+        # retain its manual execution map through apply/recovery. Do not build
+        # another catalog or substitute the official native store.
+        manual_catalog = manual_plan = None
+        manual_actions: Mapping[str, Any] = {}
+        if client == "cindy" and (not engines or "codex" in engines):
+            context, _, manual_catalog, manual_plan, manual_actions = (
+                self._merge_native_manual_records(
+                    context, adapters, catalog=inventory.catalog
+                )
+            )
         engine_contexts = build_client_engine_contexts(
             adapters,
             client=client,
@@ -1188,15 +1201,46 @@ class OperationCoordinator:
                 action_contexts[str(action.action_id)] = native_context
 
         if not native_contexts:
-            return context, adapters, None, None, {}, action_contexts
+            return context, adapters, manual_catalog, manual_plan, manual_actions, action_contexts
         return (
             self._merge_cleanup_contexts(context, tuple(native_contexts)),
             adapters,
-            None,
-            None,
-            {},
+            manual_catalog,
+            manual_plan,
+            manual_actions,
             action_contexts,
         )
+
+    @staticmethod
+    def _coalesce_manual_candidates(
+        candidates: Sequence[Any], manual_actions: Mapping[str, Any]
+    ) -> tuple[Any, ...]:
+        """Freeze each selected cascade once, retaining its full reference closure."""
+        from .manual_delete import build_manual_delete_closure
+
+        selected = {
+            str(action.action_id): manual_actions[str(action.action_id)]
+            for action in candidates if str(action.action_id) in manual_actions
+        }
+        covered = {
+            action_id
+            for action_id, child in selected.items()
+            if any(
+                parent_id != action_id
+                and canonical_path(parent.codex_home) == canonical_path(child.codex_home)
+                and child.thread_id in parent.descendants
+                and set(child.affected_thread_ids).issubset(parent.affected_thread_ids)
+                for parent_id, parent in selected.items()
+            )
+        }
+        covered_references: set[str] = set()
+        retained_references: set[str] = set()
+        for action_id, manual in selected.items():
+            destination = covered_references if action_id in covered else retained_references
+            destination.update(str(action.action_id) for action in
+                               build_manual_delete_closure(manual).frontend_actions)
+        omitted = covered | (covered_references - retained_references)
+        return tuple(action for action in candidates if str(action.action_id) not in omitted)
 
     def _merge_cindy_terminal_sessions(
         self,
@@ -1952,6 +1996,22 @@ class OperationCoordinator:
                 manual_candidates.append(frontend_action)
                 existing_frontend_keys.add(frontend_key)
 
+        # Paired frontend actions need the same project evidence as their
+        # native root when selection is by project rather than record ID.
+        from .planning import ConversationCatalogEntry, TargetRef
+
+        conversations = list(getattr(context.plan, "conversations", ()))
+        conversation_keys = {
+            (str(entry.target.storage_id), str(entry.target.thread_id))
+            for entry in conversations
+        }
+        for record in getattr(catalog, "records", ()):
+            key = (storage_id_for_path(record.codex_home), str(record.thread_id))
+            if key not in conversation_keys:
+                conversations.append(ConversationCatalogEntry(
+                    target=TargetRef(*key), summary=record.summary
+                ))
+                conversation_keys.add(key)
         merged_actions = tuple((*existing_actions, *manual_candidates))
         # ``ManualDeletePlan.errors`` may contain failures from several
         # physical homes. A failure that names one catalog/source must not
@@ -1971,6 +2031,7 @@ class OperationCoordinator:
         merged_plan = replace(
             context.plan,
             actions=merged_actions,
+            conversations=tuple(conversations),
             storages=tuple(storage_locations),
             errors=merged_errors,
         )
@@ -2358,6 +2419,8 @@ class OperationCoordinator:
             target = getattr(entry, "target", None)
             if (
                 target is None
+                or str(getattr(target, "storage_id", ""))
+                != str(action.target.storage_id)
                 or str(getattr(target, "thread_id", ""))
                 != str(action.target.thread_id)
             ):
@@ -3400,8 +3463,8 @@ class OperationCoordinator:
         )
 
         manual_ids = {
-            str(action_id)
-            for action_id in getattr(live, "manual_actions", {})
+            str(action.action_id) for action in live.candidates
+            if str(action.action_id) in getattr(live, "manual_actions", {})
         }
         closures_by_native: dict[str, Any] = {}
         frontend_dependencies: dict[str, str] = {}
@@ -3953,13 +4016,21 @@ class OperationCoordinator:
                         "paired frontend reference has no physical database"
                     )
                 by_native = evidence_by_database.setdefault(databases[0], {})
-                by_native.setdefault(str(manual.thread_id), []).extend(
-                    getattr(
-                        getattr(frontend_action, "impact", None),
-                        "frontend_reference_evidence",
-                        (),
+                for evidence in getattr(
+                    getattr(frontend_action, "impact", None),
+                    "frontend_reference_evidence", (),
+                ):
+                    expected = evidence.get("expected", {})
+                    identity_key = (
+                        "session_id" if evidence.get("platform") == "aionui"
+                        else "native_session_id"
                     )
-                )
+                    native_id = expected.get(identity_key)
+                    if native_id not in manual.affected_thread_ids:
+                        raise OperationCoordinatorError(
+                            "frontend reference is outside the frozen native cascade"
+                        )
+                    by_native.setdefault(str(native_id), []).append(evidence)
         # Guard all frozen frontend rows for each physical database as one
         # collection before execute_manual_delete can emit mutation_started.
         for by_native in evidence_by_database.values():

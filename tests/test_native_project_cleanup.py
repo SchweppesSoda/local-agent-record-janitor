@@ -197,7 +197,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
 
     def test_unknown_operation_never_replays_and_verify_preserves_bad_state(self):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
-        coordinator = OperationCoordinator(CleanupService())
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
         plan_path = Path(self.temp.name) / "unknown.json"
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=plan_path)
         replace = os.replace
@@ -224,7 +224,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
 
     def test_verify_checks_loose_markers_and_missing_frozen_files(self):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
-        coordinator = OperationCoordinator(CleanupService())
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=Path(self.temp.name) / "verify.json")
         self.run_cleanup()
         data = json.loads((self.home / STATE_FILES[0]).read_bytes())
@@ -295,7 +295,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
         self.assertEqual(exit_code, 0, output.getvalue())
         self.assertIn(self.project_id, output.getvalue())
         self.assertNotIn("PRIVATE BODY", output.getvalue())
-        coordinator = OperationCoordinator(CleanupService())
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
         plan_path = Path(self.temp.name) / "plan.json"
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=plan_path)
         self.assertEqual(plan["goal_status"], "ready", plan)
