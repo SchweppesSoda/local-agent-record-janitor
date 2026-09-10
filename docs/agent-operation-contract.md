@@ -3,6 +3,8 @@
 Use the non-interactive `records`/`delete`/`operation` surface for live records.
 Do not drive human `clean`/`purge` prompts or use legacy `agent` commands as a
 fallback when the operation API is unavailable.
+For long inventory, deletion or verification commands, add `--progress` and
+surface its stderr phase/count events while keeping stdout as the JSON result.
 
 ## Read for the selected task
 

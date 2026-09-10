@@ -604,6 +604,8 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 - [全量记录与选择性删除设计及 review](docs/selective-record-management-design.md)
 - [Pi Agent 支持设计](docs/pi-agent-support-design.md)
 - [多引擎本地 Agent 记录清理设计](docs/multi-engine-record-cleanup-design.md)
+- [Codex / Cindy 性能优化方案](docs/performance-optimization-plan.md)
+- [性能基线与复测方法](docs/performance-baseline.md)
 - [安全政策与操作清单](SECURITY.md)
 
 ## 开发

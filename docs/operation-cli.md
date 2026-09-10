@@ -36,7 +36,11 @@ execution, and verification phases start and report completion, failure, or a
 recovery boundary. Events include the phase, status, elapsed seconds, and
 bounded counts; they never include message bodies or alter the one-document
 JSON result on stdout. It is opt-in and has no effect on the default output
-contract.
+contract. During execution, verified successful actions advance
+`counts.completed_action_count` toward `counts.total_action_count`; failed,
+partial, or unknown checks do not count as completed actions. These are phase
+and action events, not a periodic heartbeat during a blocked call. Always use
+the final operation result to determine whether the whole goal is complete.
 
 `--engine` may further limit a client scope. A project selector is resolved by
 the core using a normalized working directory, authoritative project ID, or a
