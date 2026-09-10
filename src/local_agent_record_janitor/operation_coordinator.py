@@ -1136,7 +1136,43 @@ class OperationCoordinator:
         # another catalog or substitute the official native store.
         manual_catalog = manual_plan = None
         manual_actions: Mapping[str, Any] = {}
+        action_contexts: dict[str, Any] = {}
         if client == "cindy" and (not engines or "codex" in engines):
+            # A partial server cascade can leave children whose parents are
+            # gone. Their native orphan proof must reach execution; a synthetic
+            # manual finding cannot authorize that missing-parent exception.
+            from .adapters import NativeIntegrityAdapter
+
+            record_keys = {
+                (canonical_path(record.codex_home), record.thread_id)
+                for record in inventory.records
+                if record.indexed or record.rollouts
+            }
+            orphan_homes = {
+                canonical_path(record.codex_home)
+                for record in inventory.records
+                if any(
+                    (canonical_path(record.codex_home), parent) not in record_keys
+                    for parent in getattr(record.summary, "parent_thread_ids", ())
+                )
+            }
+            native_stores = {
+                canonical_path(adapter.codex_home): adapter for adapter in adapters
+                if getattr(adapter, "codex_home", None) is not None
+                and canonical_path(adapter.codex_home) in orphan_homes
+            }
+            if native_stores:
+                native_adapters = tuple(
+                    NativeIntegrityAdapter(
+                        codex_home=Path(adapter.codex_home),
+                        codex_bin_hint=getattr(adapter, "codex_bin_hint", None),
+                    )
+                    for adapter in native_stores.values()
+                )
+                native_context = self.service.prepare(native_adapters, platforms=("native",))
+                context = self._merge_cleanup_contexts(context, (native_context,))
+                for action in native_context.plan.actions:
+                    action_contexts[str(action.action_id)] = native_context
             context, _, manual_catalog, manual_plan, manual_actions = (
                 self._merge_native_manual_records(
                     context, adapters, catalog=inventory.catalog
@@ -1148,7 +1184,6 @@ class OperationCoordinator:
             engines=engines,
             inventory=inventory,
         )
-        action_contexts: dict[str, Any] = {}
         native_contexts: list[Any] = []
         for engine_context in engine_contexts:
             engine = normalize_engine(engine_context.engine)

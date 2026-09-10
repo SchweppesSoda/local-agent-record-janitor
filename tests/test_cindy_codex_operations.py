@@ -176,3 +176,31 @@ class CindyCodexOperationTests(unittest.TestCase):
                            entry("cindy-two", "/two/Other")), observations=()))
         action = SimpleNamespace(kind="delete_conversation", target=SimpleNamespace(storage_id="cindy-one", thread_id="shared"))
         self.assertEqual(OperationCoordinator._project_values(context, action), ("/one/ProxyConfig",))
+
+    def test_verified_partial_cascade_can_delete_missing_parent_child(self):
+        # Simulate an already verified partial server deletion in a temporary
+        # store. The parent is gone; the child's indexed rollout remains.
+        with closing(sqlite3.connect(self.home / "state_5.sqlite")) as db:
+            db.execute("DELETE FROM threads WHERE id='delete'")
+            db.commit()
+        self.paths["delete"].unlink()
+        # This is the supported guardian orphan schema: independent indexed
+        # role plus an exact top-level parent in the rollout.
+        source = {"subagent": {"other": "guardian"}}
+        metadata = {"id": "child", "cwd": str(self.root / "ProxyConfig"),
+                    "source": source, "parent_thread_id": "delete", "thread_source": "guardian_review"}
+        self.paths["child"].write_text(json.dumps({"type": "session_meta", "payload": metadata}) + "\n", encoding="utf-8")
+        with closing(sqlite3.connect(self.home / "state_5.sqlite")) as db:
+            db.execute("UPDATE threads SET source=? WHERE id='child'", (json.dumps(source),))
+            db.commit()
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute("DELETE FROM sessions WHERE id='ui-child'")
+            db.commit()
+        plan = self.plan(record_ids=("child",))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        result = self.apply(plan)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertEqual(self.calls, ["child"])
+        self.assertFalse(self.paths["child"].exists())
+        self.assertTrue(self.paths["keep"].exists())
+        self.assertEqual((self.official / "state_5.sqlite").read_bytes(), self.official_before)
