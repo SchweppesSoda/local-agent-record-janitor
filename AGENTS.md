@@ -21,8 +21,4 @@ distinct from executing deletion against a user's live stores.
 ## Live record operations
 
 Only when asked to inspect/delete actual records, read [operation contract](docs/agent-operation-contract.md)
-and the required sections of [protocol documentation](docs/agent-automation.md).
-Use the non-interactive `records`/`delete`/`operation` surface. Select the exact
-client/store, honor the frozen plan/hash/scope and closed-client requirements,
-and never repeat an unknown mutation. Recover through status/verify. Unsupported
-schemas remain inventory-only. Expose metadata only, never chat bodies.
+and follow its task-specific reading routes and execution constraints.

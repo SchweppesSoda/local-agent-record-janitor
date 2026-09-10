@@ -92,6 +92,11 @@ counts, classifications, blockers, and progress grouped by project, engine,
 and physical location. Chat messages, prompts, transcripts, and response
 content are not read into the report or saved in operation evidence.
 
+For structured goal fields, see [Result contract](agent-automation.md#result-contract).
+Evidence retention and rollback behavior are documented in
+[Operation evidence and receipts](agent-automation.md#operation-evidence-and-receipts)
+and [Temporary rollback copies](agent-automation.md#temporary-rollback-copies).
+
 The stable classification vocabulary is:
 
 ```text

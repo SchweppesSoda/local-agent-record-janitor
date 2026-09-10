@@ -1,33 +1,18 @@
 # Agent automation protocol
 
-`local-agent-record-janitor agent ...` is the stable non-interactive surface
-for an orchestrating Agent. Human and Agent commands share the same
+This reference covers legacy `local-agent-record-janitor agent ...` integrations
+and shared result/recovery semantics. Human and Agent commands share the same
 `CleanupService`; neither command path owns a second scanner or planner.
 
-For a single client spanning multiple projects or stores, use the high-level
-operation surface documented in [operation-cli.md](operation-cli.md):
-`records --client ...`, `delete plan/apply/run`, and `operation status/verify`.
-That surface creates one immutable top-level operation with child batches; a
-child still owns exactly one physical store and mutation family. `doctor` is a
-useful read-only diagnostic but is not a prerequisite for `delete plan` or
-`delete run`, whose core preflight remains authoritative. The high-level CLI
-does not fall back to `agent` purge when its explicit CleanupService operation
-entry point is unavailable. The currently verified deletion paths are
-healthy/native records with a frozen frontend closure and Cindy Pi/Claude
-sessions. AionUI orphan project/conversations rows are executable only for the
-probed supported schema with immutable row evidence and zero `acp_session`
-references; other schemas remain `inventory_only`. With `remote_delete=false`,
-residuals are reported only when the adapter supplies authoritative discovery
-evidence; otherwise the output states the capability boundary without claiming
-residuals, and no remote write is attempted.
+For the preferred `records`/`delete`/`operation` interface, use
+[Operation CLI contract](operation-cli.md). Select required reading through the
+[operation contract](agent-operation-contract.md#read-for-the-selected-task).
 
 ## Commands
 
-Official native local-environment registrations use the high-level operation
-path and the separate `delete_native_project` family. They are not thread IDs
-and must not be passed to legacy thread deletion. See
-[native project cleanup](native-project-cleanup.md) for the supported schema,
-exact file evidence, inventory-only boundaries and recovery verification.
+These commands target one physical store and one mutation family. Native
+local-environment registrations require the high-level
+[native project cleanup](native-project-cleanup.md) path.
 
 `agent doctor` is read-only. It checks the exact target store, scan
 completeness, and client ownership. A process using another physical store does
@@ -145,6 +130,11 @@ No public recovery command or long-term backup repository is part of the Agent
 protocol.
 
 ## Result contract
+
+Legacy `agent` subcommands emit JSON only and never read stdin. Their exit codes
+are `0` for read-only success or verified completion, `1` for unknown/untrusted
+results, and `3` for blocked goals or residuals. Exit code `2` is reserved for
+human confirmation flows and is never an agent result.
 
 Automation branches on structured fields, never translated prose:
 
