@@ -1078,6 +1078,12 @@ class OperationCoordinator:
             client=client,
             engines=engines,
         )
+        if client == "cindy" and (not engines or "codex" in engines):
+            # Cindy's anomaly scanner only sees frontend-backed findings.
+            # Include the dedicated Codex catalog so exact record selectors
+            # also reach native records with no remaining frontend reference.
+            merged = self._merge_native_manual_records(result[0], selected)
+            result = (*merged, result[5])
         return result if include_action_contexts else result[:5]
 
     def _merge_client_engine_contexts(
