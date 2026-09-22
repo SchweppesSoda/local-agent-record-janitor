@@ -8,6 +8,12 @@ one-mutation-family compatibility surface.
 
 ## Required agent workflow
 
+Explicitly requested deletion of an unbound `active` Cindy frontend session
+uses its full frontend ID with `delete plan --client cindy --record-id ID`.
+The plan freezes the NULL native binding and explicit-selection evidence;
+project-wide selection does not authorize this exception. See
+[operation-cli.md](operation-cli.md) for the exact guards.
+
 1. Work on one exact client selection at a time. For official OpenAI Codex and
    ChatGPT Desktop, use client `native`/`codex-native` and the official native
    `CODEX_HOME`; do not substitute a Cindy or AionUI store.

@@ -110,6 +110,7 @@ class OperationCoordinator:
             ) = self._build_context(
                 client_name,
                 source,
+                explicit_frontend_ids=tuple(normalized_scope.get("record_ids", ())),
                 engines=tuple(normalized_scope.get("engines", ())),
                 include_action_contexts=True,
                 codex_home=codex_home,
@@ -243,6 +244,7 @@ class OperationCoordinator:
                 ) = self._build_context(
                     client_name,
                     source,
+                    explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(normalized_scope.get("engines", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
@@ -486,6 +488,7 @@ class OperationCoordinator:
                 ) = self._build_context(
                     client_name,
                     source,
+                    explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(document.get("scope", {}).get("engines", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
@@ -998,6 +1001,7 @@ class OperationCoordinator:
         engines: Sequence[str] = (),
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
+        explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
         if client in {"pi", "claude"}:
             args = self._default_catalog_args(client, codex_home=codex_home)
@@ -1091,6 +1095,7 @@ class OperationCoordinator:
             selected,
             client=client,
             engines=engines,
+            explicit_frontend_ids=explicit_frontend_ids,
         )
         if client == "cindy" and (not engines or "codex" in engines):
             # Cindy's anomaly scanner only sees frontend-backed findings.
@@ -1107,6 +1112,7 @@ class OperationCoordinator:
         *,
         client: str,
         engines: Sequence[str],
+        explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, tuple[Any, ...], None, None, Mapping[str, Any], Mapping[str, Any]]:
         """Add verified native child contexts to one frontend operation.
 
@@ -1135,6 +1141,7 @@ class OperationCoordinator:
             context,
             inventory,
             client=client,
+            explicit_frontend_ids=explicit_frontend_ids,
         )
         # Successful scans remain evidence when their last actionable row is gone.
         from .planning import StorageLocation, ScanStatus, storage_id_for_path
@@ -1224,6 +1231,7 @@ class OperationCoordinator:
         inventory: Any,
         *,
         client: str,
+        explicit_frontend_ids: Sequence[str] = (),
     ) -> Any:
         """Project exact soft-deleted Cindy rows into cleanup batches."""
 
@@ -1248,7 +1256,11 @@ class OperationCoordinator:
                 continue
             status = str(getattr(session, "status", "") or "").casefold()
             details = getattr(session, "details", {})
-            if status != "deleted" or not isinstance(
+            explicit_active = (
+                status == "active" and session.thread_id is None
+                and str(session.platform_session_id) in explicit_frontend_ids
+            )
+            if (status != "deleted" and not explicit_active) or not isinstance(
                 details, Mapping
             ):
                 continue
@@ -1309,6 +1321,7 @@ class OperationCoordinator:
                     "database": str(database),
                     "session_id": session.platform_session_id,
                     "expected_status": session.status,
+                    "explicit_unbound_active": session.status == "active",
                     "session_schema_fingerprint": reference.get(
                         "session_schema_fingerprint"
                     ),
@@ -4126,6 +4139,7 @@ class OperationCoordinator:
                 self._build_context(
                     live.client,
                     live.adapters,
+                    explicit_frontend_ids=tuple(live.document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(
                         live.document.get("scope", {}).get("engines", ())
                     ),

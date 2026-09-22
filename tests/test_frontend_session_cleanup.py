@@ -17,6 +17,46 @@ from local_agent_record_janitor.operation_coordinator import OperationCoordinato
 
 
 class FrontendSessionCleanupTests(unittest.TestCase):
+    def test_explicit_unbound_active_session_plan_apply_and_dependency_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, ids = self._database(root, 1)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE sessions SET status='active' WHERE id=?", (ids[0],))
+                db.commit()
+            home = root / "codex-home"
+            home.mkdir()
+            adapter = CindyAdapter(database=database, codex_home=home)
+            coordinator = OperationCoordinator(CleanupService(client_inspector=lambda path: ()))
+            broad = coordinator.plan_operation(client="cindy", all_projects=True,
+                adapters=(adapter,), plan_path=root / "broad.json")
+            self.assertFalse(any(a["kind"] == "delete_frontend_session" for a in broad.get("actions", ())))
+            plan = coordinator.plan_operation(client="cindy", record_ids=ids,
+                adapters=(adapter,), plan_path=root / "exact.json")
+            self.assertEqual(plan["goal_status"], "ready", plan)
+            result = OperationCoordinator(CleanupService(client_inspector=lambda path: ())).apply_operation(
+                operation_id=plan["operation_id"], plan_path=root / "exact.json",
+                clients_closed=True, adapters=(adapter,))
+            self.assertEqual(result["goal_status"], "complete", result)
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(db.execute("SELECT id FROM sessions").fetchall(), [("active",)])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0], 0)
+
+    def test_explicit_active_rebinding_is_blocked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database, ids = self._database(Path(temporary), 1)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE sessions SET status='active' WHERE id=?", (ids[0],))
+                db.commit()
+            seeds = [{**self._seeds(database, ids, "active")[0], "explicit_unbound_active": True}]
+            evidence = build_cindy_session_delete_evidence(seeds)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE sessions SET sdk_session_id='new-native' WHERE id=?", (ids[0],))
+                db.commit()
+            with self.assertRaises(FrontendSessionGuardError):
+                execute_cindy_session_cleanup(evidence)
+
     def _database(self, root: Path, deleted_count: int) -> tuple[Path, tuple[str, ...]]:
         database = root / "cindy.sqlite"
         deleted = tuple(f"deleted-{index:03d}" for index in range(deleted_count))

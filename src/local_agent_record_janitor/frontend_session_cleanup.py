@@ -63,6 +63,7 @@ class CindySessionDeleteEvidence:
     expected_skill_exposure_count: int = 0
     expected_ghost_card_count: int = 0
     table: str = "sessions"
+    explicit_unbound_active: bool = False
 
     def __post_init__(self) -> None:
         database = Path(self.database).expanduser().absolute()
@@ -70,7 +71,10 @@ class CindySessionDeleteEvidence:
         status = str(self.expected_status).strip().casefold()
         if not session_id:
             raise ValueError("session_id must not be blank")
-        if status not in _TERMINAL:
+        if status not in _TERMINAL and not (
+            status == "active" and self.explicit_unbound_active is True
+            and self.expected_sdk_session_id is None
+        ):
             raise ValueError("Cindy hard deletion requires status=deleted")
         if self.table != "sessions":
             raise ValueError("only Cindy sessions rows are supported")
@@ -108,6 +112,7 @@ class CindySessionDeleteEvidence:
             "table": self.table,
             "session_id": self.session_id,
             "expected_status": self.expected_status,
+            "explicit_unbound_active": self.explicit_unbound_active,
             "session_schema_fingerprint": self.session_schema_fingerprint,
             "session_row_fingerprint": self.session_row_fingerprint,
             "stable_session_row_fingerprint": self.stable_session_row_fingerprint,
@@ -173,7 +178,9 @@ def build_cindy_session_delete_evidence(
     ids = tuple(seed["session_id"] for seed in seeds)
     by_id = {seed["session_id"]: seed for seed in seeds}
     with closing(_connect(database, readonly=True, vector_extension=vector_extension)) as db:
-        current = _snapshot(db, ids)
+        current = _snapshot(db, ids, explicit_active_ids={
+            seed["session_id"] for seed in seeds if seed.get("explicit_unbound_active") is True
+        })
     for item in current:
         seed = by_id[item.session_id]
         if item.expected_status != seed["expected_status"]:
@@ -202,7 +209,9 @@ def guard_cindy_session_rows(
     database = _one_database(evidence)
     ids = tuple(item.session_id for item in evidence)
     with closing(_connect(database, readonly=True, vector_extension=vector_extension)) as db:
-        current = _snapshot(db, ids)
+        current = _snapshot(db, ids, explicit_active_ids={
+            item.session_id for item in evidence if item.explicit_unbound_active
+        })
         _assert_same(evidence, current)
         _guard_non_cascade_references(db, ids)
     return current
@@ -258,7 +267,9 @@ def execute_cindy_session_cleanup(
     try:
         db = _connect(database, readonly=False, vector_extension=vector_extension)
         db.execute("BEGIN IMMEDIATE")
-        _assert_same(evidence, _snapshot(db, ids))
+        _assert_same(evidence, _snapshot(db, ids, explicit_active_ids={
+            item.session_id for item in evidence if item.explicit_unbound_active
+        }))
         _guard_non_cascade_references(db, ids)
         _temp_targets(db, ids)
         messages = tuple(
@@ -462,6 +473,7 @@ def _inspect_owner_process(
 def _snapshot(
     db: sqlite3.Connection,
     ids: Sequence[str],
+    *, explicit_active_ids: set[str] | None = None,
 ) -> tuple[CindySessionDeleteEvidence, ...]:
     schema = table_schema(db, "sessions")
     columns = tuple(str(item["name"]) for item in schema)
@@ -549,7 +561,10 @@ def _snapshot(
     for row in rows:
         session_id = str(row["id"])
         status = str(row["status"] or "").casefold()
-        if status not in _TERMINAL:
+        explicit_active = session_id in (explicit_active_ids or set())
+        if status not in _TERMINAL and not (
+            explicit_active and status == "active" and row["sdk_session_id"] is None
+        ):
             raise FrontendSessionGuardError(
                 f"Cindy session {session_id} is no longer terminal"
             )
@@ -559,6 +574,7 @@ def _snapshot(
                 database=database,
                 session_id=session_id,
                 expected_status=status,
+                explicit_unbound_active=explicit_active,
                 session_schema_fingerprint=schema_hash,
                 session_row_fingerprint=row_fingerprint(row, columns),
                 stable_session_row_fingerprint=row_fingerprint(
@@ -701,12 +717,14 @@ def _normalize_seeds(records: Sequence[Mapping[str, Any]]) -> tuple[dict[str, An
         status = str(
             raw.get("expected_status") or raw.get("status") or ""
         ).casefold()
-        if not session_id or status not in _TERMINAL:
+        explicit_active = raw.get("explicit_unbound_active") is True
+        if not session_id or (status not in _TERMINAL and not (explicit_active and status == "active")):
             raise FrontendSessionGuardError("Invalid terminal Cindy session seed")
         item = {
             "database": database,
             "session_id": session_id,
             "expected_status": status,
+            "explicit_unbound_active": explicit_active,
             "session_schema_fingerprint": raw.get("session_schema_fingerprint"),
             "session_row_fingerprint": raw.get("session_row_fingerprint"),
         }
@@ -731,6 +749,7 @@ def _normalize_evidence(
                 database=Path(str(raw.get("database") or "")),
                 session_id=str(raw.get("session_id") or ""),
                 expected_status=str(raw.get("expected_status") or ""),
+                explicit_unbound_active=raw.get("explicit_unbound_active") is True,
                 session_schema_fingerprint=str(raw.get("session_schema_fingerprint") or ""),
                 session_row_fingerprint=str(raw.get("session_row_fingerprint") or ""),
                 stable_session_row_fingerprint=str(

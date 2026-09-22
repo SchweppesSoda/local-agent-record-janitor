@@ -94,11 +94,16 @@ boundary without claiming residuals, and nothing is deleted. Stale-index and bro
 anomaly scan and is not guaranteed to appear as a uniformly executable
 `records` target for every client.
 
-Cindy frontend-session deletion is deliberately narrower than "not active":
-only `sessions.status='deleted'` rows enter `delete_frontend_session` batches.
+Cindy frontend-session deletion defaults to `sessions.status='deleted'` rows.
+The narrow explicit-selection exception is an `active` row whose
+`sdk_session_id` is SQL NULL: a full frontend session ID supplied through
+`--record-id` may freeze it with `explicit_unbound_active=true`. Project-wide
+and all-project scans do not opt into this exception. Apply and recovery bind
+the exact status, row, dependencies and NULL native binding; a new binding or
+status change blocks deletion.
 All approved IDs in one Cindy database are guarded as a set and deleted in one
 transaction together with their supported message, FTS, embedding/vector, and
-session-owned dependency rows. `active`, `archived`, and unproven schemas are
+session-owned dependency rows. Other `active` rows, `archived`, and unproven schemas are
 inventory/protection evidence, not deletion candidates.
 
 ## Official Desktop inventory and completion
