@@ -1065,10 +1065,24 @@ class OperationCoordinator:
             result = (replace(result[0], frontend_scan_coverage=tuple(
                 (canonical_path(path), "sessions") for path in catalog.scanned_session_databases)), *result[1:])
             return (*result, {}) if include_action_contexts else result
-        context = self.service.prepare(
-            selected,
-            platforms=("native" if client == "codex-desktop" else client,),
-        )
+        scan_adapters = selected
+        scan_platforms = ("native" if client == "codex-desktop" else client,)
+        if client == "cindy" and (not engines or "codex" in engines):
+            from .adapters import NativeIntegrityAdapter
+
+            # Audit only the selected client's physical stores. Orphan source
+            # parents and residual edges require the native integrity evidence
+            # that the frontend scanner cannot supply.
+            homes = {Path(adapter.codex_home): adapter for adapter in selected}
+            scan_adapters = (*selected, *(
+                NativeIntegrityAdapter(
+                    codex_home=home,
+                    codex_bin_hint=getattr(adapter, "codex_bin_hint", None),
+                )
+                for home, adapter in homes.items()
+            ))
+            scan_platforms = ("cindy", "native")
+        context = self.service.prepare(scan_adapters, platforms=scan_platforms)
         if client not in {"cindy", "aionui"}:
             result = (context, selected, None, None, {}, {})
             return result if include_action_contexts else result[:5]
@@ -1911,6 +1925,18 @@ class OperationCoordinator:
         manual_actions: dict[str, Any] = {}
         storage_locations = list(getattr(context.plan, "storages", ()))
         storage_ids = {str(item.storage_id) for item in storage_locations}
+        if not catalog.errors and not context.plan.errors:
+            # Preserve successful empty-store coverage for terminal checks.
+            for adapter in adapters:
+                home = Path(adapter.codex_home)
+                storage_id = storage_id_for_path(home)
+                if home.is_dir() and storage_id not in storage_ids:
+                    storage_locations.append(StorageLocation(
+                        storage_id=storage_id, label="Codex data directory",
+                        path=home, codex_bin_hint=getattr(adapter, "codex_bin_hint", None),
+                        scan_status=ScanStatus.OK,
+                    ))
+                    storage_ids.add(storage_id)
         for manual in getattr(manual_plan, "actions", ()):
             storage_id = storage_id_for_path(manual.codex_home)
             if storage_id not in storage_ids:
@@ -1941,6 +1967,13 @@ class OperationCoordinator:
             manual_actions[str(candidate.action_id)] = manual
             closure = build_manual_delete_closure(manual)
             for frontend_action in closure.frontend_actions:
+                frontend_action = replace(
+                    frontend_action,
+                    impact=replace(
+                        frontend_action.impact,
+                        external_action_payload=candidate.impact.external_action_payload,
+                    ),
+                )
                 frontend_key = (
                     str(frontend_action.target.storage_id),
                     str(frontend_action.target.thread_id),
@@ -2446,7 +2479,8 @@ class OperationCoordinator:
         wanted = {str(value) for value in getattr(action, "observation_ids", ())}
         for observation in getattr(context.plan, "observations", ()):
             if str(getattr(observation, "observation_id", "")) in wanted:
-                return normalize_engine(getattr(observation, "platform", "codex"))
+                platform = getattr(observation, "platform", "codex")
+                return "codex" if platform in {"native", "cindy", "aionui"} else normalize_engine(platform)
         return "codex"
 
     def _make_plan_document(

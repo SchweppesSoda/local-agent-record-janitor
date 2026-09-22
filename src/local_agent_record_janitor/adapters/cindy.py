@@ -272,7 +272,7 @@ class CindyAdapter(FrontendAdapter):
         rows = [
             reference
             for reference in references
-            if not reference.is_live and reference.native_session_id is not None
+            if reference.native_session_id is not None
         ]
         if not rows:
             return []
@@ -293,6 +293,13 @@ class CindyAdapter(FrontendAdapter):
             records = rollout_groups.get(thread_id, [])
             rollout = _preferred_rollout(records)
             state_row = evidence.indexed_threads.get(thread_id)
+            # A live frontend row can outlast an explicitly deleted native
+            # record. Inventory its exact stale reference without making a
+            # surviving live native record a cleanup candidate.
+            if reference.is_live and (
+                records or state_row is not None or not evidence.spawn_edges_available
+            ):
+                continue
             originators = {
                 normalized
                 for record in records
@@ -355,7 +362,11 @@ class CindyAdapter(FrontendAdapter):
                     platform=self.name,
                     platform_session_id=reference.cindy_session_id,
                     thread_id=thread_id,
-                    reason="Cindy session is soft-deleted but its Codex thread remains",
+                    reason=(
+                        "Cindy reference points to an absent Codex thread"
+                        if reference.is_live
+                        else "Cindy session is soft-deleted but its Codex thread remains"
+                    ),
                     platform_db=self.database,
                     codex_home=self.codex_home,
                     platform_updated_at_ms=reference.session_updated_at_ms,
@@ -364,6 +375,7 @@ class CindyAdapter(FrontendAdapter):
                     codex_archived=bool(state_row["archived"]) if state_row else None,
                     codex_bin_hint=self.codex_bin_hint,
                     details={
+                        "working_directory": reference.working_dir,
                         "frontend_reference": frontend_reference,
                         "frontend_reference_cleanable": (
                             not ownership_conflict
