@@ -172,6 +172,8 @@ def plan_counts(
 
 def _physical_artifact_count(action: Any) -> int:
     impact = action.impact
+    if enum_value(action.kind) == "delete_schedule_run":
+        return 1
     if enum_value(action.kind) == "remove_frontend_reference":
         return int(getattr(impact, "frontend_residual_count", 0))
     if enum_value(action.kind) == "remove_broken_relation":
@@ -424,6 +426,10 @@ def verify_frozen_actions(plan: Mapping[str, Any]) -> dict[str, Any]:
                     "Frontend action has invalid exact reference evidence"
                 )
             markers.extend(verify_frontend_reference_evidence(references))
+        elif kind == "delete_schedule_run":
+            from .cindy_schedule_cleanup import remaining as remaining_schedule_runs
+            evidence = raw["impact"]["external_action_payload"]["schedule_run_evidence"]
+            markers.extend("schedule-run:" + value for value in remaining_schedule_runs([evidence]))
         elif kind == "delete_frontend_session":
             impact = raw.get("impact")
             sessions = (

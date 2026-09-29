@@ -148,6 +148,21 @@ transaction together with their supported message, FTS, embedding/vector, and
 session-owned dependency rows. Status changes invalidate the frozen evidence.
 Unselected retained rows and unproven schemas remain protected.
 
+Cindy automation run history can be selected separately with exact
+`--record-id schedule-run:<full-run-id>` values. This uses the independent
+`delete_schedule_run` family; project scopes and ID prefixes never select run
+history. It deletes terminal `schedule_runs` rows and maintains the supported
+`schedule_session_latest_runs` dependencies. Task definitions and conversations
+are preserved. Deleting conversations alone only clears their run references.
+To remove both, first delete explicitly selected conversations, then freeze a
+fresh run-history plan because conversation deletion changes the run metadata.
+The writer requires the probed schedule schema and complete trigger definitions,
+closed owning clients, unchanged metadata, exact row counts and verification.
+Unknown schemas remain inventory-only. Interrupted verification keeps a temporary
+rollback copy; `operation verify` removes it only after proving the frozen
+before/after state. Evidence contains IDs, statuses, timestamps and hashes, never
+prompts, error text, hook output or run results.
+
 ## Official Desktop inventory and completion
 
 Select the official native `CODEX_HOME` explicitly when the caller itself runs

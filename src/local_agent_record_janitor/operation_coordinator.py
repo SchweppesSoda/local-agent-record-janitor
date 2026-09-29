@@ -1030,6 +1030,17 @@ class OperationCoordinator:
                 mapped_ids=tuple(evidence["mapped_ids"]),
             ):
                 residuals.append(str(action["action_id"]))
+        from .cindy_schedule_cleanup import remaining as remaining_schedule_runs
+        schedule_groups: dict[str, list[Mapping[str, Any]]] = {}
+        schedule_actions: dict[tuple[str, str], str] = {}
+        for action in document.get("actions", ()):
+            if action.get("kind") == "delete_schedule_run":
+                evidence = action["impact"]["external_action_payload"]["schedule_run_evidence"]
+                schedule_groups.setdefault(evidence["database"], []).append(evidence)
+                schedule_actions[(evidence["database"], evidence["run_id"])] = action["action_id"]
+        for database, evidence in schedule_groups.items():
+            for run_id in remaining_schedule_runs(evidence):
+                residuals.append(schedule_actions[(database, run_id)])
         return list(dict.fromkeys(residuals))
 
     def _persist_verified_child_journals(
@@ -1316,6 +1327,9 @@ class OperationCoordinator:
             engines=engines,
             explicit_session_ids=explicit_session_ids,
         )
+        if client == "cindy":
+            from .cindy_schedule_cleanup import merge_context
+            result = (merge_context(result[0], selected, self.service, explicit_session_ids), *result[1:])
         return result if include_action_contexts else result[:5]
 
     @staticmethod
@@ -2611,7 +2625,7 @@ class OperationCoordinator:
             identifier_actions: dict[str, list[int]] = {}
             for index, action in enumerate(actions):
                 thread_id = str(action.target.thread_id)
-                if kind_value(action) == "delete_native_project":
+                if kind_value(action) in {"delete_native_project", "delete_schedule_run"}:
                     project_ids.setdefault(thread_id, []).append(index)
                     continue
                 identifiers = {thread_id}
@@ -3098,6 +3112,8 @@ class OperationCoordinator:
 
     @staticmethod
     def _classification(context: Any, action: Any) -> str:
+        if str(getattr(action.kind, "value", action.kind)) == "delete_schedule_run":
+            return "healthy"
         if str(
             getattr(
                 getattr(action, "kind", None),

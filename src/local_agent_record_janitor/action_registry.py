@@ -23,6 +23,11 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "delete_schedule_run": ActionCapability(
+        kind="delete_schedule_run", implemented=True,
+        mutation_family="delete_schedule_run", requires_clients_closed=True,
+        verifies_by="approved_schedule_runs_and_latest_links_absent",
+    ),
     "delete_conversation": ActionCapability(
         kind="delete_conversation",
         implemented=True,
