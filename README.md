@@ -597,5 +597,3 @@ python -m unittest discover -s tests -v
 ## License
 
 [MIT](LICENSE)
-
-[维护文档](docs/maintenance/INDEX.md)。
