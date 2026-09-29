@@ -65,14 +65,20 @@ def safe_single_line(
     if not text:
         return ""
 
-    units = tuple(_safe_display_units(text))
-    rendered = "".join(unit for unit, _width in units)
     if max_width is None:
-        return rendered
+        return "".join(unit for unit, _width in _safe_display_units(text))
 
-    rendered_width = sum(width for _unit, width in units)
-    if rendered_width <= max_width:
-        return rendered
+    # Once the display overflows, its unseen suffix cannot affect the result.
+    # Avoid rendering and retaining an entire oversized metadata string.
+    units: list[tuple[str, int]] = []
+    rendered_width = 0
+    for unit, width in _safe_display_units(text):
+        units.append((unit, width))
+        rendered_width += width
+        if rendered_width > max_width:
+            break
+    else:
+        return "".join(unit for unit, _width in units)
 
     marker_width = terminal_display_width(TRUNCATION_MARKER)
     available_width = max_width - marker_width

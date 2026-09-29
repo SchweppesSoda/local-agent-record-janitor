@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from local_agent_record_janitor.rendering import (
@@ -117,6 +118,24 @@ class SafeSingleLineTests(unittest.TestCase):
 
         self.assertTrue(rendered.endswith("…"))
         self.assertEqual(terminal_display_width(rendered), DEFAULT_MAX_WIDTH)
+
+    def test_truncation_stops_reading_display_units_at_overflow(self) -> None:
+        def bounded_units(_value):
+            for _ in range(11):
+                yield "x", 1
+            self.fail("truncated display consumed an irrelevant suffix")
+
+        with mock.patch(
+            "local_agent_record_janitor.rendering._safe_display_units",
+            side_effect=bounded_units,
+        ):
+            self.assertEqual(safe_single_line("large input", max_width=10), "x" * 9 + "…")
+
+    def test_exact_width_and_zero_width_prefix_keep_existing_output(self) -> None:
+        self.assertEqual(safe_single_line("abc", max_width=3), "abc")
+        self.assertEqual(safe_single_line("abcd", max_width=3), "ab…")
+        self.assertEqual(safe_single_line("abcd", max_width=1), "…")
+        self.assertEqual(safe_single_line("\u0301abc", max_width=2), "\u0301a…")
 
     def test_rejects_invalid_max_width(self) -> None:
         for value in (0, -1, True, 1.5, "10"):
