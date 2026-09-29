@@ -154,6 +154,39 @@ class ScheduleCleanupTests(unittest.TestCase):
             remaining(evidence)
         self.assertEqual(len(list(self.root.glob('.larj-cindy-runs-*'))), 1)
 
+    def test_wal_store_cleanup_removes_readonly_backup_sidecars(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+        execute(self.evidence(), client_inspector=lambda _: ())
+        self.assertEqual(self.run_ids(), ['run-2', 'run-3'])
+        self.assertFalse(list(self.root.glob('.larj-cindy-runs-*')))
+
+    def test_recovery_after_verified_copy_unlink_requires_exact_poststate(self):
+        evidence = self.evidence()
+        with patch('local_agent_record_janitor.cindy_schedule_cleanup.remaining',
+                   side_effect=RuntimeError('verification interrupted')):
+            with self.assertRaises(ScheduleCleanupError):
+                execute(evidence, client_inspector=lambda _: ())
+        directory = next(self.root.glob('.larj-cindy-runs-*'))
+        (directory / 'database.sqlite').unlink()
+        (directory / 'database.sqlite-wal').write_bytes(b'')
+        (directory / 'database.sqlite-shm').write_bytes(bytes(32768))
+        self.assertEqual(remaining(evidence), [])
+        self.assertFalse(directory.exists())
+
+    def test_missing_copy_with_nonempty_wal_preserves_evidence(self):
+        evidence = self.evidence()
+        with patch('local_agent_record_janitor.cindy_schedule_cleanup.remaining',
+                   side_effect=RuntimeError('verification interrupted')):
+            with self.assertRaises(ScheduleCleanupError):
+                execute(evidence, client_inspector=lambda _: ())
+        directory = next(self.root.glob('.larj-cindy-runs-*'))
+        (directory / 'database.sqlite').unlink()
+        (directory / 'database.sqlite-wal').write_bytes(b'unknown')
+        with self.assertRaisesRegex(ScheduleCleanupError, 'Missing recovery copy'):
+            remaining(evidence)
+        self.assertTrue(directory.exists())
+
     def coordinator(self):
         return OperationCoordinator(CleanupService(client_inspector=lambda _: ()))
 

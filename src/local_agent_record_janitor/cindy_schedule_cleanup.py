@@ -9,13 +9,14 @@ import hashlib
 import json
 import re
 import sqlite3
+import stat
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .codex_desktop_state import running_related_clients
 from .frontend_session_cleanup import (
-    _discard, _require_client_closed, _validate_database,
+    _require_client_closed, _validate_database,
 )
 from .sqlite_utils import connect_readonly
 
@@ -144,6 +145,22 @@ def _recovery_directory(evidence):
     return Path(evidence['database']).parent / ('.larj-cindy-runs-' + evidence['batch_binding'])
 
 
+def _discard_recovery(directory):
+    """Remove only the proven private SQLite copy and its named sidecars."""
+    allowed = {'database.sqlite', 'database.sqlite-wal', 'database.sqlite-shm'}
+    entries = list(directory.iterdir())
+    for path in entries:
+        info = path.lstat()
+        if (path.name not in allowed or not stat.S_ISREG(info.st_mode) or
+                info.st_nlink != 1 or getattr(info, 'st_file_attributes', 0) & 0x400):
+            raise ScheduleCleanupError('Unexpected recovery artifact; preserve evidence')
+    # Keep the original copy until sidecars are gone, so a cleanup failure can
+    # still re-prove the frozen original. No recursive directory deletion.
+    for name in ('database.sqlite-wal', 'database.sqlite-shm', 'database.sqlite'):
+        (directory / name).unlink(missing_ok=True)
+    directory.rmdir()
+
+
 def freeze(database, owner_root, run_ids):
     database = Path(database).absolute()
     _validate_database(database)
@@ -195,18 +212,25 @@ def remaining(evidence):
         if directory.is_symlink() or getattr(directory.stat(), 'st_file_attributes', 0) & 0x400:
             raise ScheduleCleanupError('Unsafe recovery directory')
         backup = directory / 'database.sqlite'
-        _validate_database(backup)
-        with closing(connect_readonly(backup)) as original:
-            if (_schema(original) != binding['schema_sha256'] or
-                    _hash(_rows(original)) != binding['runs_sha256'] or
-                    _hash(_links(original)) != binding['links_sha256']):
-                raise ScheduleCleanupError('Recovery copy does not prove frozen original')
         actual = (schema, _hash(runs), _hash(links))
         before = (binding['schema_sha256'], binding['runs_sha256'], binding['links_sha256'])
         after = (binding['schema_sha256'], binding['after_runs_sha256'], binding['after_links_sha256'])
         if actual not in (before, after):
             raise ScheduleCleanupError('Recovery state is not the frozen before/after state')
-        _discard(backup, directory)
+        if backup.exists():
+            _validate_database(backup)
+            with closing(connect_readonly(backup)) as original:
+                if (_schema(original) != binding['schema_sha256'] or
+                        _hash(_rows(original)) != binding['runs_sha256'] or
+                        _hash(_links(original)) != binding['links_sha256']):
+                    raise ScheduleCleanupError('Recovery copy does not prove frozen original')
+        else:
+            # Recovery of an interrupted *cleanup*, after the verified main
+            # copy was unlinked. No WAL frames may contain unverified data.
+            wal = directory / 'database.sqlite-wal'
+            if actual != after or (wal.exists() and wal.stat().st_size != 0):
+                raise ScheduleCleanupError('Missing recovery copy without exact completed state')
+        _discard_recovery(directory)
     return result
 
 
