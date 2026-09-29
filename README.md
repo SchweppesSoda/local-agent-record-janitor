@@ -79,10 +79,7 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 删除目标身份，也不能代替 native store 与 native record 的精确限定；它们至多说明
 某个 harness 如何获得运行授权。
 
-在本机 Cindy `0.1.27` 的限定观察中，登录前后 local/owner 数据库 namespace 会变化，
-但 bundled Codex app-server 与 Cindy `codex-home` 不变；Cindy app login 与 OpenAI
-Provider auth 是两个正交轴。本工具不会据登录或认证状态推断 native store，也不会把
-owner 数据库的出现当作已证明存在跨设备记录同步。
+工具依据实际 storage 和 reference 证据识别记录；登录状态和认证状态不用于推断 native store 或跨设备同步。
 
 ## 为什么需要它
 
@@ -93,23 +90,7 @@ Codex 的本地 thread 不是一个文件，而是至少包含：
 - Codex Desktop 的可选宿主目录/UI 状态（当前结构探测到时）；
 - 对第三方前端而言，前端数据库中还会保存一层“frontend ID → Codex thread ID”引用。
 
-任意一层单独删除，都可能留下无法从界面管理的记录。一次匿名化的本机复现中，我们
-先发现了 **9 条有列表记录但内容文件已不存在的记录**，随后又识别出 **58 条失去
-有效父 thread 关系的关联任务 thread 日志**。这些数字只是问题背景，不是检测规则，
-也不会被硬编码。
-
-后来还分别确认：
-
-- AionUI 删除前端对话后，Codex thread 可能仍然存在；
-- Cindy 将前端会话标记为 `deleted` 后，Codex thread 和 rollout 内容文件仍可能保留。
-
-在隔离的临时 `CODEX_HOME` 中，我们还用 Codex `0.144.6` 验收了官方删除行为：
-
-- index-only（`threads` 行存在、rollout 缺失）可由 `thread/delete` 清除，无需手改 SQLite；
-- 合成的有效 rollout-only（rollout 存在、`threads` 行缺失）也可由 `thread/delete` 清除并返回 `{}`；
-- 一个完全不存在、既无索引也无 rollout 的 ID 返回 `-32600` / `no rollout found`，不会被误报为成功。
-
-这说明官方接口具备修复部分不一致状态的能力；是否自动调用仍取决于 Janitor 对来源、父子关系和冲突证据的安全判断。
+任意一层单独删除，都可能留下无法从界面管理的记录。前端删除或软删除也不保证原生 thread 与内容文件同时消失，因此工具分别检查原生记录和前端引用。
 
 当前 OpenAI 官方 App Server 文档进一步明确：`thread/delete` 永久删除活动或归档
 thread 及其 spawned descendants，并在成功返回前移除现有 rollout 和关联原生
@@ -242,8 +223,8 @@ local-agent-record-janitor purge --yes --clients-closed
 kind 拆成不可变批次，依次处理 thread、旧索引、Desktop 状态、关系边和前端引用；每批
 绑定当次完整计划指纹，执行中只做定点 guard，并按路径做终验。性能约束是 action loop
 不得重建完整 catalog/plan/frontend；默认 planner 对每个 store 只做一次 catalog pass，
-healthy/native 路径已实测为计划一次、终验一次两次 full catalog pass。异常扫描可能有
-来源特定的额外读取，不能把两次 pass 承诺扩展到所有路径。
+异常扫描可能有来源特定的额外读取。性能数据见
+[性能基线](docs/performance-baseline.md)。
 共享 SQLite/JSON 写入前只创建临时回滚副本，验证成功后立即删除。任何完整扫描失败、
 计划漂移或执行错误都会停止后续批次；受阻动作保留并计数，并以退出码 `3` 和
 `goal_satisfied=false` 明确表示目标未完成，
@@ -616,3 +597,5 @@ python -m unittest discover -s tests -v
 ## License
 
 [MIT](LICENSE)
+
+[维护文档](docs/maintenance/INDEX.md)。

@@ -26,3 +26,10 @@ Use the non-interactive `records`/`delete`/`operation` surface. Select the exact
 client/store, honor the frozen plan/hash/scope and closed-client requirements,
 and never repeat an unknown mutation. Recover through status/verify. Unsupported
 schemas remain inventory-only. Expose metadata only, never chat bodies.
+
+## 文档归属
+
+- README（含子目录）只写当前功能、使用方法、必要限制和固定文档入口。
+- 逐次维护、部署、验收、测速、测试通过数量及收尾状态放 `docs/maintenance/` 的独立记录，由 `docs/maintenance/INDEX.md` 收录；版本变更沿用已有 CHANGELOG。README 不追加单次记录或其链接。
+- “更新文档”指同步受影响的当前用法，不等于复制执行过程。记录历史时保留日期、版本与验证限制；不把旧现场状态改写成当前保证。
+- 纯文档修改检查链接和 diff；不为整理文档运行部署或业务全量测试。
