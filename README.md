@@ -87,7 +87,8 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 绑定。未知 backend 仅显示 `unverified`/`inventory_only`，不提供删除动作。`native`
 涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
 Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；所有 Orca 写入和
-完整终验能力仍关闭。Herdr 接入待实现；关系语义、共享存储和支持边界见
+完整终验能力仍关闭。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
+native root 和 live metadata 尚未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
 
 ## 为什么需要它
@@ -332,6 +333,21 @@ storages。旧 v1 不补字段或重算 hash；需要新保护来源的未执行
 高层计划，已有 unknown 仍只通过 status/verify 恢复。自定义、移动或去除 marker 的未知
 home，以及没有 metadata 关联的 runtime home，不在全局发现保证内。SQLite 使用只读
 SQL，但 WAL 读锁可能创建或更新侧文件；这不是文件系统零写保证，工具不清理这些文件。
+
+Herdr 只盘点持久化 `session.json` 及已识别的 `session-snapshots`/`session-backups`：
+
+```powershell
+local-agent-record-janitor records --client herdr --herdr-root 'D:\HerdrConfig' --json
+```
+
+`--herdr-root` 可重复；省略时按 Herdr 的配置路径规则发现 release/dev 默认目录。
+当前布局为空仍保留恢复文件中的引用；同 ID 在不同 session、pane 或来源分别展示。
+持久化 ID、Pi 路径和 cwd 不证明 native home，不与同 ID 的原生记录自动关联。
+live server/pane/agent metadata 尚未探测，清单保留有效引用，同时因
+`live_metadata_not_probed` 返回退出码 `1` 和 `goal_status=blocked`，不表示零记录。
+损坏或未知版本来源也保留独立错误。`delete plan/run` 选择 Herdr 返回只读 capability
+blocker；无授权动作的 blocked 计划经 apply/status/verify 仍保持 blocked。
+来源、命名和隐私边界见 [Herdr 接入说明](docs/adapters.md#herdr已接入持久化只读引用)。
 
 Pi session 使用独立清单，不会伪装成 Codex native store。只查看 Pi：
 

@@ -3,6 +3,7 @@ from .base import AdapterScanError
 from .cindy import CindyAdapter
 from .native import NativeIntegrityAdapter, NativeIntegrityError
 from .orca import OrcaAdapter
+from .herdr import HerdrAdapter
 
 __all__ = [
     "AdapterScanError",
@@ -12,4 +13,5 @@ __all__ = [
     "NativeIntegrityAdapter",
     "NativeIntegrityError",
     "OrcaAdapter",
+    "HerdrAdapter",
 ]

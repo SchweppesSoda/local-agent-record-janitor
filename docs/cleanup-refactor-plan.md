@@ -1,6 +1,7 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 的持久化只读切片已交付，
+live/runtime 部分待实施，P5 写入能力仍关闭，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -10,7 +11,9 @@ P3a 的[公共清单与保护接线](adapters.md#类型化清单入口)已落地
 plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读上限及精确引用保护。
 旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca 的有界发现与 journal
 reader 已接入同一公共清单和保护链；含新保护来源的顶层计划采用条件 v2 冻结 locator，
-旧 v1 不补字段或重 hash。Herdr reader 待 P4；当前不承诺发现任意自定义或未证明关联的存储。
+旧 v1 不补字段或重 hash。Herdr schema3 的 current/restore reader 已接入公共清单，
+所有引用保持 rootless，live metadata 未探测时保留 incomplete。当前不承诺发现任意
+自定义或未证明关联的存储。
 
 ## 目标与已完成基线
 
@@ -199,6 +202,13 @@ managed home 的 helper。WSL/SSH/其他引擎仅报告可证明的线索或不�
 
 ### P4：Herdr 本机只读接入
 
+**已交付切片：**固定上游 snapshot schema3 的 current/restore 引用、默认/显式
+profile 发现与公共 CLI 接线，见 [Herdr 接入边界](adapters.md#herdr已接入持久化只读引用)。
+当前布局为空不丢恢复引用，同 ID 跨 session/source 不合并；未知 root/backend、坏来源
+与未实现的 argv 恢复语义保持错误。全部写入及自身 verify 关闭。live metadata、detached
+server、运行归属和 live/persisted 冲突验证未实施，始终 `live_metadata_not_probed`，
+因此原 P4 完成条件尚未全部满足；有效引用可展示，但 records 不宣告闭合盘点。
+
 **依赖：**P1、P2；研究可与 P3 并行，代码按单写者顺序提交。
 **改动范围：**新增 Herdr adapter/引用提取器、运行归属探测和临时样本测试。
 
@@ -217,6 +227,8 @@ server/session 同 ID、已知引擎但未知 root、未知 backend、socket 不
 live/persisted 冲突和远端 host。错误保留在清单，native/frontend 写入均关闭。
 
 ### P5：逐组合开放精确删除
+
+**当前状态：**未实施；Orca、Herdr writer 均保持关闭，不因只读切片交付获得写入授权。
 
 **依赖：**相应 adapter 的 P3 或 P4 完成。Orca、Herdr 分别推进，一个组合未达标不
 阻止另一组合保持只读或交付。不得按产品名一次打开所有引擎和所有 schema。
@@ -245,6 +257,9 @@ writer 已停时，对应 native 删除继续阻止。删除前端引用与删�
 
 ### P6：发布收口
 
+**当前状态：**本地验证使用 Windows 合成临时存储；macOS/Linux 实机及 CI 矩阵尚未执行，
+不以语法检查或平台 skip 代替验收。
+
 沿用 Windows/macOS/Linux × Python 3.10/3.12 的既有 CI 矩阵。链接、文件身份和
 进程归属等平台相关能力，须在实际支持平台执行对应测试；skip 不作为该能力通过的
 证明。不支持探测的平台验证保守阻断，并在兼容矩阵中明确保留只读。
@@ -253,7 +268,7 @@ writer 已停时，对应 native 删除继续阻止。删除前端引用与删�
 单 app-server；healthy/native 已有两次完整扫描的基线不退化，其他路径按各自契约
 验证，不承诺所有新客户端两次扫描完成。
 
-同步当前功能文档、CLI 示例和 CHANGELOG，只声明已经验收的能力。发布、推送和真实
+同步当前功能文档与 CLI 示例；版本历史沿用既有文件，只声明已经验收的能力。发布、推送和真实
 记录操作按届时授权执行；整个开发验证只使用临时存储，真实清理不能用作测试。
 
 ## 冻结计划与升级兼容

@@ -118,6 +118,12 @@ Orca 的本机 journal schema4 / record schema2 接入仅提供清单和保护�
 当前来源；child/agent writer v1 的证据与 hash 语义保持不变。旧 unknown 始终先进入
 只读恢复。具体来源与版本边界见 [Adapter 契约](adapters.md#orca-与-herdr-的接入边界)。
 
+Herdr 的持久化 snapshot schema3 只提供 current/restore 引用。来源不含 native root，
+因此不自动加入原生 catalog、父子关系或 mutation 范围；同 ID 不用于跨 store 绑定。
+live metadata 尚未探测，即使持久化来源合法，records 仍保留 incomplete/blocked 及有效
+引用。全部 Herdr 写入与自身 verify 关闭；无授权动作的只读计划保持 blocked，旧 native
+operation 仍可按冻结证据执行只读恢复。
+
 ### Codex thread
 
 原生 thread 删除调用匹配目标 `CODEX_HOME` 的官方 `thread/delete`。同一批只启动

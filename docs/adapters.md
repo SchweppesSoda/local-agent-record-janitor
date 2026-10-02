@@ -35,6 +35,7 @@
 | native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
 | Orca / Codex | 只读 journal 引用与已证明 homes 的原生清单 | 全部写入及 Orca 自身 verify 关闭；未知来源保持 incomplete |
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
+| Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore 引用 | rootless；live metadata 未探测，全部写入及自身 verify 关闭 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -225,13 +226,50 @@ runtime、WSL/远端及桥接副本不具备全局发现保证。持久化 lease
 writer 已停；新 adapter 保持 inventory-only。当前验证使用合成临时 schema/文件，尚无
 Orca 产品实机 writer、完整运行归属或跨平台发布兼容性验收。
 
-### Herdr：待接入
+### Herdr：已接入持久化只读引用
 
-Herdr 尚无专用 adapter/writer。其 `session.json` 与 layout snapshots 保留恢复引用，
-detach 后 server、pane 和 agent 可以继续运行；关闭 pane 的 API 不能当作删除原生
-conversation 的协议。依据：[session state](https://herdr.dev/docs/session-state/)、
-[socket API](https://herdr.dev/docs/socket-api/)。后续先接入真实持久化 schema 的只读引用，
-native root 缺证据时保持 rootless/unverified，不推导默认 home 或进程已停。
+`HerdrAdapter` 是独立的类型化 metadata adapter，使用公共 `records --client herdr`
+入口，接受固定上游 `d6b40d4edd550ccea081f089605a64314f8c8b27` 的持久化
+`version:3`，并验证真实 serde layout（`Pane`/`Split`）及 workspace/tab/pane 必需字段。
+遍历全部 tabs/panes，包括非当前项；普通只有 cwd 的 pane 不制造原生引用。
+依据：[snapshot schema](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/persist/snapshot.rs)、
+[agent session](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/agent_resume.rs)。
+
+发现限于显式 `--herdr-root` 或 release/dev 默认配置目录：优先
+`XDG_CONFIG_HOME`，Windows 其次为 APPDATA/USERPROFILE，其余为 HOME/.config，缺失时
+使用系统临时目录。显式路径就是 config root，不再追加产品名；相对、foreign-OS、UNC
+或远端 locator 不作为本机 root。`HERDR_CONFIG_PATH`、`HERDR_HOME`、`XDG_STATE_HOME`
+不提供 session root。只枚举 root 和 `sessions/<name>` 下的已知来源，保留 session 名
+精确拼写；不通过 socket 查询或启动 server。依据：
+[配置路径](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/config/io.rs)、
+[session 路径与名称](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/session.rs)。
+
+`session.json` 作为 current 来源；同级 `session-snapshots` 和 `session-backups` 中
+上游 `session-<39 位 u128 timestamp>-<pid>-<sequence>.json` 文件作为 restore 来源，
+其内容是原始 snapshot，没有额外 wrapper。当前文件为空仍盘点独立恢复文件。
+同 ID 的每个 source/session/pane 保留独立 binding；恢复、历史布局不成为原生 parent 边。
+坏 JSON/UTF-8、未知版本、未识别的恢复名称和读取失败保留精确 `SourceFailure`，
+独立有效来源仍展示。`.pending` 是未发布文件，不读取；手工命名恢复文件不在解析范围内。
+每个枚举目录最多 256 项、snapshot 最多 4 MiB，超限报告 incomplete；symlink/reparse
+目录或 metadata 文件拒绝跟随。依据：
+[恢复文件](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/persist/writer.rs)。
+
+`agent_session` 只投影 source/agent/kind/value 与来源定位。Codex/Claude/Pi ID、Pi path
+和 cwd 都不证明 native root，所有引用保持 `native_record=None`，descriptor 不声明
+native stores 或调用默认 native catalog；同 ID 的无关原生记录不受这些 rootless 引用影响。
+未知 backend 保留原文和规范化只读 engine，写入及 verify 能力均关闭。
+不读取 `session-history.json` 终端正文；snapshot 中的 argv/private 字段可能被 JSON
+reader 读到，但不输出或执行，也不由 argv 补造 native ID。`agent_resume`/`launch_argv`
+等独立恢复语义未实现时明确报告覆盖不足。
+
+live metadata、detached server、pane/agent 进程和 socket 归属均未探测，每个已知 profile
+始终保留 `live_metadata_not_probed`。即使持久化格式均合法，`records` 仍返回退出码 `1`
+和 `goal_status=blocked` 并展示已读引用；这不是完整扫描或完整终验。current 生命周期
+保持 unknown，restore 保持 restorable；detach、pane 关闭或空进程枚举不证明
+`clients_closed`。所有 native/frontend/remote 写入及 Herdr 自身 verify 关闭；选择
+Herdr 的 delete plan/run 结构化 blocked，无授权动作的 apply/status/verify 保留该结果。
+rootless Herdr 不进入 Orca `guard_sources`，也不改变旧 v1 hash 或只读恢复契约。
+当前验证限于合成临时来源，完整 live/runtime 与跨平台实机验收仍待实施。
 
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。

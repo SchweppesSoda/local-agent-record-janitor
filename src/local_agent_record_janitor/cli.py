@@ -704,6 +704,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
     )
     operation_verify.add_argument("--json", action="store_true")
+    operation_verify.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
+                                  help="Herdr persisted config root; readonly blocked plans retain their frozen result.")
 
     clean = subparsers.add_parser(
         "clean",
@@ -1005,6 +1007,8 @@ def _add_common_arguments(
     parser.add_argument("--cindy-codex-home", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--orca-root", action="append", default=[], metavar="PATH",
                         help="Orca userData 根目录（可重复；仅本机 metadata 盘点与保护）")
+    parser.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
+                        help="Herdr config 根目录（可重复；只读持久化引用，不探测 live server）")
     if not codex_only:
         parser.add_argument(
             "--pi-agent-dir",
@@ -1042,7 +1046,7 @@ def _add_operation_scope_arguments(
 
     parser.add_argument(
         "--client",
-        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca"),
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr"),
         required=client_required,
         help=(
             "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
@@ -1111,6 +1115,7 @@ _CLIENT_PLATFORM_MAP = {
     "pi": "pi",
     "claude": "claude",
     "orca": "orca",
+    "herdr": "herdr",
 }
 _OPERATION_BODY_KEYS = frozenset(
     {
@@ -1146,7 +1151,7 @@ def _normalize_client_name(value: object) -> str:
     except KeyError as exc:
         raise ValueError(
             "--client 必须指定一个受支持的客户端："
-            "native、codex-native、cindy、aionui、pi、claude 或 orca"
+            "native、codex-native、cindy、aionui、pi、claude、orca 或 herdr"
         ) from exc
 
 
@@ -1432,6 +1437,7 @@ def _run_operation_backend(
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
                 orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
+                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                 adapters=supplied_adapters,
                 app_server_factory=app_server_factory,
@@ -1445,6 +1451,7 @@ def _run_operation_backend(
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
                 orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
+                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
                 plan_sha256=(
                     getattr(args, "authorized_plan_sha256", None)
                     or getattr(args, "plan_fingerprint", None)
@@ -1466,6 +1473,7 @@ def _run_operation_backend(
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
                 orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
+                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
                 clients_closed=bool(getattr(args, "clients_closed", False)),
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                 adapters=supplied_adapters,
@@ -1486,6 +1494,7 @@ def _run_operation_backend(
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
                 orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
+                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
                 adapters=supplied_adapters,
                 verify_timeout=int(getattr(args, "verify_timeout", 180) or 0),
             )

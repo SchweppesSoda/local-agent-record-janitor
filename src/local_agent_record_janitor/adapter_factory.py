@@ -4,7 +4,8 @@ from pathlib import Path
 import os
 from typing import Any
 
-from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter
+from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter
+from .herdr_discovery import default_herdr_roots, local_herdr_path
 from .orca_discovery import default_orca_root, local_orca_path, reverse_account_profile
 from .record_identity import canonical_path
 from .cleanup_service import selected_platforms
@@ -44,6 +45,33 @@ def discover_orca_guards(args: Any) -> tuple[OrcaAdapter, ...]:
     unique = {canonical_path(root): root for root in roots}
     return tuple(OrcaAdapter(profile_root=root, codex_bin_hint=getattr(args, "codex_bin", None))
                  for root in unique.values())
+
+
+def discover_herdr_adapters(args: Any) -> tuple[HerdrAdapter, ...]:
+    """Persisted default/dev or explicit config roots, without socket probes."""
+    requested = tuple(getattr(args, "herdr_root", ()) or ())
+    selected = str(getattr(args, "client", "")) == "herdr" or "herdr" in (getattr(args, "platform", ()) or ())
+    roots = [local_herdr_path(root) for root in requested]
+    if not requested:
+        try:
+            defaults = default_herdr_roots(appdata=getattr(args, "appdata", None))
+        except ValueError:
+            # A rootless product with no proven native association cannot
+            # globally disable an unrelated client's native store.
+            return (HerdrAdapter(profile_root=None, discovery_error="herdr_environment_root_unproven"),) if selected else ()
+        for root in defaults:
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                roots.append(root)
+            else:
+                roots.append(root)
+        if selected and not roots:
+            roots.append(defaults[0])
+    unique = {canonical_path(root): root for root in roots}
+    return tuple(HerdrAdapter(profile_root=root) for root in unique.values())
 
 
 def create_default_adapters(args: Any) -> list[object]:
@@ -111,7 +139,8 @@ def create_default_adapters(args: Any) -> list[object]:
     # Protection discovery is independent of candidate selection. Typed
     # adapters never become legacy native/home or scan candidates.
     adapters.extend(discover_orca_guards(args))
+    adapters.extend(discover_herdr_adapters(args))
     return adapters
 
 
-__all__ = ["create_default_adapters", "discover_orca_guards"]
+__all__ = ["create_default_adapters", "discover_orca_guards", "discover_herdr_adapters"]

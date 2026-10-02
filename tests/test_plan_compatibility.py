@@ -238,6 +238,31 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
                 self.assertTrue(result["mutation_started"])
         self.assertEqual(store.receipt_path.read_bytes(), before)
 
+    def test_fixed_unknown_child_keeps_native_recovery_with_real_rootless_herdr(self) -> None:
+        from local_agent_record_janitor.adapters import HerdrAdapter
+        from tests.herdr_support import create_profile
+
+        top, child, store = self.install_child(receipt=False)
+        profile = self.root / "herdr"
+        create_profile(profile)
+        reader = HerdrAdapter(profile_root=profile)
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        args = {"operation_id": top["operation_id"], "plan_path": Path(top["plan_path"])}
+        before = args["plan_path"].read_bytes()
+        guards = (NativeIntegrityAdapter(codex_home=self.home), reader)
+        self.assertEqual(coordinator.status_operation(**args)["goal_status"], "unknown")
+        with patch.object(reader, "snapshot_references", side_effect=AssertionError("unknown must be inspected first")):
+            applied = coordinator.apply_operation(**args, scope=top["scope"], plan_sha256=top["plan_sha256"],
+                adapters=guards, clients_closed=True, app_server_factory=lambda **_: self.fail("unknown must not replay"))
+        self.assertEqual(applied["goal_status"], "unknown")
+        self.assertTrue(applied["mutation_started"])
+        verified = coordinator.verify_operation(**args, adapters=guards, verify_timeout=0)
+        self.assertEqual(verified["goal_status"], "complete")
+        self.assertTrue(verified["mutation_started"])
+        self.assertEqual(verified["plan_sha256"], top["plan_sha256"])
+        self.assertEqual(args["plan_path"].read_bytes(), before)
+        self.assertEqual(store.read_result()["plan_sha256"], child["plan_sha256"])
+
     def test_fixed_started_child_reader_failure_preserves_fresh_and_live_verify_facts(self) -> None:
         from local_agent_record_janitor.adapters import OrcaAdapter
         from local_agent_record_janitor.operation_coordinator import _LiveOperation

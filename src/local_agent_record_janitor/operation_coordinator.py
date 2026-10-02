@@ -93,6 +93,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        herdr_roots: Sequence[str | Path] = (),
         adapters: Iterable[Any] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
@@ -123,6 +124,7 @@ class OperationCoordinator:
                 include_action_contexts=True,
                 codex_home=codex_home,
                 orca_roots=orca_roots,
+                herdr_roots=herdr_roots,
             )
             candidates, blockers = self._select_candidates(context, normalized_scope)
             operation = str(operation_id or self._new_operation_id(client_name))
@@ -216,6 +218,11 @@ class OperationCoordinator:
                     modified=child_inspection.modified,
                     mutation_started=child_inspection.mutation_started,
                 )
+            if self._blocked_without_mutation(document):
+                return self._result_document(document, normalized_scope, goal_status="blocked",
+                    blockers=document.get("blockers", ()) or [self._blocker("action_unavailable", "The frozen plan has no authorized mutation")],
+                    batches=child_inspection.batches, modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started)
             operation = str(document["operation_id"])
             client_name = str(document["scope"]["client"])
             codex_home = self._bound_codex_home(document, codex_home)
@@ -236,11 +243,6 @@ class OperationCoordinator:
             if pending and source_errors:
                 return self._result_document(document, normalized_scope, goal_status="blocked",
                     blockers=[self._blocker("guard_source_incomplete", "; ".join(source_errors))],
-                    batches=child_inspection.batches, modified=child_inspection.modified,
-                    mutation_started=child_inspection.mutation_started)
-            if document.get("goal_status") == "blocked" and not document.get("actions"):
-                return self._result_document(document, normalized_scope, goal_status="blocked",
-                    blockers=document.get("blockers", ()) or [self._blocker("action_unavailable", "The frozen plan has no authorized mutation")],
                     batches=child_inspection.batches, modified=child_inspection.modified,
                     mutation_started=child_inspection.mutation_started)
             live = self._live.get(operation)
@@ -348,6 +350,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        herdr_roots: Sequence[str | Path] = (),
         clients_closed: bool = False,
         adapters: Iterable[Any] | None = None,
         timeout: float = 30.0,
@@ -375,6 +378,7 @@ class OperationCoordinator:
             operation_home=operation_home,
             codex_home=codex_home,
             orca_roots=orca_roots,
+            herdr_roots=herdr_roots,
             adapters=adapters,
         )
         if planned.get("goal_status") != "ready":
@@ -1122,13 +1126,14 @@ class OperationCoordinator:
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        herdr_roots: Sequence[str | Path] = (),
         explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
 
         candidates = (tuple(adapters) if adapters is not None else
                   () if client in {"pi", "claude"} else
-                  tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots)))
+                  tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)))
         guards = self._with_current_guard_sources(candidates, client, codex_home=codex_home, orca_roots=orca_roots)
         result = self._build_context_sources(client, candidates, engines=engines,
             include_action_contexts=include_action_contexts, codex_home=codex_home,
@@ -2353,10 +2358,11 @@ class OperationCoordinator:
         *,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        herdr_roots: Sequence[str | Path] = (),
     ) -> Sequence[Any]:
         from .adapter_factory import create_default_adapters, discover_orca_guards
 
-        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home, orca_roots=orca_roots)
+        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)
         # Discover known local frontend protections independently of the
         # requested candidate client. The caller filters catalog candidates.
         args.platform = ["all"]
@@ -2370,10 +2376,12 @@ class OperationCoordinator:
         *,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        herdr_roots: Sequence[str | Path] = (),
     ) -> Any:
         return SimpleNamespace(
             client=client,
             orca_root=list(orca_roots),
+            herdr_root=list(herdr_roots),
             platform=[client],
             appdata=None,
             codex_home=(Path(codex_home).expanduser() if codex_home else None),

@@ -21,7 +21,7 @@ through the independent `delete_native_project` family. See
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
-records --client <native|codex-native|cindy|aionui|pi|claude|orca> [--project <selector> ...]
+records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr> [--project <selector> ...]
 delete plan --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
@@ -85,6 +85,20 @@ v1 operation now requires these new protection locators, apply returns
 ambiguous child journals remain `unknown` before any such gate; their native
 status/verify diagnosis remains available without resending mutation. A new
 adapter's `verify=false` does not revoke that legacy read-only diagnosis.
+
+Herdr is persisted-only and inventory-only. `records --client herdr
+[--herdr-root PATH ...]` reads snapshot schema3 current and recognized recovery
+files across default/named sessions. Explicit roots replace default candidate
+profiles. Rootless IDs and Pi paths do not prove native ownership or join a
+native catalog; project cwd is not a native root. Even valid persisted sources
+retain `live_metadata_not_probed`: records returns exit code `1` and
+`goal_status=blocked` while exposing the available references. Source errors
+remain scoped to the selected profile/source. Herdr does not add Orca
+`guard_sources`; all native/frontend/remote mutation and its own verify
+capabilities are false. Delete plan/run returns structured capability blockers;
+apply/status/verify preserve a blocked plan with no authorized actions instead
+of interpreting the empty action set as successful cleanup. See
+[the source and coverage limits](adapters.md#herdr已接入持久化只读引用).
 
 ## Output
 
