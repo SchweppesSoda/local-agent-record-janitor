@@ -391,6 +391,8 @@ def scan_adapters(
         )
     for adapter in scanned_adapters:
         platform = getattr(adapter, "name", type(adapter).__name__)
+        if not callable(getattr(adapter, "scan", None)) and callable(getattr(adapter, "snapshot_references", None)):
+            continue  # Typed readers protect stores; legacy scan does not inventory them.
         try:
             adapter_findings = adapter.scan()
         except Exception as exc:

@@ -13,7 +13,7 @@ import json
 import queue
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -473,7 +473,9 @@ def execute_gui_delete(
             )
 
     native_report = execute_manual_delete(
-        plan.native_plan,
+        replace(plan.native_plan, active_adapters=tuple({id(adapter): adapter for adapter in (
+            *plan.native_plan.active_adapters, *preflight_catalog.active_adapters,
+        )}.values())),
         catalog_builder=catalog_builder,
         approved_plan_fingerprint=str(
             plan.native_plan.plan_fingerprint or ""

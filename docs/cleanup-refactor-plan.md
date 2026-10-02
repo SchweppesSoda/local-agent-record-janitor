@@ -1,17 +1,15 @@
 # 多客户端记录清理施工方案
 
-状态：按用户要求于 2026-10-02 暂停开发。P0/P1/P2a/P2b 已落地，代码基线为
-`2fd2220`；P3a 已完成接线分析但尚未修改源码，P3 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a/P2b/P3a 已落地，P3b 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
 
-恢复施工时，先处理 P3a 的两个已复现缺口：限定记录选择后仍须保留相关的类型化
-`SourceFailure`；候选 adapter 与保护 adapter 分开，原生入口、执行前刷新和恢复入口
-不能丢弃同一存储的只读上限或 current/history/restore 引用。旧 v1 `status/verify`
-保留只读诊断，不能重发未知 mutation。完成临时存储回归和复审后，再按 P3/P4 接入
-Orca、Herdr。另有测试夹具待修：成功的文件别名观察样本应解析临时根目录的真实路径，
-避免 TMP 本身是目录别名时误失败；生产代码对目录跳转的拒绝规则保持不变。
+P3a 的[公共清单与保护接线](adapters.md#类型化清单入口)已落地：限定记录选择保留相关
+类型化 `SourceFailure`，明确 store 的错误不扩大到独立 store；候选与保护 adapter 分开，
+plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读上限及精确引用保护。
+旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca、Herdr 的产品发现和
+metadata reader 仍待 P3b/P4；当前不承诺发现任意自定义或未证明关联的客户端存储。
 
 ## 目标与已完成基线
 

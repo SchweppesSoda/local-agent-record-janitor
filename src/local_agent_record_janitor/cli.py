@@ -1869,11 +1869,15 @@ def main(
                 adapter_builder = lambda: create_default_adapters(guard_args)
                 active_adapters = adapter_builder()
         else:
-            active_adapters = (
-                _filter_supplied_adapters(adapters, args.platform)
-                if adapters is not None
-                else create_default_adapters(args)
-            )
+            if adapters is not None:
+                active_adapters = (list(adapters) if getattr(args, "client", None)
+                                   else _filter_supplied_adapters(adapters, args.platform))
+            elif getattr(args, "client", None) and args.client not in {"pi", "claude"}:
+                guard_args = argparse.Namespace(**vars(args))
+                guard_args.platform = ["all"]
+                active_adapters = create_default_adapters(guard_args)
+            else:
+                active_adapters = create_default_adapters(args)
     except Exception as exc:
         return _emit_fatal_error(
             args.command,
@@ -2701,6 +2705,27 @@ def _run_client_records(
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     group_locations: dict[tuple[str, str, str], set[str]] = {}
+    group_native_stores: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
+    from .path_identity import is_local_absolute_locator
+    location_keys: dict[str, str | None] = {}
+
+    def location_key(value: Any) -> str | None:
+        raw = os.fspath(value) if isinstance(value, (str, os.PathLike)) else ""
+        if raw not in location_keys:
+            location_keys[raw] = canonical_path(raw) if is_local_absolute_locator(raw) else None
+        return location_keys[raw]
+
+    profile_locations_by_source: dict[str, set[str]] = {}
+    profile_locations_by_store: dict[tuple[str, str], set[str]] = {}
+    for descriptor in inventory.descriptors:
+        locations = {key for value in (*descriptor.sources, descriptor.profile_root)
+                     if (key := location_key(value)) is not None}
+        for source in descriptor.sources:
+            if (key := location_key(source)) is not None:
+                profile_locations_by_source.setdefault(key, set()).update(locations)
+        for store in descriptor.native_stores:
+            if (key := location_key(store.path)) is not None:
+                profile_locations_by_store.setdefault((store.backend, key), set()).update(locations)
     rendered_targets: list[dict[str, Any]] = []
     total_classifications = {
         key: 0 for key in _CLIENT_RECORD_CLASSIFICATIONS
@@ -2730,14 +2755,29 @@ def _run_client_records(
                 },
             )
             locations = group_locations.setdefault(key, set())
+            native_stores = group_native_stores.setdefault(key, set())
             if target.record_key is not None:
-                locations.add(canonical_existing_path_key(
-                    Path(target.record_key.store.path)
-                ))
+                root_key = location_key(target.record_key.store.path)
+                if root_key is not None:
+                    locations.add(root_key)
+                    native_stores.add((target.record_key.store.backend, root_key))
+                    locations.update(profile_locations_by_store.get((target.engine, root_key), ()))
+            for reference in target.references:
+                if reference.native_record is not None:
+                    native = reference.native_record.store
+                    if (root_key := location_key(native.path)) is not None:
+                        native_stores.add((native.backend, root_key))
+            sources = [reference.source for reference in target.references]
+            sources.extend(row["database"] for row in target.project_row_evidence if row.get("database"))
             for session in context.frontend_sessions:
                 if has_binding(target, session):
-                    locations.add(canonical_existing_path_key(Path(session.codex_home)))
-                    locations.add(canonical_existing_path_key(Path(session.database)))
+                    if (home_key := location_key(session.codex_home)) is not None:
+                        locations.add(home_key)
+                    sources.append(session.database)
+            for source in sources:
+                if (source_key := location_key(source)) is not None:
+                    locations.add(source_key)
+                    locations.update(profile_locations_by_source.get(source_key, ()))
             target_payload = _metadata_only(target.to_dict())
             group["targets"].append(target_payload)
             group["native_record_count"] += int(target.record_key is not None)
@@ -2754,19 +2794,27 @@ def _run_client_records(
         for value in (
             getattr(error, "codex_home", None),
             getattr(error, "database", None),
+            getattr(error, "source", None),
+            getattr(error, "profile_root", None),
+            getattr(getattr(error, "store", None), "path", None),
         ):
-            if value is None:
-                continue
-            try:
-                locations.add(canonical_existing_path_key(Path(value)))
-            except (OSError, TypeError, ValueError):
-                locations.add(str(value).casefold())
+            if (key := location_key(value)) is not None:
+                locations.add(key)
         return locations
+
+    def error_matches_group(error: Any, group_key: tuple[str, str, str]) -> bool:
+        # An explicit store is the narrower authoritative error scope. Shared
+        # profile/source metadata must not broaden it to independent stores.
+        store = getattr(error, "store", None)
+        if store is not None:
+            root_key = location_key(store.path)
+            return root_key is None or (store.backend, root_key) in group_native_stores[group_key]
+        return bool(group_locations[group_key].intersection(error_locations(error)))
 
     error_groups: dict[tuple[str, str, str], list[Any]] = {}
     for group_key, locations in group_locations.items():
         for error in inventory.errors:
-            if locations.intersection(error_locations(error)):
+            if error_matches_group(error, group_key):
                 error_groups.setdefault(group_key, []).append(error)
     for group_key, errors in error_groups.items():
         groups[group_key]["errors"] = [
@@ -2784,8 +2832,7 @@ def _run_client_records(
         if not has_scope or bool(getattr(args, "all_projects", False)):
             relevant_errors.append(error)
             continue
-        if any(locations.intersection(group_locations.get(key, set()))
-               for key in selected_group_keys):
+        if any(error_matches_group(error, key) for key in selected_group_keys):
             relevant_errors.append(error)
     relevant_errors = list(dict.fromkeys(relevant_errors))
 
@@ -2921,15 +2968,20 @@ def _build_native_client_contexts(
     engine = "codex" if client == "native" else client
     if engine == "codex":
         from .inventory import build_session_catalog
+        from .client_contracts import describe_adapter
 
-        catalog = build_session_catalog(tuple(adapters))
+        candidates = tuple(adapter for adapter in adapters
+                           if describe_adapter(adapter).client in {"native", "codex-desktop"})
+        catalog = build_session_catalog(candidates, guard_adapters=adapters)
     else:
         catalog = (
             _build_pi_catalog(args)
             if engine == "pi"
             else _build_claude_catalog(args)
         )
-    return build_native_client_inventory(client=client, engine=engine, catalog=catalog, adapters=adapters)
+    return build_native_client_inventory(client=client, engine=engine, catalog=catalog,
+                                        adapters=adapters if engine != "codex" else candidates,
+                                        guard_adapters=adapters)
 
 
 def _run_records(
@@ -3940,7 +3992,8 @@ def _run_manual_delete(
             execute_manual_delete,
         )
 
-        catalog = build_session_catalog(active_adapters)
+        candidates = _filter_supplied_adapters(active_adapters, args.platform)
+        catalog = build_session_catalog(candidates, guard_adapters=active_adapters)
         plan = build_manual_delete_plan(catalog)
         visible_conversations = _platform_visible_conversations(
             tuple(catalog.conversations),
@@ -4134,7 +4187,8 @@ def _run_manual_delete(
             if adapter_builder is not None
             else active_adapters
         )
-        return build_session_catalog(latest_adapters)
+        return build_session_catalog(_filter_supplied_adapters(latest_adapters, args.platform),
+                                     guard_adapters=latest_adapters)
 
     # The preview scan is not the apply preflight.  Rebuild one complete
     # catalog here, compare only the approved roots, then let
@@ -4175,12 +4229,6 @@ def _run_manual_delete(
         )
 
     guard_adapters: tuple[FrontendAdapter, ...] | None = None
-    guard_target_ids = {
-        str(value)
-        for selected_action in selected_plan.actions
-        for value in getattr(selected_action, "affected_thread_ids", ())
-        if str(value)
-    }
 
     def targeted_frontend_guard(_action: Any) -> None:
         nonlocal guard_adapters
@@ -4190,16 +4238,11 @@ def _run_manual_delete(
                 if adapter_builder is not None
                 else active_adapters
             )
-        live_ids: set[str] = set()
-        for adapter in guard_adapters:
-            query = getattr(adapter, "live_thread_ids_for", None)
-            if callable(query):
-                live_ids.update(str(value) for value in query(guard_target_ids))
-        if live_ids:
-            raise RuntimeError(
-                "目标仍被活跃前端引用："
-                + ", ".join(sorted(live_ids))
-            )
+        from .targeted_guard import TargetedReferenceGuard
+        guard = TargetedReferenceGuard(guard_adapters, {
+            (canonical_existing_path_key(action.codex_home), str(action.thread_id)): frozenset(action.affected_thread_ids)
+            for action in selected_plan.actions})
+        guard.check_manual(_action)
 
     def batch_action_state(_checkpoint: str, _action: Any, result: Any) -> None:
         # An ambiguous request outcome is a batch boundary.  The cleaner

@@ -150,6 +150,7 @@ class ManualDeletePlan:
     errors: tuple[str, ...] = ()
     selected: bool = False
     plan_fingerprint: str | None = None
+    active_adapters: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def executable_actions(self) -> tuple[ManualDeleteAction, ...]:
@@ -220,6 +221,7 @@ class ManualDeletePlan:
             errors=(),
             selected=True,
             plan_fingerprint=fingerprint,
+            active_adapters=self.active_adapters,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -499,6 +501,7 @@ def build_manual_delete_plan(catalog: Any) -> ManualDeletePlan:
         for _key, record in sorted(by_target.items())
     )
     return ManualDeletePlan(
+        active_adapters=tuple(getattr(catalog, "active_adapters", ())),
         actions=actions,
         errors=tuple(
             dict.fromkeys(
@@ -580,6 +583,23 @@ def execute_manual_delete(
                 "The manual deletion plan changed after approval; nothing was deleted"
             )
 
+    from .client_capability_guards import ClientCapabilityLimits
+    from .targeted_guard import TargetedReferenceGuard
+    active = tuple({id(adapter): adapter for adapter in (*plan.active_adapters, *refreshed.active_adapters)}.values())
+    limits = ClientCapabilityLimits.from_adapters(active)
+    for action in refreshed.actions:
+        reasons = limits.reasons("codex", "native_delete", native_root=action.codex_home)
+        if reasons:
+            raise ManualDeletePlanError("; ".join(reasons))
+    reference_guard = TargetedReferenceGuard(active, {
+        (canonical_existing_path_key(action.codex_home), str(action.thread_id)): frozenset(action.affected_thread_ids)
+        for action in refreshed.actions})
+    typed = tuple(adapter for adapter in active if callable(getattr(adapter, "snapshot_references", None))
+                  and not callable(getattr(adapter, "snapshot_sessions", None)))
+    if typed:
+        typed_guard = TargetedReferenceGuard(typed, reference_guard.affected_thread_ids)
+        for action in refreshed.actions:
+            typed_guard.check_manual(action)
     findings = [_synthetic_finding(action) for action in refreshed.actions]
     expected_scopes = {
         finding_key(finding): action.expected_scope
@@ -601,6 +621,7 @@ def execute_manual_delete(
 
     def validate_frontend_snapshot(finding: Finding) -> None:
         expected = action_by_key[finding_key(finding)]
+        reference_guard.check(finding)
         if targeted_guard is not None:
             targeted_guard(expected)
         if targeted_guards_only:

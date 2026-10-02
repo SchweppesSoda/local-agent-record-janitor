@@ -474,7 +474,7 @@ def build_client_engine_contexts(
             )
         )
     native_errors = tuple(
-        InventoryFailure(
+        error if isinstance(error, SourceFailure) else InventoryFailure(
             source=f"{context.engine}-catalog:{getattr(error, 'source', 'inventory')}",
             codex_home=Path(getattr(error, "session_root", None)
                             or getattr(error, "config_dir", None)
@@ -552,7 +552,19 @@ def restrict_client_target(
         if descriptor.matches(store=target.record_key.store if target.record_key else None) or any(
             descriptor.matches(source=source) for source in sources
         ):
-            capability = restrict_capability(capability, descriptor.limit_for(target.engine))
+            limit = descriptor.limit_for(target.engine)
+            # A protection owner may be a different frontend client;
+            # only intersect flags for this exact qualified native store.
+            if limit.client != capability.client:
+                limit = replace(limit, client=capability.client)
+            previous = capability
+            capability = restrict_capability(capability, limit)
+            if any(getattr(previous, name) and not getattr(capability, name)
+                   for name in CAPABILITY_FIELDS if name.endswith("delete")):
+                capability = replace(capability, blockers=(*capability.blockers, {
+                    "blocker_code": "client_capability_limit", "scope": "record",
+                    "message": f"{descriptor.client}/{target.engine} limits this store's mutation capability",
+                }))
     for descriptor, current in profile_capabilities:
         if descriptor.matches(store=target.record_key.store if target.record_key else None) or any(
             descriptor.matches(source=source) for source in sources
@@ -658,6 +670,7 @@ def project_client_evidence(inventory: ClientInventory, catalogs: Mapping[str, o
 
 def build_native_client_inventory(
     *, client: str, engine: str, catalog: object, adapters: Sequence[object] = (),
+    guard_adapters: Sequence[object] = (),
 ) -> tuple[ClientInventory, tuple[ClientEngineContext, ...]]:
     """Shared projection for standalone Codex/Pi/Claude metadata catalogs."""
     import os
@@ -847,7 +860,7 @@ def build_native_client_inventory(
         errors=(tuple(getattr(catalog, "errors", ()) or ())
                 if engine == "codex" else ()),
         frontend_snapshots=(),
-        descriptors=tuple(describe_adapter(a) for a in adapters if _adapter_client(a) == "native")
+        descriptors=tuple(describe_adapter(a) for a in {id(a): a for a in (*adapters, *guard_adapters)}.values())
             if engine == "codex" else tuple(ClientDescriptor("native", profile_root=root,
                 native_stores=(StoreKey(engine, root, kind="session_root" if engine == "pi" else "config_dir"),),
                 inventory_engines=(engine,), capability_limits=(capability,))
@@ -876,7 +889,7 @@ def build_native_client_inventory(
         from .native_project_cleanup import append_native_inventory
 
         original_count = len(inventory.targets)
-        inventory = append_native_inventory(inventory, adapters)
+        inventory = append_native_inventory(inventory, tuple({id(a): a for a in (*adapters, *guard_adapters)}.values()))
         additional = inventory.targets[original_count:]
         contexts = [replace(context, inventory=inventory)]
         for supported in (False, True):

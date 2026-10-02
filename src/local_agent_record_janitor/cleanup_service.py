@@ -256,6 +256,9 @@ class CleanupContext:
     plan: CleanupPlan
     actions: tuple[Action, ...]
     frontend_scan_coverage: tuple[tuple[str, str], ...] = ()
+    # A pure metadata client has selectable targets but no mutation family.
+    # This reader-only projection never enters legacy approval/hash payloads.
+    client_inventory: Any | None = field(default=None, repr=False, compare=False)
     adapter_builder: AdapterBuilder | None = field(
         default=None,
         repr=False,

@@ -897,6 +897,16 @@ def _execute_prevalidated_actions_locked(
             build_guard_adapters if context.adapter_builder is not None else None
         ),
     )
+    # Pure metadata readers can retain restorable bindings independently of
+    # live frontend rows. Check them before opening the native writer, then
+    # recheck the exact authorized scope immediately before each mutation.
+    typed_adapters = tuple(adapter for adapter in context.active_adapters
+                           if callable(getattr(adapter, "snapshot_references", None))
+                           and not callable(getattr(adapter, "snapshot_sessions", None)))
+    if typed_adapters:
+        typed_guard = TargetedReferenceGuard(typed_adapters, reference_guard.affected_thread_ids)
+        for finding in selected_findings:
+            typed_guard.check(finding)
     actions_by_finding = {
         finding_key(finding): action
         for finding, action in zip(selected_findings, actions, strict=True)

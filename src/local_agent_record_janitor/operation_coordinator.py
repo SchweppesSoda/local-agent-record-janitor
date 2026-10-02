@@ -211,6 +211,8 @@ class OperationCoordinator:
             codex_home = self._bound_codex_home(document, codex_home)
             live = self._live.get(operation)
             if live is not None:
+                if adapters is not None:
+                    self._retain_live_guards(live, tuple(adapters))
                 # A plan followed by apply in one process already owns the
                 # immutable snapshot. Rebuilding the catalog here would turn
                 # plan + apply + terminal verification into three full passes.
@@ -571,6 +573,8 @@ class OperationCoordinator:
                     operation_id=operation_id, blocker_code="operation_verify_failed",
                 )
         if terminal is None:
+            if adapters is not None:
+                self._retain_live_guards(live, tuple(adapters))
             try:
                 self._bound_codex_home(live.document, codex_home)
             except OperationCoordinatorError as exc:
@@ -1056,16 +1060,24 @@ class OperationCoordinator:
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
 
-        result = self._build_context_sources(client, adapters, engines=engines,
+        guards = (tuple(adapters) if adapters is not None else
+                  () if client in {"pi", "claude"} else
+                  tuple(self._default_adapters(client, codex_home=codex_home)))
+        result = self._build_context_sources(client, guards, engines=engines,
             include_action_contexts=include_action_contexts, codex_home=codex_home,
             explicit_frontend_ids=explicit_frontend_ids)
-        selected = result[1]
-        context = restrict_cleanup_context(result[0], selected, self.service.typed_actions)
+        context = restrict_cleanup_context(result[0], guards, self.service.typed_actions)
+        active = context.active_adapters
+        catalog, manual_plan = result[2:4]
+        if catalog is not None:
+            catalog = replace(catalog, active_adapters=active)
+        if manual_plan is not None:
+            manual_plan = replace(manual_plan, active_adapters=active)
         if include_action_contexts:
-            bindings = {action_id: restrict_cleanup_context(bound, selected, self.service.typed_actions)
+            bindings = {action_id: restrict_cleanup_context(bound, guards, self.service.typed_actions)
                         for action_id, bound in result[5].items()}
-            return (context, *result[1:5], bindings)
-        return (context, *result[1:])
+            return (context, active, catalog, manual_plan, result[4], bindings)
+        return (context, active, catalog, manual_plan, result[4])
 
     def _build_context_sources(
         self,
@@ -1108,6 +1120,10 @@ class OperationCoordinator:
             else tuple(self._default_adapters(client, codex_home=codex_home))
         )
         selected = tuple(adapter for adapter in source if self._adapter_matches(adapter, client))
+        if selected and all(callable(getattr(adapter, "snapshot_references", None))
+                            and not callable(getattr(adapter, "scan", None)) for adapter in selected):
+            result = (self._readonly_client_context(selected, client, engines), selected, None, None, {}, {})
+            return result if include_action_contexts else result[:5]
         if client in {"native", "codex-desktop"}:
             # Native inventory is the authoritative healthy-record snapshot.
             # The regular anomaly scanner is only added for an incomplete or
@@ -1179,6 +1195,31 @@ class OperationCoordinator:
             merged = self._merge_native_manual_records(result[0], selected)
             result = (*merged, result[5])
         return result if include_action_contexts else result[:5]
+
+    def _readonly_client_context(self, adapters: tuple[Any, ...], client: str, engines: Sequence[str]) -> Any:
+        """Inventory a pure client without calling legacy scan or fabricating actions."""
+        from .cleaner import ScanReport
+        from .client_inventory import build_client_engine_contexts, build_client_inventory
+
+        inventory = build_client_inventory(adapters, client=client, engines=engines)
+        contexts = build_client_engine_contexts(adapters, client=client, engines=engines, inventory=inventory)
+        if contexts:
+            inventory = contexts[0].inventory
+        context = self.service.prepare_report(ScanReport(), active_adapters=adapters, platforms=(client,))
+        return replace(context, client_inventory=inventory)
+
+    def _retain_live_guards(self, live: _LiveOperation, adapters: tuple[Any, ...]) -> None:
+        """Keep newly supplied protections without rebuilding the approved catalog."""
+        from .client_capability_guards import restrict_cleanup_context
+
+        live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
+        live.adapters = live.context.active_adapters
+        live.action_contexts = {key: restrict_cleanup_context(bound, adapters, self.service.typed_actions)
+                                for key, bound in live.action_contexts.items()}
+        if live.manual_catalog is not None:
+            live.manual_catalog = replace(live.manual_catalog, active_adapters=live.adapters)
+        if live.manual_plan is not None:
+            live.manual_plan = replace(live.manual_plan, active_adapters=live.adapters)
 
     def _merge_client_engine_contexts(
         self,
@@ -2237,12 +2278,11 @@ class OperationCoordinator:
     ) -> Sequence[Any]:
         from .adapter_factory import create_default_adapters
 
-        return create_default_adapters(
-            OperationCoordinator._default_catalog_args(
-                client,
-                codex_home=codex_home,
-            )
-        )
+        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home)
+        # Discover known local frontend protections independently of the
+        # requested candidate client. The caller filters catalog candidates.
+        args.platform = ["all"]
+        return create_default_adapters(args)
 
     @staticmethod
     def _default_catalog_args(
@@ -2270,6 +2310,19 @@ class OperationCoordinator:
         context: Any,
         scope: Mapping[str, Any],
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+        if getattr(context, "client_inventory", None) is not None:
+            inventory = context.client_inventory
+            try:
+                selected = inventory.select(project_selectors=tuple(scope.get("projects", ())),
+                    all_projects=bool(scope.get("all_projects")), record_ids=tuple(scope.get("record_ids", ())),
+                    engines=tuple(scope.get("engines", ())))
+            except ValueError as exc:
+                return (), [self._blocker("client_capability_limit", str(exc), scope="selection")]
+            blockers = [self._blocker("client_capability_limit",
+                "This metadata client has no registered mutation or complete verification contract",
+                scope=f"record:{target.record_id or target.frontend_binding_keys}") for target in selected.targets]
+            blockers.extend(self._blocker("inventory_error", error.message) for error in inventory.errors)
+            return (), blockers or [self._blocker("client_capability_limit", "This metadata client is inventory-only")]
         def kind_value(action: Any) -> str:
             kind = getattr(action, "kind", "")
             return str(getattr(kind, "value", kind))
@@ -4284,6 +4337,7 @@ class OperationCoordinator:
                         builder(),
                         catalog_builder=builder,
                         target_root=None,
+                        active_adapters=live.adapters,
                     ),
                     None,
                 )

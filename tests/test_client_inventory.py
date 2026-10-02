@@ -343,7 +343,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_records_alias_projection_is_scoped_and_excluded_from_snapshot_and_approval(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             first = _write_pi_session(root, "selected-pi")
             _write_pi_session(root, "other-pi")
             catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
@@ -379,7 +379,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_observed_hardlinks_do_not_merge_logical_native_stores(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             sid = "11111111-1111-4111-8111-111111111111"
             homes = (root / "one", root / "two")
             files = [write_rollout(home, sid, originator="codex_cli_rs", source="cli") for home in homes]

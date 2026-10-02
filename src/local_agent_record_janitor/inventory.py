@@ -226,6 +226,8 @@ class SessionCatalog:
     unmapped_frontend_sessions: tuple[FrontendSessionRecord, ...] = ()
     errors: tuple[InventoryFailure, ...] = ()
     scanned_session_databases: tuple[Path, ...] = ()
+    # Runtime guard providers are not native discovery inputs or hash fields.
+    active_adapters: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def conversations(self) -> tuple[ManagedConversation, ...]:
@@ -262,7 +264,7 @@ class InventorySelectionError(ValueError):
     pass
 
 
-def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
+def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterable[object] = ()) -> SessionCatalog:
     """Build a read-only union of native artifacts and frontend mappings.
 
     A failure remains visible while other homes and sources continue to be
@@ -273,16 +275,24 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     from .client_capability_guards import ClientCapabilityLimits, CLIENT_CAPABILITY_LIMIT
 
     adapter_list = list(adapters)
+    active = tuple({id(adapter): adapter for adapter in (*adapter_list, *guard_adapters)}.values())
     # Validate execution location before interpreting any legacy home/session
     # path. The same maxima remain authoritative in the manual catalog.
-    limits = ClientCapabilityLimits.from_adapters(adapter_list)
+    limits = ClientCapabilityLimits.from_adapters(active)
     home_paths: dict[str, Path] = {}
     bin_hints: dict[str, set[Path]] = defaultdict(set)
     frontend_by_home: dict[str, list[FrontendSessionRecord]] = defaultdict(list)
     errors: list[InventoryFailure] = []
     scanned_session_databases: set[Path] = set()
-
-    for adapter in adapter_list:
+    candidate_ids = {id(adapter) for adapter in adapter_list}
+    candidate_homes = {_normalized_path(_absolute_path(home)) for adapter in adapter_list
+                       if isinstance(home := getattr(adapter, "codex_home", None), Path)}
+    # Legacy guard rows on an already selected home remain approval evidence;
+    # guard-only homes never become native catalog candidates.
+    readers = (*adapter_list, *(adapter for adapter in active if id(adapter) not in candidate_ids
+        and isinstance(home := getattr(adapter, "codex_home", None), Path)
+        and _normalized_path(_absolute_path(home)) in candidate_homes))
+    for adapter in readers:
         raw_home = getattr(adapter, "codex_home", None)
         if not isinstance(raw_home, Path):
             continue
@@ -323,6 +333,8 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 continue
             session_home = _absolute_path(session.codex_home)
             session_key = _normalized_path(session_home)
+            if id(adapter) not in candidate_ids and session_key not in candidate_homes:
+                continue
             home_paths.setdefault(session_key, session_home)
             owner_process_root = (
                 _absolute_path(session.owner_process_root)
@@ -619,6 +631,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
             blocker_codes=tuple(dict.fromkeys((*record.blocker_codes, CLIENT_CAPABILITY_LIMIT)))) if reasons else record)
     return SessionCatalog(
         records=tuple(restricted_records),
+        active_adapters=active,
         scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(

@@ -191,6 +191,36 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
             clients_closed=True, app_server_factory=lambda **_: self.fail("verified fixed child must not replay"))
         self.assertEqual(result["goal_status"], "complete")
 
+    def test_fixed_unknown_child_keeps_native_readonly_recovery_with_new_verify_false_guard(self) -> None:
+        from local_agent_record_janitor.client_contracts import ClientDescriptor, ReferenceSnapshot
+        from local_agent_record_janitor.record_identity import EngineCapability, StoreKey
+
+        top, child, store = self.install_child(receipt=False)
+        descriptor = ClientDescriptor("cindy", sources=(self.root / "metadata.json",),
+            native_stores=(StoreKey("codex", self.home),), inventory_engines=("codex",),
+            capability_limits=(EngineCapability("cindy", "codex", verify=False),))
+        class Reader:
+            def describe_client(self):
+                return descriptor
+            def snapshot_references(self, *, refresh=False):
+                return ReferenceSnapshot(descriptor)
+            def native_catalog_for(self, _engine):
+                return None
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        args = {"operation_id": top["operation_id"], "plan_path": Path(top["plan_path"])}
+        before = args["plan_path"].read_bytes()
+        guards = (NativeIntegrityAdapter(codex_home=self.home), Reader())
+        self.assertEqual(coordinator.status_operation(**args)["goal_status"], "unknown")
+        applied = coordinator.apply_operation(**args, scope=top["scope"], plan_sha256=top["plan_sha256"],
+            adapters=guards, clients_closed=True, app_server_factory=lambda **_: self.fail("unknown must not replay"))
+        self.assertEqual(applied["goal_status"], "unknown")
+        verified = coordinator.verify_operation(**args, adapters=guards, verify_timeout=0)
+        self.assertEqual(verified["goal_status"], "complete")
+        self.assertTrue(verified["mutation_started"])
+        self.assertEqual(verified["plan_sha256"], top["plan_sha256"])
+        self.assertEqual(args["plan_path"].read_bytes(), before)
+        self.assertEqual(store.read_result()["plan_sha256"], child["plan_sha256"])
+
     def test_fixed_child_receipt_reopens_in_new_coordinator_without_replaying(self) -> None:
         top, _, store = self.install_child(receipt=True)
         before = store.receipt_path.read_bytes()

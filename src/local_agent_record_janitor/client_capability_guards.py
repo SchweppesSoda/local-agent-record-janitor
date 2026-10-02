@@ -175,9 +175,17 @@ def restrict_cleanup_context(context: Any, adapters: Iterable[object], typed_act
     active_by_id = {id(adapter): adapter for adapter in (*context.active_adapters, *adapters)}
     active = tuple(active_by_id.values())
     snapshot = context.snapshot if active == context.active_adapters else replace(context.snapshot, active_adapters=active)
+    builder = context.adapter_builder
+    if builder is not None and active != context.active_adapters:
+        def builder_with_guards() -> tuple[object, ...]:
+            return tuple({id(adapter): adapter for adapter in (*active, *builder())}.values())
+        guarded_builder = builder_with_guards
+    else:
+        guarded_builder = builder
     if plan is context.plan and snapshot is context.snapshot:
         return context
-    return replace(context, plan=plan, snapshot=snapshot, actions=typed_action_builder(plan))
+    return replace(context, plan=plan, snapshot=snapshot, actions=typed_action_builder(plan),
+                   adapter_builder=guarded_builder)
 
 
 def restrict_finding(finding: Any, limits: ClientCapabilityLimits) -> Any:

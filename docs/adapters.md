@@ -67,6 +67,29 @@ family 在实际 writer 分派前按精确 metadata source 或 native store 再�
 引用按冻结的真实 backend 证据检查全部受影响引擎，不使用 Codex 默认值放宽 Pi/Claude
 限制。明确选择只读目标返回 blocked，独立可写 profile 保留原计划行为。
 
+候选 adapter 与保护 adapter 分开：只有所选客户端的 adapters 提供 native/catalog
+候选，全部已知保护 adapter 继续约束对应 store。`SessionCatalog.active_adapters` 和
+`ManualDeletePlan.active_adapters` 是运行期绑定，不进入旧 JSON、approval 或 hash；
+plan/apply、fresh rebind、terminal、manual/GUI 和直接服务执行均保留这些保护。
+`build_session_catalog(..., guard_adapters=...)` 不把 guard-only home 加入候选；同一已选
+home 的旧前端行仍可作为原有审批证据。纯类型化只读客户端走公共清单，明确选择删除
+返回 `client_capability_limit`，不要求假的 `scan()` 或 native home。
+
+`TargetedReferenceGuard` 当前为 Codex native store 刷新类型化引用，只检查精确 store
+和已批准的 ID/后代，
+不重建全库或发现新的授权目标。descriptor 的 stores 与 snapshot 中的 qualified 引用
+或 `SourceFailure.store` 都可提供相关性；裸 ID、远端和 rootless 引用不补默认 root。
+current/history/restore 的持久化引用阻止相关删除；只有证据完整且生命周期明确为
+deleted 的 current/history 引用可释放，unknown/restorable 不据此释放。明确限定 store
+的来源错误只影响该 store，未限定 store 的 profile 覆盖缺口仍影响该 profile 的选择；
+`--record-id` 不会隐藏相关来源失败。
+Pi/Claude 继续由既有专用引用/manifest 检查和公共能力上限保护，尚未引入同样的类型化
+fresh-reference 执行契约。
+
+新的 adapter `verify=False` 表示其自身尚无完整终验契约，仍允许旧 native v1 operation
+执行只读 status/verify。恢复只依据原冻结范围与当前可信事实；证据不足保持 unknown，
+不会重发 mutation 或改写原计划。
+
 ### 文件别名与运行观察
 
 `file_alias_evidence.py` 的 `probe_file_aliases()` 接受已发现的本机路径与明确 roots，

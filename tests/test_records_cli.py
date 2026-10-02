@@ -515,8 +515,9 @@ class DeleteCliTests(unittest.TestCase):
                 stderr=StringIO(),
             )
         self.assertEqual(status, EXIT_CONFIRMATION_REQUIRED)
-        guarded = tuple(catalog_builder.call_args.args[0])
-        self.assertEqual(guarded, (native, cindy))
+        candidates = tuple(catalog_builder.call_args.args[0])
+        self.assertEqual(candidates, (native,))
+        self.assertEqual(tuple(catalog_builder.call_args.kwargs["guard_adapters"]), (native, cindy))
         execute.assert_not_called()
 
     def test_non_tty_execution_requires_clients_yes_and_fingerprint(self) -> None:
