@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 from ..models import Finding
+from ..client_contracts import ClientDescriptor, ReferenceSnapshot, frontend_binding_key, reference_from_session, require_local_location
 from ..record_identity import (
     EngineCapability,
     StoreKey,
@@ -152,6 +153,30 @@ class FrontendAdapter(ABC):
         """Conservative capability for this concrete adapter instance."""
 
         return capability_for(self.client, self.engine, observed=self.available)
+
+    def capability_limit_for(self, engine: str) -> EngineCapability:
+        """Maximum implemented support; current evidence can only narrow it."""
+        return capability_for(self.client, engine)
+
+    def describe_client(self) -> ClientDescriptor:
+        require_local_location(getattr(self, "host", "local"), getattr(self, "path_namespace", "local"))
+        engines = tuple(getattr(self, "inventory_engines", (self.engine,)))
+        return ClientDescriptor(
+            self.client, profile_root=self.data_root, sources=(self.database,),
+            native_stores=(StoreKey("codex", self.codex_home, kind="codex_home"),),
+            owner_process_root=self.owner_process_root, inventory_engines=engines,
+            capability_limits=tuple(self.capability_limit_for(e) for e in engines),
+        )
+
+    def snapshot_references(self, *, refresh: bool = False) -> ReferenceSnapshot:
+        snapshot = self.snapshot_sessions(refresh=refresh, all_backends=True)
+        return ReferenceSnapshot(self.describe_client(), tuple(
+            reference_from_session(row, frontend_binding_key(row)) for row in snapshot.records
+        ))
+
+    def native_catalog_for(self, engine: str) -> object | None:
+        """The legacy Codex facade supplies its catalog through inventory."""
+        return None
 
     def invalidate_frontend_snapshot(self) -> None:
         """Drop a batch snapshot after a successful frontend mutation."""

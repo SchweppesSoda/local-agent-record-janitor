@@ -46,11 +46,17 @@ class DependencyDirectionTests(unittest.TestCase):
             "session_cleanup.py",
             "relation_cleanup.py",
             "frontend_reference_cleanup.py",
+            "client_contracts.py",
+            "client_inventory.py",
         ):
             with self.subTest(module=name):
                 imports = imported_modules(name)
                 self.assertNotIn("cli", imports)
                 self.assertNotIn("agent_cli", imports)
+
+    def test_public_client_contracts_do_not_depend_on_product_adapters(self) -> None:
+        imports = imported_modules("client_contracts.py")
+        self.assertFalse(any(name == "adapters" or name.startswith("adapters.") for name in imports))
 
     def test_gui_is_a_thin_human_facade_over_inventory_and_manual_delete(self) -> None:
         imports = imported_modules("gui.py")

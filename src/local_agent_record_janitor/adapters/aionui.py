@@ -67,6 +67,7 @@ class AionUIProjectItem:
 class AionUIAdapter(FrontendAdapter):
     name = "aionui"
     supports_all_backends = True
+    inventory_engines = ("codex",)
 
     def __init__(
         self,
@@ -98,6 +99,27 @@ class AionUIAdapter(FrontendAdapter):
         if engine == "codex":
             return self.codex_home
         return self.native_roots.get(engine)
+
+    def capability_limit_for(self, engine: str) -> EngineCapability:
+        capability = capability_for("aionui", engine)
+        if normalize_engine(engine) == "codex":
+            from dataclasses import replace
+            # These writers exist, but still require per-record native
+            # ownership or project-row schema evidence before selection.
+            return replace(capability, native_delete=True, frontend_project_delete=True)
+        return capability
+
+    def describe_client(self):
+        from dataclasses import replace
+        from ..record_identity import StoreKey
+
+        descriptor = super().describe_client()
+        return replace(descriptor, capability_limits=tuple(self.capability_limit_for(engine)
+            for engine in ("codex", "pi", "claude")), native_stores=(
+            *descriptor.native_stores,
+            *(StoreKey(engine, root, kind="session_root" if engine == "pi" else "config_dir")
+              for engine, root in self.native_roots.items()),
+        ))
 
     def native_root_verified(self, backend: str | None = None) -> bool:
         root = self.native_root_for(backend)

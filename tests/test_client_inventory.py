@@ -310,6 +310,9 @@ class ClientInventoryTests(unittest.TestCase):
             self.assertEqual(context.native_records[0].session_id, sid)
             self.assertEqual(len(context.targets), 1)
             self.assertEqual(len(context.targets[0].frontend_binding_keys), 2)
+            self.assertEqual({r.source for r in context.targets[0].references}, {a.database for a in adapters})
+            self.assertTrue(all(not any(s.backend == "claude" for s in a.describe_client().native_stores) for a in adapters))
+            self.assertEqual({r.native_record.store.path for r in context.targets[0].references}, {shared})
             self.assertFalse(context.targets[0].to_dict()["cleanup_eligible"])
 
     def test_standalone_pi_claude_inventory_and_plan_classification_are_healthy(self):

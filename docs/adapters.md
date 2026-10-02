@@ -36,10 +36,29 @@
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
-[跨进程 reader 测试](../tests/test_plan_compatibility.py)，覆盖未执行、mutation
+[持久化 reader 测试](../tests/test_plan_compatibility.py)，覆盖未执行、mutation
 已经开始、unknown、partial 和终态回执。路径由测试重定位到临时存储；生产 reader
 保留旧计划原文与 hash，status/verify 不重发 mutation。新的成功场景使用独立临时
 存储，不能用一个 fresh operation 的成功代替旧 unknown operation 的收口。
+
+### 类型化清单入口
+
+`client_contracts.py` 提供 `ClientDescriptor`、`ClientAdapter`、`ReferenceSnapshot`、
+`ClientReference` 和 `RelationEvidence`。`describe_client()` 的 client 是选择依据；
+只读客户端可以仅提供真实元数据来源与引用，不需要继承 `FrontendAdapter` 或伪造
+`database`、`codex_home`。旧适配器继续通过 facade 提供相同信息。来源错误与原生
+catalog 错误分别保留。
+
+descriptor 必须在构造本机路径和 `StoreKey` 前检查 host/path namespace；当前仅接受
+local。远端引用可以保留不透明 locator，但不能携带本机 native identity，也不会
+触发本机 catalog。未证明 native root 的引用输出 `unverified`；已精确限定 engine、
+store、ID（Pi 还需文件路径）的引用才能绑定已存在的 native 清单项。共享 Claude
+root 由现有 catalog 提供真实绑定，descriptor 不把候选 `claude-home` 当成共享 root。
+
+`capability_limit_for()` 表达 adapter/profile 的实现上限；当前 schema、归属和记录
+blocker 继续收紧每个目标。engine context 的 capability 是汇总，不能覆盖具体目标的
+限制。新引用和关系字段是清单展示投影，既有身份、approval payload 和冻结计划 hash
+格式继续由原写入契约负责；这些投影本身不扩大写入范围。
 
 ### 身份、错误与能力
 

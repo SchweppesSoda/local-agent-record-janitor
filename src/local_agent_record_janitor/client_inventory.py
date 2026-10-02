@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .adapters.base import FrontendBatchSnapshot
+from .client_contracts import (
+    CAPABILITY_FIELDS, ClientContractError, ClientDescriptor, ClientReference,
+    ReferenceSnapshot, RelationEvidence, RelationKind, SourceFailure,
+    aggregate_capabilities, describe_adapter, frontend_binding_key,
+    reference_from_session, restrict_capability,
+)
 from .display_metadata import display_title
 from .inventory import (
     FrontendSessionRecord,
@@ -67,6 +73,8 @@ class ClientTarget:
     lineage_status: str | None = None
     # Display IDs are not identities: one UI row can retain several bindings.
     frontend_binding_keys: tuple[str, ...] = ()
+    references: tuple[ClientReference, ...] = ()
+    relations: tuple[RelationEvidence, ...] = ()
 
     @property
     def record_id(self) -> str | None:
@@ -120,6 +128,8 @@ class ClientTarget:
             "project_row_evidence": [
                 dict(item) for item in self.project_row_evidence
             ],
+            "references": [reference.to_dict() for reference in self.references],
+            "relations": [relation.to_dict() for relation in self.relations],
         }
 
 
@@ -135,11 +145,20 @@ class ClientInventory:
     unmapped_frontend_sessions: tuple[FrontendSessionRecord, ...]
     targets: tuple[ClientTarget, ...]
     capabilities: Mapping[str, EngineCapability]
-    errors: tuple[InventoryFailure, ...] = ()
+    errors: tuple[InventoryFailure | SourceFailure, ...] = ()
     frontend_snapshots: tuple[FrontendBatchSnapshot, ...] = ()
     project_items: tuple[Any, ...] = ()
     scanned_databases: tuple[Path, ...] = ()
     scanned_resources: tuple[tuple[str, str], ...] = ()
+    descriptors: tuple[ClientDescriptor, ...] = ()
+    references: tuple[ClientReference, ...] = ()
+    _reference_sources: Mapping[str, tuple[Path, ...]] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        sources: dict[str, list[Path]] = {}
+        for reference in self.references:
+            sources.setdefault(reference.binding_key, []).append(reference.source)
+        object.__setattr__(self, "_reference_sources", {key: tuple(dict.fromkeys(paths)) for key, paths in sources.items()})
 
     @property
     def catalog(self) -> SessionCatalog:
@@ -200,6 +219,8 @@ class ClientInventory:
                 else str(item)
                 for item in self.project_items
             ],
+            "clients": [descriptor.to_dict() for descriptor in self.descriptors],
+            "references": [reference.to_dict() for reference in self.references],
         }
 
 
@@ -252,11 +273,13 @@ class ClientEngineContext:
 
     def __post_init__(self) -> None:
         mismatched = tuple(
-            target for target in self.targets if target.capability != self.capability
+            target for target in self.targets
+            if (target.capability.client, target.capability.engine) != (self.capability.client, self.capability.engine)
+            or any(getattr(target.capability, field) and not getattr(self.capability, field) for field in CAPABILITY_FIELDS)
         )
         if mismatched:
             raise AssertionError(
-                "ClientEngineContext targets must use the context capability"
+                "ClientEngineContext summary must include each target's narrower capability"
             )
 
     @property
@@ -343,6 +366,7 @@ def build_client_engine_contexts(
             catalog = replace(inventory.catalog, records=tuple(
                 r for r in inventory.records if _record_engine(r) == "codex"
             ))
+        profile_capabilities = _registered_profile_capabilities(adapter_list, selected_client, normalized_engine)
         capability = _declared_capability(
             declared,
             selected_client,
@@ -350,6 +374,7 @@ def build_client_engine_contexts(
             inventory.capabilities,
             catalog=catalog,
             adapters=adapter_list,
+            profile_capabilities=profile_capabilities,
         )
         # Project-row support is proven per inventory target (schema, row
         # fingerprint, and zero references), not by the frontend adapter's
@@ -381,7 +406,12 @@ def build_client_engine_contexts(
             frontend_sessions,
             catalog,
             capability,
+            reference_evidence=inventory.references,
         )
+        explicit_capability = any(key in declared for key in (f"{selected_client}:{normalized_engine}", normalized_engine))
+        targets = tuple(restrict_client_target(target, inventory,
+            profile_capabilities=() if explicit_capability else profile_capabilities) for target in targets)
+        capability = aggregate_capabilities(tuple(target.capability for target in targets)) if targets else capability
         contexts.append(
             ClientEngineContext(
                 inventory=inventory,
@@ -423,10 +453,386 @@ def build_client_engine_contexts(
         capabilities={c.engine: c.capability for c in contexts},
         errors=tuple(dict.fromkeys((*inventory.errors, *native_errors))),
     )
-    return tuple(replace(context, inventory=inventory) for context in contexts)
+    inventory = project_client_evidence(inventory, {c.engine: c.native_catalog for c in contexts if c.native_catalog is not None})
+    by_key = {_target_identity(t): t for t in inventory.targets}
+    return tuple(replace(context, inventory=inventory,
+        targets=tuple(by_key[_target_identity(t)] for t in context.targets)) for context in contexts)
 
 
 build_client_contexts = build_client_engine_contexts
+
+
+def _target_from_reference(reference: ClientReference) -> ClientTarget:
+    engine = reference.engine or ("unsupported:" + reference.raw_backend if reference.raw_backend else "unknown")
+    capability = EngineCapability(reference.client, engine, reason="Reference metadata does not prove a native writer or storage root")
+    return ClientTarget(
+        reference.client, engine, None, None, reference.native_id,
+        (f"{reference.client}:{reference.frontend_id}",), RecordClassification.UNVERIFIED, capability,
+        frontend_binding_keys=(reference.binding_key,), references=(reference,),
+        blocker_codes=("reference_inventory_incomplete",) if reference.evidence_complete is False else (),
+    )
+
+
+def _frontend_read_failure(
+    descriptor: ClientDescriptor, home: Path | None, database: Path | None,
+    source: str, exc: Exception,
+) -> InventoryFailure | SourceFailure:
+    if home is not None:
+        return InventoryFailure(source=source, codex_home=home, database=database,
+                                error_type=type(exc).__name__, message=str(exc))
+    return SourceFailure(source=source, database=database, profile_root=descriptor.profile_root,
+                         error_type=type(exc).__name__, message=str(exc))
+
+
+def _target_sources(target: ClientTarget, inventory: ClientInventory) -> tuple[Path, ...]:
+    sources = [source for key in target.frontend_binding_keys for source in inventory._reference_sources.get(key, ())]
+    sources.extend(Path(str(e["database"])) for e in target.project_row_evidence if e.get("database"))
+    return tuple(dict.fromkeys(sources))
+
+
+def restrict_client_target(
+    target: ClientTarget, inventory: ClientInventory,
+    *, profile_capabilities: Sequence[tuple[ClientDescriptor, EngineCapability]] = (),
+) -> ClientTarget:
+    """Apply only the limits of profiles/sources that own this exact target."""
+    capability = target.capability
+    sources = _target_sources(target, inventory)
+    for descriptor in inventory.descriptors:
+        if descriptor.matches(store=target.record_key.store if target.record_key else None) or any(
+            descriptor.matches(source=source) for source in sources
+        ):
+            capability = restrict_capability(capability, descriptor.limit_for(target.engine))
+    for descriptor, current in profile_capabilities:
+        if descriptor.matches(store=target.record_key.store if target.record_key else None) or any(
+            descriptor.matches(source=source) for source in sources
+        ):
+            # A schema-proven orphan project has its own exact writer proof.
+            if target.capability.frontend_project_delete and descriptor.limit_for(target.engine).frontend_project_delete:
+                current = replace(current, frontend_project_delete=True)
+            capability = restrict_capability(capability, current)
+    return _retarget_target(target, capability) if capability != target.capability else target
+
+
+def _registered_profile_capabilities(
+    adapters: Sequence[object], client: str, engine: str,
+) -> tuple[tuple[ClientDescriptor, EngineCapability], ...]:
+    result = []
+    for adapter in adapters:
+        if _adapter_client(adapter) != client:
+            continue
+        method = getattr(adapter, "registered_capability", None)
+        if not callable(method):
+            continue
+        descriptor = describe_adapter(adapter)
+        try:
+            capability = method(engine)
+            if not isinstance(capability, EngineCapability) or (capability.client, capability.engine) != (client, engine):
+                raise ClientContractError("registered capability has a different client or engine")
+        except Exception as exc:
+            capability = EngineCapability(client, engine, verify=False, blockers=({
+                "blocker_code": "adapter_capability_failed", "scope": "client_profile",
+                "message": f"Capability evidence failed ({type(exc).__name__})",
+            },))
+        result.append((descriptor, capability))
+    return tuple(result)
+
+
+def relations_for_record(record: object, key: RecordKey) -> tuple[RelationEvidence, ...]:
+    """Keep engine relationships distinct; none expands an approved scope."""
+    if isinstance(record, ManagedConversation):
+        return tuple(RelationEvidence(
+            RelationKind.CODEX_PARENT, key,
+            related_record=RecordKey(key.store, parent, kind=key.kind),
+            source="native_lineage", completeness=record.lineage_status or "unknown",
+            deletion_semantics="engine_defined",
+        ) for parent in record.summary.parent_thread_ids)
+    if key.store.backend == "pi":
+        parent = getattr(record, "parent_session", None)
+        return (RelationEvidence(RelationKind.PI_BRANCH_SOURCE, key, related_path=parent,
+                                 source="session_header.parentSession", completeness="known",
+                                 deletion_semantics="independent"),) if parent else ()
+    if key.store.backend == "claude":
+        return tuple(RelationEvidence(RelationKind.CLAUDE_MANIFEST_MEMBER, key,
+            related_path=str(entry.path), source="session_manifest", completeness="known",
+            deletion_semantics="manifest_member") for entry in getattr(record, "manifest", ())
+            if "subagents" in Path(entry.relative_path).parts)
+    return ()
+
+
+def project_client_evidence(inventory: ClientInventory, catalogs: Mapping[str, object]) -> ClientInventory:
+    """Attach display evidence without changing legacy approval payloads."""
+    path_keys: dict[Path, str] = {}
+
+    def path_key(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        if path not in path_keys:
+            path_keys[path] = canonical_path(path)
+        return path_keys[path]
+
+    def key_for_record(key: RecordKey) -> tuple:
+        return key.store.backend, path_key(key.store.path), key.record_id, path_key(key.path)
+
+    by_binding: dict[str, list[ClientReference]] = {}
+    by_native: dict[tuple, list[ClientReference]] = {}
+    for reference in inventory.references:
+        by_binding.setdefault(reference.binding_key, []).append(reference)
+        if reference.native_record is not None:
+            by_native.setdefault(key_for_record(reference.native_record), []).append(reference)
+    records: dict[tuple, object] = {}
+    for engine, catalog in catalogs.items():
+        for record in _native_catalog_records(catalog):
+            root = _native_record_root(record, engine)
+            if root is not None:
+                records[(engine, path_key(root), _native_record_id(record, engine),
+                         path_key(_native_record_path(record, engine)))] = record
+    targets: list[ClientTarget] = []
+    for target in inventory.targets:
+        related = [r for binding in target.frontend_binding_keys for r in by_binding.get(binding, ())]
+        native_key = key_for_record(target.record_key) if target.record_key else None
+        if native_key is not None:
+            related.extend(by_native.get(native_key, ()))
+        related = list({r.binding_key: r for r in related}.values())
+        references = tuple(
+            replace(reference, native_record=target.record_key)
+            if target.record_key and reference.host == "local" and reference.path_namespace == "local" else reference
+            for reference in related
+        )
+        relation_record = records.get(native_key) if native_key is not None else None
+        targets.append(replace(target, references=references or target.references,
+            relations=relations_for_record(relation_record, target.record_key)
+                      if relation_record is not None and target.record_key is not None else target.relations))
+    return replace(inventory, targets=tuple(targets))
+
+
+def build_native_client_inventory(
+    *, client: str, engine: str, catalog: object, adapters: Sequence[object] = (),
+) -> tuple[ClientInventory, tuple[ClientEngineContext, ...]]:
+    """Shared projection for standalone Codex/Pi/Claude metadata catalogs."""
+    import os
+    from .record_identity import capability_for
+    capability = capability_for("native", engine)
+    targets: list[ClientTarget] = []
+    projects: dict[str, ProjectKey] = {}
+    native_references: list[ClientReference] = []
+    for record in tuple(
+        getattr(catalog, "records", getattr(catalog, "sessions", ())) or ()
+    ):
+        record_id = (
+            getattr(record, "thread_id", None)
+            if engine == "codex"
+            else getattr(record, "session_id", None)
+        )
+        if not isinstance(record_id, str) or not record_id.strip():
+            continue
+        if engine == "codex":
+            root = Path(getattr(record, "codex_home"))
+            path = None
+            kind = "codex_home"
+            native_present = bool(getattr(record, "artifact_present", False))
+            project_value = getattr(
+                getattr(record, "summary", None), "cwd", None
+            )
+        elif engine == "pi":
+            root = Path(getattr(record, "session_root"))
+            path = Path(getattr(record, "path"))
+            kind = "session_root"
+            native_present = path.is_file()
+            project_value = getattr(record, "cwd", None)
+        else:
+            root = Path(getattr(record, "config_dir"))
+            paths = tuple(getattr(record, "transcript_paths", ()) or ())
+            path = Path(paths[0]) if paths else None
+            kind = "config_dir"
+            native_present = bool(paths) or bool(getattr(record, "manifest", ()))
+            project_paths = tuple(getattr(record, "project_paths", ()) or ())
+            project_value = project_paths[0] if project_paths else None
+        project = None
+        if isinstance(project_value, (str, os.PathLike)) and str(project_value).strip():
+            project = ProjectKey.from_path(
+                client,
+                project_value,
+                display_name=Path(project_value).name,
+            )
+            projects.setdefault(project.stable_id, project)
+        raw_references = (
+            getattr(record, "frontend_sessions", ())
+            if engine == "codex"
+            else getattr(record, "frontend_references", getattr(record, "cindy_references", ()))
+        )
+        refs = tuple(
+            _frontend_reference_id(reference)
+            for reference in tuple(raw_references or ())
+        )
+        refs = tuple(value for value in refs if value)
+        classification = classify_managed_conversation(
+            record, project_present=project is not None, frontend_required=False,
+        ) if isinstance(record, ManagedConversation) else classify_record_state(
+            native_present=native_present,
+            frontend_present=bool(refs),
+            project_present=project is not None,
+            frontend_required=False,
+            corrupt_unreadable=getattr(record, "reference_classification", None) == "inventory_incomplete",
+        )
+        deletable = bool(getattr(record, "deletable", True))
+        native_action_id = getattr(record, "action_id", None)
+        action_ids = (
+            (str(native_action_id), "delete_native")
+            if engine == "codex" and native_action_id and deletable
+            else (str(native_action_id), "delete_pi_session")
+            if engine == "pi" and native_action_id and deletable
+            else (str(native_action_id), "delete_claude_session")
+            if engine == "claude" and native_action_id and deletable
+            else ()
+        )
+        target = ClientTarget(
+            client=client,
+            engine=engine,
+            record_key=RecordKey(
+                StoreKey(engine, root, kind=kind),
+                record_id,
+                kind="session",
+                path=path,
+            ),
+            project_key=project,
+            native_thread_id=record_id,
+            frontend_reference_ids=tuple(
+                (
+                    str(getattr(reference, "platform", ""))
+                    + ":"
+                    + str(getattr(reference, "platform_session_id", ""))
+                )
+                if engine == "codex"
+                else f"cindy:{value}"
+                for reference, value in (
+                    zip(tuple(raw_references or ()), refs)
+                    if engine == "codex"
+                    else ((None, value) for value in refs)
+                )
+                if value
+            ),
+            classification=classification,
+            capability=capability,
+            action_ids=tuple(
+                value for value in action_ids
+                if value and value != "None"
+            ),
+            blocker_codes=tuple(getattr(record, "blocker_codes", ()) or ()),
+            blockers=tuple({"blocker_code": "record_blocked", "message": str(value)}
+                           for value in (getattr(record, "blockers", ()) or ())),
+            display_name=getattr(getattr(record, "summary", record), "display_name", None),
+            display_name_source=getattr(getattr(record, "summary", record), "display_name_source", None),
+            is_subagent=bool(getattr(getattr(record, "summary", record), "is_subagent", False)),
+            parent_thread_ids=tuple(getattr(getattr(record, "summary", record), "parent_thread_ids", ()) or ()),
+            descendant_thread_ids=tuple(getattr(record, "descendant_thread_ids", ()) or ()),
+            lineage_status=getattr(record, "lineage_status", None),
+        )
+        for reference in tuple(raw_references or ()):
+            if isinstance(reference, FrontendSessionRecord):
+                native_references.append(reference_from_session(reference, _frontend_binding_key(reference)))
+                continue
+            def value(name: str, default: Any = None) -> Any:
+                return reference.get(name, default) if isinstance(reference, Mapping) else getattr(reference, name, default)
+            database = value("database")
+            frontend_id = _frontend_reference_id(reference)
+            if database is not None and frontend_id:
+                from types import SimpleNamespace
+
+                row = SimpleNamespace(platform="cindy", database=Path(database), platform_session_id=frontend_id,
+                    thread_id=value("native_session_id", record_id), backend=engine, codex_home=root,
+                    status=value("session_status"), is_live=bool(value("is_live", False)),
+                    details={"agent_kind": value("agent_kind", engine), "reference_kind": value("reference_kind", "current"),
+                             "boundary_id": value("boundary_id")})
+                native_references.append(replace(reference_from_session(row, _frontend_binding_key(row)), native_record=target.record_key))
+        targets.append(target)
+    catalog_records = tuple(
+        getattr(catalog, "records", getattr(catalog, "sessions", ())) or ()
+    )
+    catalog_frontend_sessions = (
+        tuple(
+            session
+            for record in catalog_records
+            for session in (
+                getattr(record, "frontend_sessions", ())
+                if engine == "codex"
+                else getattr(
+                    record,
+                    "frontend_references",
+                    getattr(record, "cindy_references", ()),
+                )
+                or ()
+            )
+            if isinstance(session, FrontendSessionRecord)
+        )
+        if engine == "codex"
+        else ()
+    )
+    if engine == "codex":
+        frontend_reference_ids = tuple(
+            dict.fromkeys(
+                f"{session.platform}:{session.platform_session_id}"
+                for session in catalog_frontend_sessions
+            )
+        )
+    else:
+        frontend_reference_ids = tuple(
+            dict.fromkeys(f"cindy:{value}" for value in refs)
+        )
+    # The native catalog is itself the authoritative metadata snapshot for
+    # the standalone/native compatibility clients. Keep those records and
+    # exact frontend rows in the shared contract instead of exposing only the
+    # projected targets. Pi/Claude catalogs carry Cindy reference objects
+    # rather than FrontendSessionRecord instances, so their legacy projection
+    # remains target-only until a frontend adapter is explicitly selected.
+    inventory = ClientInventory(
+        client=client,
+        engines=(engine,),
+        projects=tuple(projects[key] for key in sorted(projects)),
+        records=(catalog_records if engine == "codex" else ()),
+        frontend_sessions=catalog_frontend_sessions,
+        unmapped_frontend_sessions=(),
+        targets=tuple(targets),
+        capabilities={engine: capability},
+        errors=(tuple(getattr(catalog, "errors", ()) or ())
+                if engine == "codex" else ()),
+        frontend_snapshots=(),
+        descriptors=tuple(describe_adapter(a) for a in adapters if _adapter_client(a) == "native")
+            if engine == "codex" else tuple(ClientDescriptor("native", profile_root=root,
+                native_stores=(StoreKey(engine, root, kind="session_root" if engine == "pi" else "config_dir"),),
+                inventory_engines=(engine,), capability_limits=(capability,))
+                for root in dict.fromkeys(_native_record_root(r, engine) for r in catalog_records)
+                if root is not None),
+        references=tuple({r.binding_key: r for r in native_references}.values()),
+    )
+    inventory = replace(inventory, targets=tuple(restrict_client_target(t, inventory) for t in inventory.targets))
+    capability = aggregate_capabilities(tuple(t.capability for t in inventory.targets)) if inventory.targets else capability
+    inventory = replace(inventory, capabilities={engine: capability})
+    context = ClientEngineContext(
+        inventory=inventory,
+        engine=engine,
+        targets=inventory.targets,
+        frontend_sessions=catalog_frontend_sessions,
+        native_catalog=catalog,
+        capability=capability,
+    )
+    inventory = project_client_evidence(inventory, {engine: catalog})
+    context = replace(context, inventory=inventory, targets=inventory.targets)
+    if client == "native" and engine == "codex":
+        from .native_project_cleanup import append_native_inventory
+
+        original_count = len(inventory.targets)
+        inventory = append_native_inventory(inventory, adapters)
+        additional = inventory.targets[original_count:]
+        contexts = [replace(context, inventory=inventory)]
+        for supported in (False, True):
+            group = tuple(t for t in additional if t.capability.frontend_project_delete == supported)
+            if group:
+                contexts.append(ClientEngineContext(
+                    inventory=inventory, engine=engine, targets=group,
+                    frontend_sessions=(), native_catalog=None, capability=group[0].capability,
+                ))
+        return inventory, tuple(contexts)
+    return inventory, (context,)
 
 
 def _lookup_native_catalog(
@@ -455,6 +861,11 @@ def _build_native_catalog(
     handled: set[int] = set()
     for adapter in selected:
         if id(adapter) in handled:
+            continue
+        if (callable(getattr(adapter, "snapshot_references", None))
+            and not callable(getattr(adapter, "snapshot_sessions", None))) and not any(
+            store.backend == engine for store in describe_adapter(adapter).native_stores
+        ):
             continue
         group_builder = getattr(adapter, "native_catalog_group", None)
         if callable(group_builder):
@@ -631,15 +1042,33 @@ def build_client_inventory(
         )
 
     proxies: list[_SnapshotAdapter] = []
+    frontend_rows: list[FrontendSessionRecord] = []
+    descriptors: list[ClientDescriptor] = []
+    references: list[ClientReference] = []
     snapshots: list[FrontendBatchSnapshot] = []
-    errors: list[InventoryFailure] = []
+    errors: list[InventoryFailure | SourceFailure] = []
     project_items: list[Any] = []
     scanned_databases: set[Path] = set()
     scanned_resources: set[tuple[str, str]] = set()
     for adapter in selected_adapters:
+        try:
+            descriptor = describe_adapter(adapter)
+        except ClientContractError as exc:
+            raise ClientInventoryError(str(exc)) from exc
+        descriptors.append(descriptor)
         home = _path_or_none(getattr(adapter, "codex_home", None))
         database = _path_or_none(getattr(adapter, "database", None))
-        if home is None:
+        reference_reader = getattr(adapter, "snapshot_references", None)
+        if callable(reference_reader) and not callable(getattr(adapter, "snapshot_sessions", None)):
+            try:
+                snapshot = reference_reader()
+                if not isinstance(snapshot, ReferenceSnapshot) or snapshot.descriptor != descriptor:
+                    raise ClientInventoryError("reference snapshot differs from its selected client descriptor")
+                references.extend(snapshot.references)
+                errors.extend(snapshot.errors)
+            except Exception as exc:
+                errors.append(SourceFailure(source="client-references", message=str(exc),
+                    profile_root=descriptor.profile_root, error_type=type(exc).__name__))
             continue
         try:
             snapshot_method = getattr(adapter, "snapshot_sessions", None)
@@ -659,15 +1088,8 @@ def build_client_inventory(
                 scanned_databases.add(database)
                 scanned_resources.add((canonical_path(database), "sessions"))
         except Exception as exc:
-            errors.append(
-                InventoryFailure(
-                    source=f"frontend:{getattr(adapter, 'name', type(adapter).__name__)}",
-                    codex_home=home,
-                    database=database,
-                    error_type=type(exc).__name__,
-                    message=str(exc),
-                )
-            )
+            errors.append(_frontend_read_failure(descriptor, home, database,
+                f"frontend:{getattr(adapter, 'name', type(adapter).__name__)}", exc))
             rows = ()
         project_reader = getattr(adapter, "list_project_items", None)
         if callable(project_reader):
@@ -677,35 +1099,29 @@ def build_client_inventory(
                     scanned_databases.add(database)
                     scanned_resources.add((canonical_path(database), "projects"))
             except Exception as exc:
-                errors.append(
-                    InventoryFailure(
-                        source=(
-                            f"frontend-project:{getattr(adapter, 'name', type(adapter).__name__)}"
-                        ),
-                        codex_home=home,
-                        database=database,
-                        error_type=type(exc).__name__,
-                        message=str(exc),
-                    )
-                )
+                errors.append(_frontend_read_failure(descriptor, home, database,
+                    f"frontend-project:{getattr(adapter, 'name', type(adapter).__name__)}", exc))
         if requested_engines:
             rows = tuple(row for row in rows if _session_engine(row) in requested_engines)
-        proxies.append(
-            _SnapshotAdapter(
-                source=adapter,
-                rows=tuple(row for row in rows if _session_engine(row) == "codex"),
-                frontend_rows=rows,
-                codex_home=home,
-                database=database or home / "state_5.sqlite",
+        frontend_rows.extend(rows)
+        references.extend(reference_from_session(row, _frontend_binding_key(row)) for row in rows)
+        if home is not None:
+            proxies.append(
+                _SnapshotAdapter(
+                    source=adapter,
+                    rows=tuple(row for row in rows if _session_engine(row) == "codex"),
+                    frontend_rows=rows,
+                    codex_home=home,
+                    database=database or home / "state_5.sqlite",
+                )
             )
-        )
 
     catalog = build_session_catalog(proxies)
     errors.extend(catalog.errors)
     home_keys = {_path_key(proxy.codex_home) for proxy in proxies}
     all_frontend = tuple(
         sorted(
-            (session for proxy in proxies for session in proxy.frontend_rows),
+            frontend_rows,
             key=_frontend_sort_key,
         )
     )
@@ -720,9 +1136,11 @@ def build_client_inventory(
         )
         and _record_belongs_to_client(record, selected_client, home_keys)
     )
-    unmapped = tuple(
+    bound_keys = {_frontend_binding_key(bound) for record in records for bound in record.frontend_sessions}
+    unmapped = _deduplicate_frontend_sessions(
         session for session in (*catalog.unmapped_frontend_sessions,
-                                *(s for s in all_frontend if _session_engine(s) != "codex"))
+                                *(s for s in all_frontend if _session_engine(s) != "codex"
+                                  or _frontend_binding_key(s) not in bound_keys))
         if not requested_engines or _session_engine(session) in requested_engines
     )
 
@@ -755,6 +1173,10 @@ def build_client_inventory(
     targets.extend(
         _target_from_frontend(selected_client, session) for session in unmapped
     )
+    legacy_bindings = {_frontend_binding_key(row) for row in all_frontend}
+    targets.extend(_target_from_reference(reference)
+                   for reference in references if reference.binding_key not in legacy_bindings
+                   and (not requested_engines or reference.engine in requested_engines))
     referenced_project_ids = {
         str(session.platform_session_id)
         for session in all_frontend
@@ -798,7 +1220,15 @@ def build_client_inventory(
         project_items=tuple(unique_project_items),
         scanned_databases=tuple(sorted(scanned_databases, key=str)),
         scanned_resources=tuple(sorted(scanned_resources)),
+        descriptors=tuple(descriptors),
+        references=tuple(references),
     )
+    inventory = replace(inventory, targets=tuple(restrict_client_target(target, inventory) for target in inventory.targets))
+    inventory = replace(inventory, capabilities={engine: aggregate_capabilities(tuple(
+        target.capability for target in inventory.targets if target.engine == engine))
+        if any(target.engine == engine for target in inventory.targets) else capability
+        for engine, capability in inventory.capabilities.items()})
+    inventory = project_client_evidence(inventory, {"codex": catalog})
     if selected_client == "native" and (not requested_engines or "codex" in requested_engines):
         from .native_project_cleanup import append_native_inventory
         return append_native_inventory(inventory, selected_adapters)
@@ -949,6 +1379,7 @@ def _bind_native_targets(
     frontend_sessions: Sequence[FrontendSessionRecord],
     catalog: object | None,
     capability: EngineCapability,
+    *, reference_evidence: Sequence[ClientReference] = (),
 ) -> tuple[ClientTarget, ...]:
     """Replace frontend-only placeholders with storage-qualified native rows."""
 
@@ -964,6 +1395,34 @@ def _bind_native_targets(
         if target is not None:
             native_targets.append(target)
 
+    by_record: dict[tuple, list[ClientReference]] = {}
+    for reference in reference_evidence:
+        if reference.native_record is not None and reference.host == "local" and reference.path_namespace == "local":
+            key = (reference.native_record.value,
+                   reference.native_record.canonical_path if reference.native_record.store.backend == "pi" else None)
+            by_record.setdefault(key, []).append(reference)
+    for index, target in enumerate(native_targets):
+        if target.record_key is None:
+            continue
+        key = (target.record_key.value, target.record_key.canonical_path if engine == "pi" else None)
+        references = by_record.get(key, ())
+        if references:
+            incomplete = any(r.evidence_complete is False for r in references)
+            bound_capability = restrict_capability(target.capability, EngineCapability(target.capability.client, engine,
+                reason="Reference inventory is incomplete", blockers=({
+                    "blocker_code": "reference_inventory_incomplete", "scope": "reference",
+                    "message": "Native binding has incomplete reference evidence",
+                },))) if incomplete else target.capability
+            native_targets[index] = replace(target,
+                classification=RecordClassification.HEALTHY if target.classification == RecordClassification.ORPHAN_NATIVE else target.classification,
+                references=tuple(references),
+                frontend_reference_ids=tuple(dict.fromkeys((*target.frontend_reference_ids,
+                    *(f"{r.client}:{r.frontend_id}" for r in references)))),
+                frontend_binding_keys=tuple(dict.fromkeys((*target.frontend_binding_keys, *(r.binding_key for r in references)))),
+                capability=bound_capability, action_ids=() if incomplete else target.action_ids,
+                blocker_codes=tuple(dict.fromkeys((*target.blocker_codes, *bound_capability.blocker_codes))),
+                blockers=(*target.blockers, *(b for b in bound_capability.blockers if b not in target.blockers)),
+            )
     if not native_targets:
         return _deduplicate_targets(
             _retarget_target(target, capability) for target in inventory_targets
@@ -1168,12 +1627,7 @@ def _native_record_frontend_sessions(
 
 
 def _frontend_binding_key(session: FrontendSessionRecord) -> str:
-    return json.dumps(
-        (normalize_client(session.platform), canonical_path(session.database),
-         session.platform_session_id, _session_engine(session), session.thread_id,
-         session.details.get("reference_kind", "current"), session.details.get("boundary_id")),
-        separators=(",", ":"),
-    )
+    return frontend_binding_key(session)
 
 
 def _frontend_reference_id(reference: object) -> str | None:
@@ -1265,12 +1719,16 @@ def _retarget_target(
             "delete_pi_session",
             "delete_claude_session",
             "delete_frontend_reference",
+            "delete_frontend_session",
             "delete_project_item",
         }
         and (
             capability.native_delete
             or not action_id.startswith(native_action_prefixes)
         )
+        and (capability.frontend_session_delete or not action_id.startswith("delete_frontend_session:"))
+        and (capability.frontend_reference_delete or not action_id.startswith("remove_frontend_reference"))
+        and (capability.frontend_project_delete or not action_id.startswith("delete_project_item:"))
     ]
     native_present = target.record_key is not None
     if native_present and capability.native_delete:
@@ -1283,8 +1741,13 @@ def _retarget_target(
         )
     if target.frontend_reference_ids and capability.frontend_reference_delete:
         action_ids.append("delete_frontend_reference")
+    if capability.frontend_session_delete and "delete_frontend_session" in target.action_ids:
+        action_ids.append("delete_frontend_session")
     if target.project_key is not None and capability.frontend_project_delete:
         action_ids.extend(project_action_ids or ["delete_project_item"])
+    if not any((capability.native_delete, capability.frontend_session_delete,
+                capability.frontend_reference_delete, capability.frontend_project_delete, capability.remote_delete)):
+        action_ids = []
     return replace(
         target,
         capability=capability,
@@ -1357,6 +1820,7 @@ def _declared_capability(
     *,
     catalog: object | None = None,
     adapters: Sequence[object] = (),
+    profile_capabilities: Sequence[tuple[ClientDescriptor, EngineCapability]] = (),
 ) -> EngineCapability:
     selected: EngineCapability | None = None
     for key in (f"{client}:{engine}", engine):
@@ -1365,19 +1829,9 @@ def _declared_capability(
             selected = value
             break
     if selected is None:
-        for adapter in adapters:
-            if _adapter_client(adapter) != client:
-                continue
-            builder = getattr(adapter, "registered_capability", None)
-            if not callable(builder):
-                continue
-            try:
-                value = builder(engine)
-            except Exception:
-                continue
-            if isinstance(value, EngineCapability):
-                selected = value
-                break
+        registered = profile_capabilities or _registered_profile_capabilities(adapters, client, engine)
+        if registered:
+            selected = aggregate_capabilities(tuple(value for _, value in registered))
     if selected is None:
         selected = fallback.get(engine) or _capability_for(client, engine)
     return _constrain_capability(
@@ -1389,6 +1843,8 @@ def _declared_capability(
 
 
 def _adapter_client(adapter: object) -> str:
+    if callable(getattr(adapter, "describe_client", None)):
+        return describe_adapter(adapter).client
     raw = getattr(adapter, "client", None)
     if isinstance(raw, str):
         return normalize_client(raw)

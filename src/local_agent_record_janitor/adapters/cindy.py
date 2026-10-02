@@ -198,6 +198,18 @@ class CindyAdapter(FrontendAdapter):
             )
         return capability_for("cindy", engine, observed=True)
 
+    def describe_client(self):
+        from dataclasses import replace
+        from ..record_identity import StoreKey
+
+        descriptor = super().describe_client()
+        roots = (("pi", self.cindy_root / "pi-agent-home" / "sessions", "session_root"),
+                 ("claude", self.cindy_root / "claude-home", "config_dir"))
+        return replace(descriptor, profile_root=self.cindy_root, native_stores=(
+            *descriptor.native_stores,
+            *(StoreKey(engine, root, kind=kind) for engine, root, kind in roots if root.is_dir()),
+        ))
+
     def native_catalog_for(self, backend: str) -> Any | None:
         """Build one ownership-qualified native catalog for a backend."""
 
