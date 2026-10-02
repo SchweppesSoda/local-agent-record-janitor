@@ -75,6 +75,9 @@
 关闭检查，最后开放精确删除及恢复。公共身份、错误与关系契约先保持一致；只有出现
 真实可复用实现时再提取 registry，避免为未验证的产品增加空壳支持。
 
+后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
+该方案中的待实施能力不改变本页的当前支持边界。
+
 ## 既有 Codex Finding adapter
 
 Codex compatibility adapter 将外部平台的删除状态转换为保守的 `Finding`，不能直接

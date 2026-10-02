@@ -70,8 +70,9 @@ Codex 的 native parent、Pi 的分支来源和 Claude manifest 下的 subagent 
 Desktop 编码环境本地状态。ChatGPT 云端聊天、云端项目和远程记录不在本工具范围内；
 `chatgpt` 不作为本地 Codex 客户端别名。
 
-一份授权计划只处理一个物理存储和一种 mutation family。前一批完成后必须重新扫描，
-新发现的动作不会被吸收到旧计划中。
+一个顶层 operation 可以预先冻结多个子批次；每个子批次只处理一个物理存储和一种
+mutation family，跨批次不构成事务。新发现的动作须重新生成计划，不会被吸收到旧
+授权中。底层 Agent 单批次计划仍遵循单 store、单 mutation family 的边界。
 
 ## 快照与计划
 
