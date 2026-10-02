@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .action_registry import capability_field_for_action
-from .client_contracts import ClientDescriptor, describe_adapter, aggregate_capabilities, restrict_capability
+from .client_contracts import ClientDescriptor, ReferenceSnapshot, SourceFailure, describe_adapter, aggregate_capabilities, restrict_capability
 from .record_identity import EngineCapability, canonical_path, normalize_engine
 
 
@@ -26,10 +26,49 @@ class ClientCapabilityLimits:
     """
 
     descriptors: tuple[ClientDescriptor, ...] = ()
+    native_source_failures: tuple[SourceFailure, ...] = ()
 
     @classmethod
     def from_adapters(cls, adapters: Iterable[object]) -> ClientCapabilityLimits:
-        return cls(tuple(describe_adapter(adapter) for adapter in adapters))
+        descriptors = []
+        failures = []
+        adapters = list(adapters)
+        # Direct catalog/manual/cleaner callers may know only an exact native
+        # home. Its observed account marker is a bounded protection source;
+        # never discover arbitrary/default product roots from this low layer.
+        from .orca_discovery import reverse_account_profile
+        known_profiles = set()
+        for adapter in adapters:
+            descriptor = describe_adapter(adapter)
+            if descriptor.client == "orca" and descriptor.profile_root is not None:
+                known_profiles.add(canonical_path(descriptor.profile_root))
+        for adapter in tuple(adapters):
+            for store in describe_adapter(adapter).native_stores:
+                if store.backend != "codex":
+                    continue
+                profile = reverse_account_profile(store.path)
+                if profile is not None and canonical_path(profile) not in known_profiles:
+                    from .adapters.orca import OrcaAdapter
+                    adapters.append(OrcaAdapter(profile_root=profile))
+                    known_profiles.add(canonical_path(profile))
+        for adapter in adapters:
+            descriptor = describe_adapter(adapter)
+            descriptors.append(descriptor)
+            reader = getattr(adapter, "snapshot_references", None)
+            if callable(reader) and not callable(getattr(adapter, "snapshot_sessions", None)):
+                try:
+                    snapshot = reader()
+                    if not isinstance(snapshot, ReferenceSnapshot) or snapshot.descriptor != descriptor:
+                        raise ValueError("Reference snapshot differs from its local descriptor")
+                    failures.extend(error for error in snapshot.errors if error.blocks_delete and error.store is not None)
+                except Exception:
+                    # A failed source can block only the stores it already
+                    # locates. Unknown/rootless evidence cannot identify a
+                    # different native root merely by a raw session ID.
+                    failures.extend(SourceFailure(str(descriptor.sources[0]) if descriptor.sources else "client-references",
+                        "reference_snapshot_unavailable", profile_root=descriptor.profile_root, store=store)
+                        for store in descriptor.native_stores)
+        return cls(tuple(descriptors), tuple(dict.fromkeys(failures)))
 
     def matching(self, engine: str, *, sources: Sequence[Path | str] = (),
                  native_root: Path | str | None = None, frontend: bool = False) -> tuple[ClientDescriptor, ...]:
@@ -48,13 +87,19 @@ class ClientCapabilityLimits:
 
     def reasons(self, engine: str, field: str, *, sources: Sequence[Path | str] = (),
                 native_root: Path | str | None = None) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(
+        reasons = list(
             f"{CLIENT_CAPABILITY_LIMIT}: {descriptor.client}/{engine} {field} is unavailable"
             + (f" ({limit.reason})" if limit.reason else "")
             for descriptor in self.matching(engine, sources=sources, native_root=native_root,
                                             frontend=field.startswith("frontend_"))
             if not getattr(limit := descriptor.limit_for(engine), field)
-        ))
+        )
+        if native_root is not None and (field == "native_delete" or field == "frontend_project_delete" and not sources):
+            root_key = canonical_path(native_root)
+            reasons.extend(f"{CLIENT_CAPABILITY_LIMIT}: native source evidence is incomplete ({error.message})"
+                for error in self.native_source_failures
+                if error.store.backend == engine and error.store.canonical_path == root_key)
+        return tuple(dict.fromkeys(reasons))
 
     def action_reasons(self, plan: Any, action: Any) -> tuple[str, ...]:
         if not self.descriptors:
@@ -63,6 +108,8 @@ class ClientCapabilityLimits:
         if field is None:
             return ()
         engine, root, sources = action_location(plan, action)
+        if str(getattr(getattr(action, "kind", ""), "value", getattr(action, "kind", ""))) == "delete_native_project":
+            sources = ()  # Native metadata uses its store's ceiling, not a frontend DB source.
         engines = action_frontend_engines(plan, action) if field.startswith("frontend_") else (engine,)
         if not engines and field == "frontend_project_delete":
             # An orphan frontend project row has no backend references. Its

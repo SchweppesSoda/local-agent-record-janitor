@@ -303,6 +303,16 @@ def execute_claude_delete(
                     raise ClaudeDeletePlanError(
                         "Claude session manifest or frontend reference snapshot changed after approval"
                     )
+            from .client_capability_guards import ClientCapabilityLimits
+            from .operation_guard_sources import current_guard_sources, refresh_guard_sources
+            # The raw manifest writer is also a public entry point. Check
+            # only known local product metadata, never add paths to the
+            # approved manifest or infer a default native root from an ID.
+            guards = refresh_guard_sources(current_guard_sources(client="claude"))
+            reasons = ClientCapabilityLimits.from_adapters(guards).reasons(
+                "claude", "native_delete", native_root=current.config_dir)
+            if reasons:
+                raise ClaudeDeletePlanError("; ".join(reasons))
             if action_state_callback is not None:
                 action_state_callback("guard_started", current, None)
             _verify_manifest_preflight(

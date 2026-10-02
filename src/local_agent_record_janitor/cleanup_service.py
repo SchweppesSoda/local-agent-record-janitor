@@ -482,6 +482,7 @@ class CleanupService:
         from .session_cleanup import build_session_cleanup_context
 
         from .client_capability_guards import restrict_cleanup_context
+        from .operation_guard_sources import current_guard_sources
 
         context = build_session_cleanup_context(
             engine,
@@ -491,7 +492,7 @@ class CleanupService:
             captured_at=self._clock(),
             typed_action_builder=self.typed_actions,
         )
-        return restrict_cleanup_context(context, active_adapters, self.typed_actions)
+        return restrict_cleanup_context(context, current_guard_sources(active_adapters, client=engine), self.typed_actions)
 
     def prepare_sessions(
         self,

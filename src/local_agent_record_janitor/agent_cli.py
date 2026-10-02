@@ -303,6 +303,7 @@ def _run_plan(
             and str(action.target.storage_id) == str(storage.storage_id)
         ]
         selection_blockers = list(context.get("selection_blockers", ()))
+        selection_blockers.extend(_legacy_guard_source_blockers(context["active_adapters"]))
         if context.get("session_engine") is None:
             target_actions, native_blockers = _select_native_target_actions(
                 target_actions,
@@ -667,6 +668,9 @@ def _apply_locked(
     store.append_event({"event": "plan_accepted", "plan_sha256": plan_hash})
 
     context_args = _args_from_scan_options(plan)
+    # Caller-discovered protections may tighten an old approval, but are not
+    # retroactively inserted into the frozen legacy v1 scan options/hash.
+    context_args.orca_root = list(getattr(args, "orca_root", ()) or ())
     context = _scan_context(
         context_args,
         supplied_adapters,
@@ -676,7 +680,7 @@ def _apply_locked(
     storage = _target_storage(
         context["plan"], target_home, context["active_adapters"]
     )
-    preflight_blockers: list[dict[str, Any]] = []
+    preflight_blockers = list(_legacy_guard_source_blockers(context["active_adapters"]))
     if storage is None or str(storage.storage_id) != str(
         _mapping(plan.get("target"), {}).get("storage_id")
     ):
@@ -1485,6 +1489,7 @@ def _scan_context(
     cleanup_service: CleanupService,
 ) -> dict[str, Any]:
     from .adapter_factory import create_default_adapters
+    from .operation_guard_sources import current_guard_sources
 
     platforms = _effective_platforms(getattr(args, "platform", None))
     session_platforms = set(platforms) & {"pi", "claude"}
@@ -1511,6 +1516,8 @@ def _scan_context(
             catalog,
             catalog_builder=catalog_builder,
             target_root=target_root,
+            active_adapters=current_guard_sources(tuple(supplied_adapters or ()), client=engine,
+                orca_roots=getattr(args, "orca_root", ()) or (), appdata=getattr(args, "appdata", None)),
         )
         selection_blockers: tuple[dict[str, Any], ...] = ()
         if str(getattr(args, "agent_command", "")) in {
@@ -1545,6 +1552,9 @@ def _scan_context(
         guard_args.platform = ["all"]
         adapter_builder = lambda: create_default_adapters(guard_args)
         active_adapters = list(adapter_builder())
+    active_adapters = list(current_guard_sources(active_adapters,
+        codex_home=getattr(args, "codex_home", None), orca_roots=getattr(args, "orca_root", ()) or (),
+        appdata=getattr(args, "appdata", None)))
     prepared = cleanup_service.prepare(
         active_adapters,
         platforms=platforms,
@@ -1556,6 +1566,14 @@ def _scan_context(
     result["target_home"] = _target_home(args)
     result["selection_blockers"] = ()
     return result
+
+
+def _legacy_guard_source_blockers(adapters: Iterable[object]) -> tuple[dict[str, Any], ...]:
+    from .operation_guard_sources import guard_sources_for
+    if not guard_sources_for(adapters):
+        return ()
+    return (structured_blocker("missing_guard_source_evidence", scope="plan", retryable=False,
+        remediation="Use delete plan/run with a top-level v2 plan that freezes the known Orca protection sources."),)
 
 
 def _session_target_root(
@@ -2263,7 +2281,8 @@ def _target_storage(
     adapter_matches = [
         adapter
         for adapter in active_adapters
-        if normalize_storage_path(adapter.codex_home) == target_key
+        if (home := getattr(adapter, "codex_home", None)) is not None
+        and normalize_storage_path(home) == target_key
     ]
     if not adapter_matches:
         return None

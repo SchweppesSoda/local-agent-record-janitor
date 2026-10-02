@@ -28,7 +28,7 @@ class NativeWorkflowRegressions(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve(strict=True)
         self.home = self.root / "official"
         self.home.mkdir()
         self.paths = {}
@@ -216,6 +216,47 @@ class NativeWorkflowRegressions(unittest.TestCase):
         self.assertEqual(calls, ["delete"])
         remaining = build_session_catalog((self.adapter,))
         self.assertEqual({r.thread_id for r in remaining.records}, {"keep", "kept-child"})
+
+    def test_residual_rounds_retain_new_guard_sources_after_environment_changes(self):
+        from local_agent_record_janitor.adapters import OrcaAdapter
+        from local_agent_record_janitor.record_identity import canonical_path
+        from tests.orca_support import create_profile
+
+        self.fixture([("delete", "work", None)])
+        first_profile, later_profile = self.root / "first-profile", self.root / "later-profile"
+        for profile in (first_profile, later_profile):
+            create_profile(profile, accounts=0)
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": str(first_profile)}):
+            plan = coordinator.plan_operation(client="native", record_ids=("delete",), adapters=(self.adapter,),
+                plan_path=self.root / "residual-guards.json")
+            initial = coordinator._live[plan["operation_id"]]
+            self.server([])().delete_thread("delete")
+            context, _ = coordinator._terminal_context(initial)
+        self.assertTrue(any(str(a.kind.value) == "remove_desktop_state" for a in context.plan.actions))
+        initial.terminal_context = context
+        seen = []
+
+        def residual_execution(live, **_):
+            seen.append(live)
+            if len(seen) == 1:
+                # A second round discovers a new bounded source. The next
+                # residual plan must retain it even after the env moves away.
+                live.adapters += (OrcaAdapter(profile_root=later_profile),)
+                actions = tuple(replace(a, action_id=a.action_id + "-next") for a in context.plan.actions)
+                live.terminal_context = replace(context, plan=replace(context.plan, actions=actions))
+                return {"goal_status": "completed_with_residuals"}
+            live.terminal_context = replace(context, plan=replace(context.plan, actions=()))
+            return {"goal_status": "complete"}
+
+        with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": ""}), patch.object(
+                coordinator, "_execute_live", side_effect=residual_execution):
+            result = coordinator._finish_native_run(initial, {"goal_status": "completed_with_residuals"})
+        self.assertEqual(len(result["rounds"]), 3)
+        self.assertEqual({s["profile_root"] for s in seen[1].document["guard_sources"]},
+                         {canonical_path(first_profile), canonical_path(later_profile)})
+        self.assertEqual({a.profile_root for a in seen[1].adapters if isinstance(a, OrcaAdapter)},
+                         {first_profile, later_profile})
 
     def test_verify_missing_scan_evidence_cannot_report_complete(self):
         self.fixture([("keep", "work", None)])

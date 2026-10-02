@@ -264,7 +264,7 @@ class InventorySelectionError(ValueError):
     pass
 
 
-def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterable[object] = ()) -> SessionCatalog:
+def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterable[object] = (), plain_native_paths: bool = False) -> SessionCatalog:
     """Build a read-only union of native artifacts and frontend mappings.
 
     A failure remains visible while other homes and sources continue to be
@@ -354,7 +354,7 @@ def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterabl
     unmapped: list[FrontendSessionRecord] = []
     for home_key, home in sorted(home_paths.items()):
         state_rows, native_edges, state_edge_complete, state_errors = _read_state_partial(home)
-        rollouts, rollout_errors = _read_rollouts_partial(home)
+        rollouts, rollout_errors = _read_rollouts_partial(home, plain_paths=plain_native_paths)
         legacy_ids, legacy_names, legacy_errors = _read_legacy_index_partial(home)
         native_errors = state_errors + rollout_errors + legacy_errors
         home_errors = [
@@ -868,16 +868,20 @@ def _read_state_partial(
 
 def _read_rollouts_partial(
     home: Path,
+    *, plain_paths: bool = False,
 ) -> tuple[list[RolloutRecord], list[InventoryFailure]]:
     records: list[RolloutRecord] = []
     errors: list[InventoryFailure] = []
     for directory_name, archived in (("sessions", False), ("archived_sessions", True)):
         root = home / directory_name
         try:
+            if plain_paths:
+                from .orca_discovery import require_plain_directory
+                require_plain_directory(root)
             root_status = root.stat()
         except FileNotFoundError:
             continue
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             errors.append(
                 InventoryFailure(
                     source="codex-rollouts",
@@ -919,6 +923,15 @@ def _read_rollouts_partial(
                 onerror=record_walk_error,
                 followlinks=False,
             ):
+                if plain_paths:
+                    for name in tuple(directory_names):
+                        try:
+                            require_plain_directory(Path(directory) / name)
+                        except (OSError, ValueError):
+                            directory_names.remove(name)
+                            errors.append(InventoryFailure(source="codex-rollouts", codex_home=home,
+                                database=Path(directory) / name, error_type="InventoryPathError",
+                                message="Rollout directory ownership is unproven"))
                 directory_names.sort()
                 paths.extend(
                     Path(directory) / file_name
@@ -929,6 +942,9 @@ def _read_rollouts_partial(
             record_walk_error(exc)
         for path in sorted(paths, key=_normalized_path):
             try:
+                if plain_paths:
+                    from .orca_discovery import require_plain_file
+                    require_plain_file(path)
                 with path.open("r", encoding="utf-8") as handle:
                     first_line = handle.readline()
                 raw = json.loads(first_line)

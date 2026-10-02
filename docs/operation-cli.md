@@ -21,7 +21,7 @@ through the independent `delete_native_project` family. See
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
-records --client <native|codex-native|cindy|aionui|pi|claude> [--project <selector> ...]
+records --client <native|codex-native|cindy|aionui|pi|claude|orca> [--project <selector> ...]
 delete plan --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
@@ -59,6 +59,32 @@ The operation store owns the operation ID and plan hash binding. `apply` must
 not infer a changed plan or resend an ambiguous native request. If a mutation
 is `unknown`, stop and use `operation status` followed by `operation verify`;
 never invoke `delete apply` again for that operation.
+
+Orca is inventory-only. `records --client orca [--orca-root PATH ...]` reads the
+supported local journal and proven native homes. Selecting Orca for delete
+returns structured `blocked`/capability-unavailable evidence, including when
+the plan has no executable actions. Status and verify preserve that blocked
+result; an empty unauthorized action set is not successful cleanup.
+
+Plans that discover Orca protection profiles use `larj.operation-plan.v2`.
+The required `guard_sources` list contains each canonical local profile root,
+client, host and path namespace, and is included in the approval hash. These
+locators are separate from mutation storages and never create a journal or lock
+under an Orca profile. Apply, residual run rounds and verify restore frozen
+profiles even when the caller omits or changes `--orca-root`. They also retain
+current default/env and explicitly supplied protections; those guards do not
+expand the selected catalog or approved targets. A required source that fails
+to read cannot become an empty guard set. Store-qualified failures affect the
+matching approved store; unscoped coverage failure of a required profile blocks
+dispatch. Only bounded product metadata is refreshed, without another native
+planner pass.
+
+Existing v1 plans keep their original fields, bytes and hash. If an unattempted
+v1 operation now requires these new protection locators, apply returns
+`missing_guard_source_evidence` and requires a new top-level plan. Started or
+ambiguous child journals remain `unknown` before any such gate; their native
+status/verify diagnosis remains available without resending mutation. A new
+adapter's `verify=false` does not revoke that legacy read-only diagnosis.
 
 ## Output
 
@@ -182,3 +208,8 @@ They retain their one-store plan hash and explicit client-closed acknowledgement
 requirements. They are not a fallback for `delete plan/apply/run`. If the
 installed `OperationCoordinator` is unavailable, the new command returns
 `operation_api_unavailable` and performs no write.
+
+Legacy agent v1 plans cannot freeze Orca protection locators. New plans and
+unattempted applies that discover them return `missing_guard_source_evidence`
+and direct callers to the high-level v2 surface. Existing agent status/verify
+remain read-only, and unknown apply is still refused before scanning guards.

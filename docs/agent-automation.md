@@ -42,6 +42,16 @@ store. `--out PLAN.json` is optional:
   directory, never the project root;
 - the command returns the exact `plan_path` and `plan_sha256`.
 
+Legacy agent v1 does not serialize new Orca protection sources. When planning
+or applying an unattempted mutation with such a known source, it returns
+`missing_guard_source_evidence`; use [the high-level v2 operation
+plan](operation-cli.md) instead. Existing v1 documents are never enriched or
+rehashed at runtime. Started/ambiguous operations are diagnosed through the
+original status/verify contract, and no new guard or schema condition permits
+resending an unknown mutation. Metadata readers use read-only SQL; SQLite WAL
+read locks may still create or update SQLite-owned side files, which are never
+cleaned up by the inventory command.
+
 For one native store, repeat `--thread-id ID_OR_UNIQUE_PREFIX` to freeze only
 actions whose root thread identity matches every supplied selector. Any missing
 or ambiguous selector blocks the plan instead of falling back to the unscoped

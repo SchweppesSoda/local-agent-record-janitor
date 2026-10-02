@@ -291,7 +291,9 @@ def execute_prevalidated_actions(
 
     actions = tuple(selected_actions)
     from .client_capability_guards import ClientCapabilityLimits, CLIENT_CAPABILITY_LIMIT
-    limits = ClientCapabilityLimits.from_adapters(getattr(context, "active_adapters", ()))
+    from .operation_guard_sources import current_guard_sources, refresh_guard_sources
+    guards = refresh_guard_sources(current_guard_sources(getattr(context, "active_adapters", ())))
+    limits = ClientCapabilityLimits.from_adapters(guards)
     restricted = {str(action.action_id): limits.action_reasons(context.plan, action) for action in actions}
     restricted = {action_id: reasons for action_id, reasons in restricted.items() if reasons}
     if restricted:

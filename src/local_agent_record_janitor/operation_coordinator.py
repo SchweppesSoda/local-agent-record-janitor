@@ -16,6 +16,10 @@ from typing import Any
 from .action_registry import action_capability
 from .agent_operations import action_binding
 from .operation_store import OperationStore, plan_sha256, strict_json_load, write_new_json
+from .operation_guard_sources import (
+    PLAN_V1, PLAN_V2, guard_sources_for, refresh_guard_sources,
+    required_source_errors, retain_guard_sources, validate_guard_sources,
+)
 from .mutation_guard import (
     frozen_operation_roots, mutation_guard, mutation_roots, scopes_for_actions,
 )
@@ -88,6 +92,7 @@ class OperationCoordinator:
         plan_path: Path | None = None,
         operation_home: Path | None = None,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         adapters: Iterable[Any] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
@@ -117,6 +122,7 @@ class OperationCoordinator:
                 engines=tuple(normalized_scope.get("engines", ())),
                 include_action_contexts=True,
                 codex_home=codex_home,
+                orca_roots=orca_roots,
             )
             candidates, blockers = self._select_candidates(context, normalized_scope)
             operation = str(operation_id or self._new_operation_id(client_name))
@@ -165,6 +171,7 @@ class OperationCoordinator:
         plan_path: Path | None = None,
         operation_home: Path | None = None,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         plan_sha256: str | None = None,
         clients_closed: bool = False,
         adapters: Iterable[Any] | None = None,
@@ -186,6 +193,9 @@ class OperationCoordinator:
                 "apply", normalized_scope, "clients_closed_ack_required",
                 operation_id=operation_id, blocker_code="clients_closed_ack_required",
             )
+        document = None
+        child_inspection = None
+        live = None
         try:
             document = self._load_plan(
                 operation_id,
@@ -209,10 +219,33 @@ class OperationCoordinator:
             operation = str(document["operation_id"])
             client_name = str(document["scope"]["client"])
             codex_home = self._bound_codex_home(document, codex_home)
+            frozen_roots = validate_guard_sources(document)
+            live = self._live.get(operation)
+            source = (tuple(adapters) if adapters is not None else live.adapters if live is not None
+                      else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=orca_roots)))
+            source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
+            source = refresh_guard_sources(retain_guard_sources(source, (*frozen_roots, *orca_roots)))
+            pending = any(str(batch.get("child_operation_id")) not in child_inspection.completed_child_ids
+                          for batch in document.get("child_batches", ()))
+            if pending and document["schema_version"] == PLAN_V1 and guard_sources_for(source):
+                return self._result_document(document, normalized_scope, goal_status="blocked",
+                    blockers=[self._blocker("missing_guard_source_evidence", "Create a new top-level v2 plan that freezes the known Orca protection sources")],
+                    batches=child_inspection.batches, modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started)
+            source_errors = required_source_errors(document, source)
+            if pending and source_errors:
+                return self._result_document(document, normalized_scope, goal_status="blocked",
+                    blockers=[self._blocker("guard_source_incomplete", "; ".join(source_errors))],
+                    batches=child_inspection.batches, modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started)
+            if document.get("goal_status") == "blocked" and not document.get("actions"):
+                return self._result_document(document, normalized_scope, goal_status="blocked",
+                    blockers=document.get("blockers", ()) or [self._blocker("action_unavailable", "The frozen plan has no authorized mutation")],
+                    batches=child_inspection.batches, modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started)
             live = self._live.get(operation)
             if live is not None:
-                if adapters is not None:
-                    self._retain_live_guards(live, tuple(adapters))
+                self._retain_live_guards(live, source)
                 # A plan followed by apply in one process already owns the
                 # immutable snapshot. Rebuilding the catalog here would turn
                 # plan + apply + terminal verification into three full passes.
@@ -239,7 +272,6 @@ class OperationCoordinator:
                     ):
                         return dict(live.result)
             else:
-                source = None if adapters is None else tuple(adapters)
                 (
                     context,
                     active_adapters,
@@ -286,6 +318,17 @@ class OperationCoordinator:
                 binary_resolver=binary_resolver,
             )
         except Exception as exc:
+            if document is not None:
+                if child_inspection is None:
+                    child_inspection = self._inspect_child_states(document)
+                result = self._result_document(document, normalized_scope,
+                    goal_status="unknown" if child_inspection.blockers or child_inspection.mutation_started else "blocked",
+                    blockers=[self._blocker("operation_apply_failed", str(exc) or repr(exc))],
+                    batches=child_inspection.batches, modified=child_inspection.modified,
+                    mutation_started=child_inspection.mutation_started)
+                if live is not None:
+                    live.result = result
+                return result
             return self._error_document(
                 "apply", normalized_scope, str(exc) or repr(exc),
                 operation_id=operation_id, blocker_code="operation_apply_failed",
@@ -304,6 +347,7 @@ class OperationCoordinator:
         plan_path: Path | None = None,
         operation_home: Path | None = None,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         clients_closed: bool = False,
         adapters: Iterable[Any] | None = None,
         timeout: float = 30.0,
@@ -330,6 +374,7 @@ class OperationCoordinator:
             plan_path=plan_path,
             operation_home=operation_home,
             codex_home=codex_home,
+            orca_roots=orca_roots,
             adapters=adapters,
         )
         if planned.get("goal_status") != "ready":
@@ -397,12 +442,13 @@ class OperationCoordinator:
                 projects=(), all_projects=False, engines=())
             # The terminal context is already a fresh successful scan. Reuse
             # it for the next immutable plan instead of repeating discovery.
+            next_adapters = live.adapters
             document = self._make_plan_document(operation, next_scope, context, candidates, (),
                 plan_path=path, operation_home=None, codex_home=self._bound_codex_home(initial.document, None),
-                active_adapters=initial.adapters, action_contexts={})
+                active_adapters=next_adapters, action_contexts={})
             write_new_json(path, document)
             live = _LiveOperation(operation_id=operation, document=document, context=context,
-                candidates=tuple(candidates), client=initial.client, adapters=initial.adapters)
+                candidates=tuple(candidates), client=initial.client, adapters=next_adapters)
             self._live[operation] = live
             result = self._execute_live(live, **execution)
         # A later plan can cover only the executable subset of the first
@@ -439,6 +485,8 @@ class OperationCoordinator:
     ) -> dict[str, Any]:
         live = self._live.get(str(operation_id or ""))
         if live is not None:
+            if self._blocked_without_mutation(live.document):
+                return self._status_for_document(live.document)
             return dict(live.result) if live.result is not None else self._status_for_document(live.document)
         try:
             return self._status_for_document(
@@ -463,6 +511,7 @@ class OperationCoordinator:
         plan_path: Path | None = None,
         operation_home: Path | None = None,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
@@ -476,11 +525,13 @@ class OperationCoordinator:
                 operation_id, plan_path, None,
                 operation_home=operation_home, codex_home=codex_home,
             )
+            if self._blocked_without_mutation(document):
+                return self._status_for_document(document)
             with mutation_roots(frozen_operation_roots(document)):
                 computed = self._verify_operation_locked(
                     operation_id=operation_id, plan_path=plan_path,
                     operation_home=operation_home, codex_home=codex_home,
-                    scope=scope, adapters=adapters, verify_timeout=verify_timeout,
+                    scope=scope, adapters=adapters, orca_roots=orca_roots, verify_timeout=verify_timeout,
                 )
             return dict(computed)
         except Exception as exc:
@@ -510,6 +561,7 @@ class OperationCoordinator:
         plan_path: Path | None = None,
         operation_home: Path | None = None,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
@@ -530,7 +582,10 @@ class OperationCoordinator:
                 )
                 client_name = str(document["scope"]["client"])
                 codex_home = self._bound_codex_home(document, codex_home)
-                source = None if adapters is None else tuple(adapters)
+                source = tuple(adapters) if adapters is not None else tuple(self._default_adapters(
+                    client_name, codex_home=codex_home, orca_roots=orca_roots))
+                source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
+                source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(document), *orca_roots)))
                 (
                     context,
                     active_adapters,
@@ -567,14 +622,16 @@ class OperationCoordinator:
                     action_contexts=action_contexts,
                 )
                 terminal = context
-            except Exception as exc:
-                return self._error_document(
-                    "verify", dict(scope or {}), str(exc) or repr(exc),
-                    operation_id=operation_id, blocker_code="operation_verify_failed",
-                )
+            except Exception:
+                # The public wrapper has the approved document and durable
+                # child evidence. A failed rebind must retain unknown/started
+                # facts rather than become a new, unattempted blocked result.
+                raise
         if terminal is None:
-            if adapters is not None:
-                self._retain_live_guards(live, tuple(adapters))
+            source = tuple(adapters) if adapters is not None else live.adapters
+            source = self._with_current_guard_sources(source, live.client, codex_home=self._bound_codex_home(live.document, codex_home), orca_roots=orca_roots)
+            source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(live.document), *orca_roots)))
+            self._retain_live_guards(live, source)
             try:
                 self._bound_codex_home(live.document, codex_home)
             except OperationCoordinatorError as exc:
@@ -582,10 +639,18 @@ class OperationCoordinator:
                     blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=())
             terminal, error = self._terminal_context(live)
         if error is not None:
+            inspection = self._inspect_child_states(live.document)
             return self._result_document(
                 live.document, dict(scope or {}), goal_status="unknown",
-                blockers=[self._blocker("terminal_scan_incomplete", error)], batches=(),
+                blockers=[self._blocker("terminal_scan_incomplete", error)], batches=inspection.batches,
+                modified=inspection.modified, mutation_started=inspection.mutation_started,
             )
+        source_errors = required_source_errors(live.document, live.adapters)
+        if source_errors:
+            inspection = self._inspect_child_states(live.document)
+            return self._result_document(live.document, dict(scope or {}), goal_status="unknown",
+                blockers=[self._blocker("guard_source_incomplete", "; ".join(source_errors))],
+                batches=inspection.batches, modified=inspection.modified, mutation_started=inspection.mutation_started)
         if not bool(getattr(getattr(terminal, "plan", None), "scan_complete", True)):
             errors = getattr(getattr(terminal, "plan", None), "errors", ())
             message = "; ".join(str(value) for value in errors)
@@ -1056,14 +1121,16 @@ class OperationCoordinator:
         engines: Sequence[str] = (),
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
         explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
 
-        guards = (tuple(adapters) if adapters is not None else
+        candidates = (tuple(adapters) if adapters is not None else
                   () if client in {"pi", "claude"} else
-                  tuple(self._default_adapters(client, codex_home=codex_home)))
-        result = self._build_context_sources(client, guards, engines=engines,
+                  tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots)))
+        guards = self._with_current_guard_sources(candidates, client, codex_home=codex_home, orca_roots=orca_roots)
+        result = self._build_context_sources(client, candidates, engines=engines,
             include_action_contexts=include_action_contexts, codex_home=codex_home,
             explicit_frontend_ids=explicit_frontend_ids)
         context = restrict_cleanup_context(result[0], guards, self.service.typed_actions)
@@ -1211,6 +1278,10 @@ class OperationCoordinator:
     def _retain_live_guards(self, live: _LiveOperation, adapters: tuple[Any, ...]) -> None:
         """Keep newly supplied protections without rebuilding the approved catalog."""
         from .client_capability_guards import restrict_cleanup_context
+        from .client_contracts import describe_adapter
+
+        if adapters == live.adapters and not any(describe_adapter(a).client == "orca" for a in adapters):
+            return
 
         live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
         live.adapters = live.context.active_adapters
@@ -2271,17 +2342,26 @@ class OperationCoordinator:
         return name == client
 
     @staticmethod
+    def _with_current_guard_sources(adapters: Sequence[Any], client: str, *, codex_home: Path | None = None,
+                                    orca_roots: Sequence[str | Path] = ()) -> tuple[Any, ...]:
+        from .operation_guard_sources import current_guard_sources
+        return current_guard_sources(adapters, client=client, codex_home=codex_home, orca_roots=orca_roots)
+
+    @staticmethod
     def _default_adapters(
         client: str,
         *,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
     ) -> Sequence[Any]:
-        from .adapter_factory import create_default_adapters
+        from .adapter_factory import create_default_adapters, discover_orca_guards
 
-        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home)
+        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home, orca_roots=orca_roots)
         # Discover known local frontend protections independently of the
         # requested candidate client. The caller filters catalog candidates.
         args.platform = ["all"]
+        if client in {"pi", "claude"}:
+            return discover_orca_guards(args)
         return create_default_adapters(args)
 
     @staticmethod
@@ -2289,8 +2369,11 @@ class OperationCoordinator:
         client: str,
         *,
         codex_home: Path | None = None,
+        orca_roots: Sequence[str | Path] = (),
     ) -> Any:
         return SimpleNamespace(
+            client=client,
+            orca_root=list(orca_roots),
             platform=[client],
             appdata=None,
             codex_home=(Path(codex_home).expanduser() if codex_home else None),
@@ -2785,6 +2868,15 @@ class OperationCoordinator:
             },
             "goal_status": "ready" if candidates and not blockers else "blocked",
         }
+        guard_sources = guard_sources_for(active_adapters)
+        if guard_sources:
+            payload["schema_version"] = PLAN_V2
+            payload["guard_sources"] = guard_sources
+            errors = required_source_errors(payload, active_adapters)
+            if errors and candidates:
+                payload["blockers"].append(self._blocker("guard_source_incomplete", "; ".join(errors)))
+                payload["counts"]["blocked_count"] = len(payload["blockers"])
+                payload["goal_status"] = "blocked"
         payload["plan_sha256"] = plan_sha256(payload)
         return payload
 
@@ -2950,7 +3042,7 @@ class OperationCoordinator:
                 raise OperationCoordinatorError("operation plan is not a JSON object")
             document = raw
         if (
-            document.get("schema_version") != "larj.operation-plan.v1"
+            document.get("schema_version") not in {PLAN_V1, PLAN_V2}
             or document.get("document_type") != "operation_plan"
         ):
             raise OperationCoordinatorError("operation plan schema is invalid")
@@ -2961,6 +3053,7 @@ class OperationCoordinator:
             raise OperationCoordinatorError("authorized plan hash does not match")
         if operation_id is not None and str(operation_id) != str(document.get("operation_id")):
             raise OperationCoordinatorError("operation ID does not match plan")
+        validate_guard_sources(document)
         return document
 
     @staticmethod
@@ -3638,6 +3731,19 @@ class OperationCoordinator:
                 modified=child_inspection.modified,
                 mutation_started=child_inspection.mutation_started,
             )
+            live.result = result
+            return result
+
+        current = self._with_current_guard_sources(live.adapters, live.client,
+            codex_home=self._bound_codex_home(live.document, None))
+        self._retain_live_guards(live, refresh_guard_sources(retain_guard_sources(
+            current, validate_guard_sources(live.document) if live.document.get("schema_version") == PLAN_V2 else ())))
+        source_errors = required_source_errors(live.document, live.adapters)
+        if source_errors:
+            result = self._result_document(live.document, live.document.get("scope", {}), goal_status="blocked",
+                blockers=[self._blocker("guard_source_incomplete", "; ".join(source_errors))],
+                batches=child_inspection.batches, modified=child_inspection.modified,
+                mutation_started=child_inspection.mutation_started)
             live.result = result
             return result
 
@@ -4325,6 +4431,10 @@ class OperationCoordinator:
         live: _LiveOperation,
     ) -> tuple[Any | None, str | None]:
         try:
+            self._retain_live_guards(live, self._with_current_guard_sources(live.adapters, live.client,
+                codex_home=self._bound_codex_home(live.document, None)))
+            self._retain_live_guards(live, refresh_guard_sources(retain_guard_sources(
+                live.adapters, validate_guard_sources(live.document))))
             for adapter in live.adapters:
                 invalidate = getattr(adapter, "invalidate_frontend_snapshot", None)
                 if callable(invalidate):
@@ -4514,6 +4624,9 @@ class OperationCoordinator:
             goal_status = "completed_with_residuals"
         elif statuses and statuses <= {"complete"}:
             goal_status = "complete"
+        elif self._blocked_without_mutation(document):
+            goal_status = "blocked"
+            blockers = list(document.get("blockers", ()))
         else:
             goal_status = "ready"
         return {
@@ -4529,6 +4642,10 @@ class OperationCoordinator:
             "batches": batches,
             "blockers": [self._metadata(value) for value in blockers],
         }
+
+    @staticmethod
+    def _blocked_without_mutation(document: Mapping[str, Any]) -> bool:
+        return document.get("goal_status") == "blocked" and not document.get("actions") and not document.get("child_batches")
 
     def _result_document(
         self,

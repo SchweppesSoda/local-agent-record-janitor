@@ -1,6 +1,6 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1/P2a/P2b/P3a 已落地，P3b 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -8,8 +8,9 @@
 P3a 的[公共清单与保护接线](adapters.md#类型化清单入口)已落地：限定记录选择保留相关
 类型化 `SourceFailure`，明确 store 的错误不扩大到独立 store；候选与保护 adapter 分开，
 plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读上限及精确引用保护。
-旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca、Herdr 的产品发现和
-metadata reader 仍待 P3b/P4；当前不承诺发现任意自定义或未证明关联的客户端存储。
+旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca 的有界发现与 journal
+reader 已接入同一公共清单和保护链；含新保护来源的顶层计划采用条件 v2 冻结 locator，
+旧 v1 不补字段或重 hash。Herdr reader 待 P4；当前不承诺发现任意自定义或未证明关联的存储。
 
 ## 目标与已完成基线
 
@@ -172,6 +173,12 @@ P2a 的同 root 协调与兼容恢复已落地，见
 重绑定回归；同进程新 reader 的兼容测试不替代这些门槛。
 
 ### P3：Orca 本机只读接入
+
+已落地的首版范围见 [Orca 接入边界](adapters.md#orca-与-herdr-的接入边界)。current/history
+来自固定 schema4 journal，Codex catalog 仅遍历已证明的账号及关联 runtime homes；
+恢复 blobs、hook namespaces 与运行状态仍明确 incomplete。只读能力贯穿 native、
+直接 writer 和 operation 入口；保护 locator 与 mutation store 分开，v1 恢复保持兼容。
+完整桥接图、任意自定义 home、远端执行和新 writer 仍不在当前支持范围内。
 
 **依赖：**P1、P2。**改动范围：**新增 Orca adapter/引用提取器、discovery 和
 对应临时存储测试；注册清单能力，删除能力保持关闭。

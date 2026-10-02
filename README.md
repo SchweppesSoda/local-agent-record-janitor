@@ -86,7 +86,8 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 正常独立 Codex/Pi/Claude 会话无需前端引用；Codex 子记录的完整父链也不要求独立 UI
 绑定。未知 backend 仅显示 `unverified`/`inventory_only`，不提供删除动作。`native`
 涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
-Orca、Herdr 尚未接入；关系语义、共享存储和未来接入条件见
+Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；所有 Orca 写入和
+完整终验能力仍关闭。Herdr 接入待实现；关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
 
 ## 为什么需要它
@@ -310,6 +311,27 @@ owner process root；它与 native root 分开。`probe_complete` 表示探测�
 `coverage_complete` 另行说明限定进程范围的覆盖；当前仅检查 Windows 下 Codex、
 ChatGPT、AionUI、Cindy 四类进程。Orca/Herdr、Pi/Claude 运行时、任意 node/server 和
 非 Windows 运行归属未被完整覆盖，不能由空结果推断 `clients_closed=true`。
+
+盘点 Orca 可使用默认或 `ORCA_USER_DATA_PATH` 指向的 userData，也可显式指定一个或多个
+本机 profile：
+
+```powershell
+local-agent-record-janitor records --client orca --orca-root 'D:\OrcaProfile' --json
+```
+
+当前 reader 验证 journal schema4 / record schema2，保留所有 current/history handles，
+仅在普通 marker、账号 ID、目录包含关系与本机路径证据成立时盘点对应 Codex home。
+runtime home 必须有该已知 profile 的持久化 `accountHome` 关联，目录名称本身不授予归属。
+未知 schema、WSL/SSH、未支持的恢复来源和读取失败保留为 `incomplete`；本机 Claude
+root 只提供精确保护证据，不成为 Orca native catalog 或 writer。已发现的 Orca 保护来源
+也约束同一 store 的 native 删除入口，明确选择 Orca 执行 `delete plan/run` 返回 `blocked`。
+
+含 Orca 保护来源的新高层计划使用顶层 v2，将所有已知 profile locator 纳入批准 hash；
+apply/verify 恢复这些来源，并合并当前 default/env 和显式 root。它们不属于 mutation
+storages。旧 v1 不补字段或重算 hash；需要新保护来源的未执行 mutation 必须重新生成
+高层计划，已有 unknown 仍只通过 status/verify 恢复。自定义、移动或去除 marker 的未知
+home，以及没有 metadata 关联的 runtime home，不在全局发现保证内。SQLite 使用只读
+SQL，但 WAL 读锁可能创建或更新侧文件；这不是文件系统零写保证，工具不清理这些文件。
 
 Pi session 使用独立清单，不会伪装成 Codex native store。只查看 Pi：
 

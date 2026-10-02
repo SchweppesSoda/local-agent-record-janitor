@@ -238,6 +238,82 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
                 self.assertTrue(result["mutation_started"])
         self.assertEqual(store.receipt_path.read_bytes(), before)
 
+    def test_fixed_started_child_reader_failure_preserves_fresh_and_live_verify_facts(self) -> None:
+        from local_agent_record_janitor.adapters import OrcaAdapter
+        from local_agent_record_janitor.operation_coordinator import _LiveOperation
+        from tests.orca_support import create_profile
+
+        top, child, store = self.install_child(receipt=False)
+        profile = self.root / "orca"
+        create_profile(profile, accounts=0)
+        native = NativeIntegrityAdapter(codex_home=self.home)
+        reader = OrcaAdapter(profile_root=profile)
+        args = {"operation_id": top["operation_id"], "plan_path": Path(top["plan_path"])}
+        before = args["plan_path"].read_bytes()
+        for same_process in (False, True):
+            coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+            if same_process:
+                context, adapters, catalog, manual, actions, bindings = coordinator._build_context(
+                    "native", (native,), include_action_contexts=True)
+                coordinator._live[top["operation_id"]] = _LiveOperation(top["operation_id"], top, context, (),
+                    "native", adapters, manual_actions=actions, manual_catalog=catalog, manual_plan=manual,
+                    action_contexts=bindings)
+            method = "snapshot_references" if same_process else "describe_client"
+            with patch.object(reader, method, side_effect=OSError("synthetic reader unavailable")) as failed:
+                if not same_process:
+                    applied = coordinator.apply_operation(**args, scope=top["scope"], plan_sha256=top["plan_sha256"],
+                        adapters=(native, reader), clients_closed=True,
+                        app_server_factory=lambda **_: self.fail("unknown child must not replay"))
+                    self.assertEqual(applied["goal_status"], "unknown")
+                    self.assertTrue(applied["mutation_started"])
+                    failed.assert_not_called()
+                verified = coordinator.verify_operation(**args, adapters=(native, reader), verify_timeout=0)
+            self.assertEqual(verified["goal_status"], "unknown", verified)
+            self.assertTrue(verified["mutation_started"])
+            self.assertEqual(len(verified["batches"]), 1)
+            self.assertTrue(store.read_state()["mutation_started"])
+            self.assertEqual(store.read_plan()["plan_sha256"], child["plan_sha256"])
+            self.assertEqual(args["plan_path"].read_bytes(), before)
+
+    def test_fixed_legacy_agent_with_real_orca_guard_blocks_new_mutation_but_verifies_unknown(self) -> None:
+        import os
+        from tests.orca_support import create_profile
+
+        profile = self.root / "orca"
+        create_profile(profile, accounts=0)
+        for name in ("unstarted", "unknown"):
+            plan = self.relocate("agent_plan")
+            plan["operation_id"] += "-orca-" + name
+            plan["plan_sha256"] = plan_sha256(plan)
+            store = OperationStore(self.home, plan["operation_id"])
+            store.accept_plan(plan)
+            state = {**self.samples["states"][name], "operation_id": plan["operation_id"],
+                     "plan_sha256": plan["plan_sha256"]}
+            if name == "unstarted":
+                state.update(phase="preflight", current_action_state="not_started")
+            store.state_path.write_text(json.dumps(state), encoding="utf-8")
+            events = [{**event, "operation_id": plan["operation_id"], "plan_sha256": plan["plan_sha256"]}
+                      for event in self.samples["events"][:state["next_event_sequence"] - 1]]
+            if events:
+                store.events_path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+            before = store.plan_path.read_bytes()
+            with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": str(profile)}):
+                applied = self.invoke(("agent", "apply", "--plan", str(store.plan_path),
+                    "--authorized-plan-sha256", plan["plan_sha256"], "--clients-closed"))
+                self.assertEqual(applied["goal_status"], "unknown" if name == "unknown" else "blocked", applied)
+                if name == "unstarted":
+                    self.assertIn("missing_guard_source_evidence", {b["blocker_code"] for b in applied["blockers"]})
+                else:
+                    self.assertTrue(applied["mutation_started"])
+                    verified = self.invoke(("agent", "verify", "--operation-id", plan["operation_id"],
+                                            "--codex-home", str(self.home)))
+                    self.assertEqual(verified["goal_status"], "complete", verified)
+                    self.assertTrue(verified["mutation_started"])
+            if store.plan_path.exists():
+                self.assertEqual(store.plan_path.read_bytes(), before)
+            elif name == "unstarted":
+                self.assertEqual(store.read_result()["plan_sha256"], plan["plan_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

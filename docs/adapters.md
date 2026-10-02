@@ -33,6 +33,8 @@
 | AionUI / Codex | 精确 ACP 引用及支持 schema 的孤立 project 行 | 原生写入仍须独立证明归属和 writer；未知 schema 只读 |
 | AionUI / Pi、Claude | 精确 ACP 引用 | 原生 root 未证明，不提供 native writer |
 | native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
+| Orca / Codex | 只读 journal 引用与已证明 homes 的原生清单 | 全部写入及 Orca 自身 verify 关闭；未知来源保持 incomplete |
+| Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -164,24 +166,72 @@ manual、GUI 和直接服务入口使用相同 gate，阻止绕过已有 journal
 
 ## Orca 与 Herdr 的接入边界
 
-当前没有 Orca 或 Herdr 专用 adapter/writer，也没有其本地实机兼容性验证。
-以下是根据上游公开实现得到的接入要求，不是支持声明。
+### Orca：已接入只读清单与保护
 
-- **Orca**：上游枚举按账号隔离的 Codex homes，WSL homes 另走自己的发现路径；
-  session bridge 的链接实现优先 hardlink，失败后尝试 symlink。因此需要同时保留逻辑
-  store 身份和物理文件别名证据，检查所有受影响链接及 frontend 引用，不能按账号或单
-  一目录推导完整删除范围。本库已有部分链接保护，尚未建模 Orca 的完整桥接图。
-  依据：[account home discovery](https://github.com/stablyai/orca/blob/main/src/main/codex/codex-account-home-discovery.ts)、
-  [session link](https://github.com/stablyai/orca/blob/main/src/main/codex/codex-session-link.ts)。
-- **Herdr**：detach 后 server、pane 和 agent 可以继续运行；`session.json` 和 layout
-  snapshots 保留 native session 恢复引用。因此应识别 server/session/host 和真实 writer，
-  盘点恢复引用；关闭 pane 的 API 不能当作删除原生 conversation 的协议。
-  依据：[session state](https://herdr.dev/docs/session-state/)、
-  [socket API](https://herdr.dev/docs/socket-api/)。
+`OrcaAdapter` 是独立的类型化 metadata adapter，通过 `records --client orca`
+使用公共清单。首版依据固定上游 revision
+`efbf651c7bb2eec778daf1844f8228e70809ec9f`，接受
+`agent-session-journal.db` 的 SQLite `user_version=4` 和 record `schemaVersion=2`。
+验证 schema 与读取 metadata 位于同一读事务；只查询
+`agent_session_records`、`agent_session_tabs` 和 `agent_session_store_meta`，拒绝用
+VIEW 冒充这些表。依据：[数据库 schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/native-chat/agent-session-journal/journal-database-schema.ts)、
+[record 契约](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)。
 
-接入顺序是先确认真实版本和 schema，提供只读归属/引用清单，再验证 native writer 与
-关闭检查，最后开放精确删除及恢复。公共身份、错误与关系契约先保持一致；只有出现
-真实可复用实现时再提取 registry，避免为未验证的产品增加空壳支持。
+每个合法 record 的 handle chain 全部保留，最后一项为 current，其余为 history；
+record 不依赖当前 tab 是否存在。`session_tabs_recorded` 缺失时显式报告覆盖未知，
+已记录的空 tabs 不清除 record 引用，也不证明进程已停。
+Orca 的 fork/history 是 frontend 元数据，不变成原生 parent 边；正常 Codex 子记录
+仍按原生父链证据分类。依据：[handle chain](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-provider-handle.ts)、
+[tab 恢复状态](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/agent-session-record-rows.ts)。
+
+发现限于默认、`ORCA_USER_DATA_PATH`、显式 `--orca-root`，以及已知 native home 的
+精确 `codex-accounts/<id>/home` 布局和可观察 marker。账号归属还要求普通 marker 内容
+与 ID 一致、canonical containment、普通 home/sessions 目录且不落入 system home。
+runtime home 必须由已知 profile 中本机 `accountHome` 明确关联，目录名称不足以证明。
+host 必须为 `local`、WSL distro 必须为空，foreign-OS/相对/远端 locator 不交给本机
+catalog。未知或失败引用保留 opaque locator 与来源错误，不补默认 home。
+依据：[默认路径](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/codex/codex-home-paths.ts)、
+[账号归属](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/codex-accounts/host-codex-managed-home-ownership.ts)。
+
+多个已证明 Codex homes 分别盘点并保留 store-qualified identity，多个 profile 共享
+catalog pass。Orca 清单不读取 Codex Desktop 私有 sqlite/global-state；不同逻辑 store
+不会因同 ID 或 hardlink 合并。文件别名仅为观察证据，尚无完整桥接图。本机合法
+`CLAUDE_CONFIG_DIR` selector 仅用于精确 root 的只读保护，不遍历该 root 或声称 Orca
+已支持 Claude 原生清单。全部 Orca native/frontend/remote 写入和自身 verify 能力关闭。
+
+已知但未实现的恢复来源只检查 presence 并报告 incomplete：退休的
+`agent-sessions/agent-sessions.json[.bak]`、root/profile 下 `orca-data.json[.bak.1..5]`、
+`profile-state.db` 及其 `-wal/-shm/-journal`、`agent-hooks/last-status.json`。
+`agent-hooks` 目录存在时还报告 namespace 覆盖未实现；`orca-runtime.json` 存在时
+报告运行验证未覆盖。独立合法 journal 引用继续展示；不读取这些恢复 blob、hook 正文、
+runtime auth/transport 或 `journal_rows` 聊天内容。journal 的 record JSON 可以包含
+`launchArgs`/options，reader 仅校验其形状和大小，不输出或执行这些内容；投影不包含
+argv、options、凭据或原始 record JSON。不启动产品、socket、迁移、bridge 或同步 helper。
+
+数据库及已知侧文件先检查普通文件和目录；SQL 使用 `mode=ro`、`query_only` 及读事务，
+包含当前 WAL 中的引用。SQLite 的内部读锁可能创建或更新 WAL/SHM 侧文件，因此不承诺
+文件系统零写入；不在读取后清理侧文件，也不以 `immutable` 忽略活跃 WAL。
+
+已知保护 profile 与候选 adapter 分开；选择 native、Pi/Claude 或某个 Orca profile
+不会丢掉其他已知来源，也不会把 guard-only home 增加为候选。写前刷新有界 metadata，
+精确 store 错误只收紧相应目标。需要保留这些来源的新 top-level plan 使用 v2，将全部
+已知 profile roots 冻结到 hash 内的 `guard_sources`；fresh/same-process apply 与残留
+run 轮次并集保留 frozen/current/显式来源。旧 v1 不补字段或重算 hash；缺新保护来源
+证据的未执行 batch 要求重新计划，unknown 仍只通过 status/verify 恢复。详见
+[operation 协议](operation-cli.md)。
+
+默认/env/显式路径和可信 marker 之外的 custom、搬移、dev/E2E、去 marker 账号、未证明
+runtime、WSL/远端及桥接副本不具备全局发现保证。持久化 lease 或进程名字缺失不能证明
+writer 已停；新 adapter 保持 inventory-only。当前验证使用合成临时 schema/文件，尚无
+Orca 产品实机 writer、完整运行归属或跨平台发布兼容性验收。
+
+### Herdr：待接入
+
+Herdr 尚无专用 adapter/writer。其 `session.json` 与 layout snapshots 保留恢复引用，
+detach 后 server、pane 和 agent 可以继续运行；关闭 pane 的 API 不能当作删除原生
+conversation 的协议。依据：[session state](https://herdr.dev/docs/session-state/)、
+[socket API](https://herdr.dev/docs/socket-api/)。后续先接入真实持久化 schema 的只读引用，
+native root 缺证据时保持 rootless/unverified，不推导默认 home 或进程已停。
 
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。

@@ -373,7 +373,7 @@ def scan_adapters(
         except Exception as exc:
             errors.append(ScanFailure(platform=str(getattr(adapter, "name", type(adapter).__name__)),
                                       message=str(exc), error_type=type(exc).__name__))
-    limits = ClientCapabilityLimits(tuple(descriptors))
+    limits = ClientCapabilityLimits.from_adapters(scanned_adapters)
     binary_hints_by_home: dict[str, set[str]] = defaultdict(set)
     for adapter in scanned_adapters:
         raw_codex_home = getattr(adapter, "codex_home", None)
@@ -852,6 +852,14 @@ def _clean_group(
     selected_binary_hints: Sequence[Path],
 ) -> None:
     codex_home = findings[0].codex_home
+    from .client_capability_guards import ClientCapabilityLimits
+    from .operation_guard_sources import current_guard_sources, refresh_guard_sources
+    guards = refresh_guard_sources(current_guard_sources(codex_home=codex_home))
+    reasons = ClientCapabilityLimits.from_adapters(guards).reasons("codex", "native_delete", native_root=codex_home)
+    if reasons:
+        report.results.extend(CleanupResult(finding=finding, status="not_deleted", error="; ".join(reasons))
+                              for finding in findings)
+        return
     normalized_binary_hints = {
         _normalize_binary_hint(hint)
         for hint in selected_binary_hints

@@ -18,6 +18,7 @@ from local_agent_record_janitor.client_contracts import (
 )
 from local_agent_record_janitor.cleanup_service import CleanupService
 from local_agent_record_janitor.client_capability_guards import restrict_cleanup_context
+from local_agent_record_janitor.client_capability_guards import ClientCapabilityLimits
 from local_agent_record_janitor.gui import build_gui_snapshot, execute_gui_delete
 from local_agent_record_janitor.inventory import build_session_catalog
 from local_agent_record_janitor.manual_delete import (
@@ -123,6 +124,16 @@ class TypedClientGuardTests(unittest.TestCase):
         self.assertEqual(result["store_errors"], [])
         self.assertEqual(len(result["errors"]), 1)
 
+    def test_failed_cached_reader_blocks_only_its_declared_store(self):
+        other = StoreKey("codex", self.root / "other-store")
+        for stores, blocked in (((other,), False), ((), False), ((self.store,), True)):
+            reader = TypedReader(self.root / "profile", stores=stores, writable=True)
+            reader.snapshot_references = Mock(side_effect=OSError("private fixture detail"))
+            with self.subTest(stores=stores):
+                reasons = ClientCapabilityLimits.from_adapters((reader,)).reasons("codex", "native_delete", native_root=self.home)
+                self.assertEqual(bool(reasons), blocked)
+                self.assertNotIn("private fixture detail", str(reasons))
+
     def test_native_plan_uses_guards_without_cataloging_their_other_stores(self):
         reader = self.readonly()
         reader.native_catalog_for = Mock(side_effect=AssertionError("guard must not scan candidates"))
@@ -132,7 +143,7 @@ class TypedClientGuardTests(unittest.TestCase):
         self.assertEqual(plan["counts"]["action_count"], 0)
         self.assertIn("client_capability_limit", str(plan["blockers"]))
         reader.native_catalog_for.assert_not_called()
-        self.assertEqual(reader.refresh_calls, [])
+        self.assertFalse(any(reader.refresh_calls))  # Cached metadata may supply exact source failures.
 
     def test_native_records_only_catalog_native_candidates_but_keep_known_ceilings(self):
         profile = self.root / "other-profile"
@@ -221,7 +232,7 @@ class TypedClientGuardTests(unittest.TestCase):
         reader.errors = (SourceFailure(str(reader.source), "Selected store failed", store=self.store),)
         with self.assertRaises(TargetedGuardError):
             guard.check_manual(action)
-        self.assertTrue(all(reader.refresh_calls))
+        self.assertTrue(any(reader.refresh_calls))
         rootless = TypedReader(self.root / "rootless")
         rootless_guard = TargetedReferenceGuard((rootless,), guard.affected_thread_ids)
         rootless.errors = (SourceFailure(str(rootless.source), "No native root coverage", profile_root=rootless.descriptor.profile_root),)
@@ -260,7 +271,7 @@ class TypedClientGuardTests(unittest.TestCase):
                 approved_plan_fingerprint=plan.plan_fingerprint, clients_closed=True,
                 app_server_factory=writer, binary_resolver=writer)
         writer.assert_not_called()
-        self.assertEqual(reader.refresh_calls, [True])
+        self.assertEqual([refresh for refresh in reader.refresh_calls if refresh], [True])
         coordinator = OperationCoordinator(self.service)
         approved = coordinator.plan_operation(client="native", record_ids=(self.thread,),
             adapters=(self.native, reader), plan_path=self.root / "qualified-without-store.json")
@@ -270,7 +281,7 @@ class TypedClientGuardTests(unittest.TestCase):
             app_server_factory=writer, binary_resolver=writer)
         self.assertEqual(result["goal_status"], "blocked")
         self.assertFalse(result["mutation_started"])
-        self.assertTrue(all(reader.refresh_calls))
+        self.assertTrue(any(reader.refresh_calls))
         writer.assert_not_called()
 
     def test_direct_service_builder_cannot_discard_a_known_readonly_guard(self):
@@ -332,7 +343,7 @@ class TypedClientGuardTests(unittest.TestCase):
                 codex_home=self.home, plan_path=self.root / "default.json")
         self.assertEqual(calls, [["all"]])
         self.assertEqual(plan["goal_status"], "blocked")
-        self.assertEqual(reader.refresh_calls, [])
+        self.assertFalse(any(reader.refresh_calls))
 
 
 if __name__ == "__main__":

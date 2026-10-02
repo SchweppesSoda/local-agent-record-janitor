@@ -112,6 +112,12 @@ JSON 保留；当前决定只有“保留”或“删除整条已验证记录”
 
 ## 精确写入器
 
+Orca 的本机 journal schema4 / record schema2 接入仅提供清单和保护证据，不注册写入器。
+候选 adapter 与保护 adapter 分开；保护来源不能扩大被选客户端的 catalog、目标或批准
+范围。含这些来源的新顶层 operation v2 冻结所有已知 profile locator，执行前恢复并合并
+当前来源；child/agent writer v1 的证据与 hash 语义保持不变。旧 unknown 始终先进入
+只读恢复。具体来源与版本边界见 [Adapter 契约](adapters.md#orca-与-herdr-的接入边界)。
+
 ### Codex thread
 
 原生 thread 删除调用匹配目标 `CODEX_HOME` 的官方 `thread/delete`。同一批只启动

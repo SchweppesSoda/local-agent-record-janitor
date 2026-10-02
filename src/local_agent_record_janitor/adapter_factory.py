@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
 
-from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter
-from .adapters.base import FrontendAdapter
+from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter
+from .orca_discovery import default_orca_root, local_orca_path, reverse_account_profile
+from .record_identity import canonical_path
 from .cleanup_service import selected_platforms
 from .discovery import (
     default_appdata,
@@ -14,7 +16,37 @@ from .discovery import (
 )
 
 
-def create_default_adapters(args: Any) -> list[FrontendAdapter]:
+def discover_orca_guards(args: Any) -> tuple[OrcaAdapter, ...]:
+    """Only default/env/explicit profiles and an exact native account marker.
+
+    A missing default profile contributes no new recovery requirement. An
+    explicit/frozen profile remains required even if it disappears or fails.
+    """
+    requested = tuple(getattr(args, "orca_root", ()) or ())
+    selected = str(getattr(args, "client", "")) == "orca" or "orca" in (getattr(args, "platform", ()) or ())
+    roots = [local_orca_path(root) for root in requested]
+    if not requested:
+        default = default_orca_root(appdata=getattr(args, "appdata", None))
+        try:
+            default.lstat()
+        except FileNotFoundError:
+            if selected or os.environ.get("ORCA_USER_DATA_PATH"):
+                roots.append(default)
+        except OSError:
+            roots.append(default)
+        else:
+            roots.append(default)
+    home = getattr(args, "codex_home", None)
+    if home is not None:
+        profile = reverse_account_profile(Path(home).expanduser().absolute())
+        if profile is not None:
+            roots.append(profile)
+    unique = {canonical_path(root): root for root in roots}
+    return tuple(OrcaAdapter(profile_root=root, codex_bin_hint=getattr(args, "codex_bin", None))
+                 for root in unique.values())
+
+
+def create_default_adapters(args: Any) -> list[object]:
     """Build adapters without coupling either command driver to the other."""
 
     appdata = (args.appdata or default_appdata()).expanduser()
@@ -23,7 +55,7 @@ def create_default_adapters(args: Any) -> list[FrontendAdapter]:
     ).expanduser()
     codex_bin = args.codex_bin.expanduser() if args.codex_bin else None
     selected = selected_platforms(args.platform)
-    adapters: list[FrontendAdapter] = []
+    adapters: list[object] = []
 
     if "aionui" in selected:
         aionui_home = args.aionui_codex_home or native_codex_home
@@ -76,7 +108,10 @@ def create_default_adapters(args: Any) -> list[FrontendAdapter]:
                 codex_bin_hint=codex_bin,
             )
         )
+    # Protection discovery is independent of candidate selection. Typed
+    # adapters never become legacy native/home or scan candidates.
+    adapters.extend(discover_orca_guards(args))
     return adapters
 
 
-__all__ = ["create_default_adapters"]
+__all__ = ["create_default_adapters", "discover_orca_guards"]

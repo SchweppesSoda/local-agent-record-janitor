@@ -125,8 +125,11 @@ class TargetedReferenceGuard:
                 if stores:
                     raise
                 return  # Failed rootless sources cannot identify this store.
-            if not isinstance(snapshot, ReferenceSnapshot) or snapshot.descriptor != descriptor:
+            if not isinstance(snapshot, ReferenceSnapshot) or snapshot.descriptor != describe_adapter(adapter):
                 raise ValueError("typed reference snapshot changed its descriptor")
+            descriptor = snapshot.descriptor
+            stores = tuple(store for store in descriptor.native_stores
+                           if store.backend == "codex" and store.canonical_path == target_home)
             def owns_store(store: Any) -> bool:
                 return store.backend == "codex" and store.canonical_path == target_home
             associated = bool(stores) or any(

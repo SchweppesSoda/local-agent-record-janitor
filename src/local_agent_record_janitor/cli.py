@@ -860,6 +860,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_apply._agent_json_errors = True
     agent_apply.add_argument("--plan", type=Path, required=True)
+    agent_apply.add_argument("--orca-root", action="append", default=[], metavar="PATH",
+                             help="Known Orca protection source; legacy v1 mutation requires a new top-level v2 plan.")
     agent_apply.add_argument(
         "--authorized-plan-sha256",
         metavar="SHA256",
@@ -1001,6 +1003,8 @@ def _add_common_arguments(
     parser.add_argument("--cindy-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-db", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cindy-codex-home", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--orca-root", action="append", default=[], metavar="PATH",
+                        help="Orca userData 根目录（可重复；仅本机 metadata 盘点与保护）")
     if not codex_only:
         parser.add_argument(
             "--pi-agent-dir",
@@ -1038,7 +1042,7 @@ def _add_operation_scope_arguments(
 
     parser.add_argument(
         "--client",
-        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude"),
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca"),
         required=client_required,
         help=(
             "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
@@ -1074,7 +1078,7 @@ def _add_operation_scope_arguments(
     )
 
 
-def create_default_adapters(args: argparse.Namespace) -> list[FrontendAdapter]:
+def create_default_adapters(args: argparse.Namespace) -> list[object]:
     return _create_default_adapters(args)
 
 
@@ -1106,6 +1110,7 @@ _CLIENT_PLATFORM_MAP = {
     "aionui": "aionui",
     "pi": "pi",
     "claude": "claude",
+    "orca": "orca",
 }
 _OPERATION_BODY_KEYS = frozenset(
     {
@@ -1141,7 +1146,7 @@ def _normalize_client_name(value: object) -> str:
     except KeyError as exc:
         raise ValueError(
             "--client 必须指定一个受支持的客户端："
-            "native、codex-native、cindy、aionui、pi 或 claude"
+            "native、codex-native、cindy、aionui、pi、claude 或 orca"
         ) from exc
 
 
@@ -1426,6 +1431,7 @@ def _run_operation_backend(
                 plan_path=getattr(args, "out", None),
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
+                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                 adapters=supplied_adapters,
                 app_server_factory=app_server_factory,
@@ -1438,6 +1444,7 @@ def _run_operation_backend(
                 plan_path=getattr(args, "plan", None),
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
+                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
                 plan_sha256=(
                     getattr(args, "authorized_plan_sha256", None)
                     or getattr(args, "plan_fingerprint", None)
@@ -1458,6 +1465,7 @@ def _run_operation_backend(
                 plan_path=getattr(args, "out", None),
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
+                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
                 clients_closed=bool(getattr(args, "clients_closed", False)),
                 timeout=float(getattr(args, "timeout", 30.0) or 30.0),
                 adapters=supplied_adapters,
@@ -1477,6 +1485,7 @@ def _run_operation_backend(
                 plan_path=getattr(args, "plan", None),
                 operation_home=getattr(args, "operation_home", None),
                 codex_home=getattr(args, "codex_home", None),
+                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
                 adapters=supplied_adapters,
                 verify_timeout=int(getattr(args, "verify_timeout", 180) or 0),
             )
@@ -1812,6 +1821,7 @@ def main(
             catalog_builder=pi_catalog_builder,
             delete_executor=pi_delete_executor,
             cleanup_service=service,
+            guard_adapters=tuple(adapters or ()),
         )
 
     if args.command == "delete" and _has_explicit_claude(args.platform):
@@ -1835,6 +1845,7 @@ def main(
             catalog_builder=claude_catalog_builder,
             delete_executor=claude_delete_executor,
             cleanup_service=service,
+            guard_adapters=tuple(adapters or ()),
         )
 
     if args.command == "records" and adapters is not None:
@@ -2582,11 +2593,13 @@ def _run_client_records(
     client = _normalize_client_name(getattr(args, "client", None))
     engines = tuple(getattr(args, "engine", ()) or ())
     try:
-        if client in {"pi", "claude"} and not active_adapters:
+        from .client_contracts import describe_adapter
+        if client in {"pi", "claude"} and not any(describe_adapter(adapter).client == client for adapter in active_adapters):
             inventory, contexts = _build_native_client_contexts(
                 args,
                 client=client,
                 engines=engines,
+                adapters=active_adapters,
             )
         elif client == "native" and active_adapters:
             inventory, contexts = _build_native_client_contexts(
@@ -2726,6 +2739,12 @@ def _run_client_records(
         for store in descriptor.native_stores:
             if (key := location_key(store.path)) is not None:
                 profile_locations_by_store.setdefault((store.backend, key), set()).update(locations)
+    diagnostic_profiles_by_store: dict[tuple[str, str], set[str]] = {}
+    for error in inventory.errors:
+        native = getattr(error, "store", None)
+        profile = location_key(getattr(error, "profile_root", None))
+        if native is not None and profile is not None and (root_key := location_key(native.path)) is not None:
+            diagnostic_profiles_by_store.setdefault((native.backend, root_key), set()).add(profile)
     rendered_targets: list[dict[str, Any]] = []
     total_classifications = {
         key: 0 for key in _CLIENT_RECORD_CLASSIFICATIONS
@@ -2767,6 +2786,15 @@ def _run_client_records(
                     native = reference.native_record.store
                     if (root_key := location_key(native.path)) is not None:
                         native_stores.add((native.backend, root_key))
+                elif reference.host == "local" and reference.path_namespace == "local" and reference.opaque_native_locator:
+                    # Correlate an unproven local candidate with its precise
+                    # source error for diagnosis only. This never creates a
+                    # native identity, a catalog candidate or writer scope.
+                    if is_local_absolute_locator(reference.opaque_native_locator):
+                        candidate_key = location_key(reference.opaque_native_locator)
+                        profiles = diagnostic_profiles_by_store.get((reference.engine, candidate_key), set())
+                        if profiles.intersection(profile_locations_by_source.get(location_key(reference.source), ())):
+                            native_stores.add((reference.engine, candidate_key))
             sources = [reference.source for reference in target.references]
             sources.extend(row["database"] for row in target.project_row_evidence if row.get("database"))
             for session in context.frontend_sessions:
@@ -3441,6 +3469,12 @@ def _write_claude_session_catalog(
         )
 
 
+def _session_guard_adapters(args: argparse.Namespace, adapters: Sequence[object] = ()) -> tuple[object, ...]:
+    from .operation_guard_sources import current_guard_sources
+    return current_guard_sources(adapters, orca_roots=getattr(args, "orca_root", ()) or (),
+                                 appdata=getattr(args, "appdata", None))
+
+
 def _run_pi_delete(
     args: argparse.Namespace,
     *,
@@ -3450,6 +3484,7 @@ def _run_pi_delete(
     catalog_builder: Any | None,
     delete_executor: Any | None,
     cleanup_service: CleanupService,
+    guard_adapters: Sequence[object] = (),
 ) -> int:
     """Handle Pi's separate, file-level delete contract without Codex RPC."""
 
@@ -3462,6 +3497,7 @@ def _run_pi_delete(
             "pi",
             catalog,
             catalog_builder=catalog_factory,
+            active_adapters=_session_guard_adapters(args, guard_adapters),
         )
         plan = cleanup_context.session_native_plan
         assert plan is not None
@@ -3661,6 +3697,7 @@ def _run_claude_delete(
     catalog_builder: Any | None,
     delete_executor: Any | None,
     cleanup_service: CleanupService,
+    guard_adapters: Sequence[object] = (),
 ) -> int:
     """Handle Claude's separate, manifest-level local delete contract."""
 
@@ -3673,6 +3710,7 @@ def _run_claude_delete(
             "claude",
             catalog,
             catalog_builder=catalog_factory,
+            active_adapters=_session_guard_adapters(args, guard_adapters),
         )
         plan = cleanup_context.session_native_plan
         assert plan is not None

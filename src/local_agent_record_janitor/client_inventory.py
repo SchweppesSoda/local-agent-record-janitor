@@ -573,6 +573,16 @@ def restrict_client_target(
             if target.capability.frontend_project_delete and descriptor.limit_for(target.engine).frontend_project_delete:
                 current = replace(current, frontend_project_delete=True)
             capability = restrict_capability(capability, current)
+    if target.record_key is not None:
+        failures = tuple(error for error in inventory.errors if isinstance(error, SourceFailure)
+                         and error.blocks_delete and error.store is not None
+                         and error.store.backend == target.engine
+                         and error.store.canonical_path == target.record_key.store.canonical_path)
+        if failures and capability.native_delete:
+            capability = replace(capability, native_delete=False, blockers=(*capability.blockers, {
+                "blocker_code": "client_capability_limit", "scope": "record",
+                "message": "; ".join(dict.fromkeys(error.message for error in failures)),
+            }))
     return _retarget_target(target, capability) if capability != target.capability else target
 
 
@@ -848,6 +858,18 @@ def build_native_client_inventory(
     # projected targets. Pi/Claude catalogs carry Cindy reference objects
     # rather than FrontendSessionRecord instances, so their legacy projection
     # remains target-only until a frontend adapter is explicitly selected.
+    from .client_capability_guards import ClientCapabilityLimits
+    guard_limits = ClientCapabilityLimits.from_adapters(
+        tuple({id(a): a for a in (*adapters, *guard_adapters)}.values()))
+    native_store_keys = {(engine, canonical_path(root)) for r in catalog_records
+                         if (root := _native_record_root(r, engine)) is not None}
+    source_errors = tuple(error for error in guard_limits.native_source_failures
+                         if (error.store.backend, error.store.canonical_path) in native_store_keys)
+    native_descriptors = tuple(ClientDescriptor("native", profile_root=root,
+                native_stores=(StoreKey(engine, root, kind="session_root" if engine == "pi" else "config_dir"),),
+                inventory_engines=(engine,), capability_limits=(capability,))
+                for root in dict.fromkeys(_native_record_root(r, engine) for r in catalog_records)
+                if root is not None) if engine != "codex" else ()
     inventory = ClientInventory(
         client=client,
         engines=(engine,),
@@ -857,15 +879,10 @@ def build_native_client_inventory(
         unmapped_frontend_sessions=(),
         targets=tuple(targets),
         capabilities={engine: capability},
-        errors=(tuple(getattr(catalog, "errors", ()) or ())
-                if engine == "codex" else ()),
+        errors=tuple(dict.fromkeys((*getattr(catalog, "errors", ()), *source_errors)))
+                if engine == "codex" else source_errors,
         frontend_snapshots=(),
-        descriptors=tuple(describe_adapter(a) for a in {id(a): a for a in (*adapters, *guard_adapters)}.values())
-            if engine == "codex" else tuple(ClientDescriptor("native", profile_root=root,
-                native_stores=(StoreKey(engine, root, kind="session_root" if engine == "pi" else "config_dir"),),
-                inventory_engines=(engine,), capability_limits=(capability,))
-                for root in dict.fromkeys(_native_record_root(r, engine) for r in catalog_records)
-                if root is not None),
+        descriptors=(*guard_limits.descriptors, *native_descriptors),
         references=tuple({r.binding_key: r for r in native_references}.values()),
     )
     inventory = replace(inventory, targets=tuple(restrict_client_target(t, inventory) for t in inventory.targets))
