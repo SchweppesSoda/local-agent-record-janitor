@@ -28,6 +28,7 @@ from .base import (
 class CindyAdapter(FrontendAdapter):
     name = "cindy"
     supports_all_backends = True
+    inventory_engines = ("codex", "pi", "claude")
 
     def __init__(
         self,
@@ -218,14 +219,24 @@ class CindyAdapter(FrontendAdapter):
                 cindy_failures=catalog.failures,
             )
         if engine == "claude":
-            from ..claude_sessions import build_claude_session_catalog
-
-            return build_claude_session_catalog(
-                config_dir=self.cindy_root / "claude-home",
-                frontend_references=references,
-                reference_errors=catalog.failures,
-            )
+            return self.native_catalog_group(engine, (self,))
         return None
+
+    @staticmethod
+    def native_catalog_group(backend: str, adapters: Any) -> Any | None:
+        """Read shared Claude roots once with every selected profile's refs."""
+        if normalize_engine(backend) != "claude":
+            return None
+        from ..discovery import CindyProfile
+        from ..record_identity import canonical_path
+        from ..session_catalog_factory import build_claude_profile_catalog
+
+        return build_claude_profile_catalog(
+            tuple(CindyProfile(root=a.cindy_root, database=a.database,
+                               codex_home=a.codex_home) for a in adapters),
+            reference_catalogs={canonical_path(a.database): a._reference_catalog()
+                                for a in adapters},
+        )
 
     def native_catalog(self) -> Any | None:
         """Build the configured Cindy native catalog."""

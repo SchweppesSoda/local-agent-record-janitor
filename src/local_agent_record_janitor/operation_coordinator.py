@@ -1124,6 +1124,7 @@ class OperationCoordinator:
         """
 
         from .client_inventory import (
+            _build_native_catalog,
             build_client_engine_contexts,
             build_client_inventory,
         )
@@ -1189,12 +1190,9 @@ class OperationCoordinator:
                 _catalog: Any = catalog,
                 _adapters: tuple[Any, ...] = adapters,
             ) -> Any:
-                for adapter in _adapters:
-                    builder = getattr(adapter, "native_catalog_for", None)
-                    if callable(builder):
-                        fresh = builder(_engine)
-                        if fresh is not None:
-                            return fresh
+                fresh = _build_native_catalog(_adapters, client, _engine)
+                if fresh is not None:
+                    return fresh
                 # The catalog was already proven by the inventory builder. A
                 # fallback keeps injected/native test adapters compatible; the
                 # real Cindy adapter always reaches the fresh builder above.
@@ -1254,6 +1252,8 @@ class OperationCoordinator:
         databases: dict[tuple[str, str], tuple[Path, Path]] = {}
         for session in getattr(inventory, "frontend_sessions", ()):
             if str(getattr(session, "platform", "")).casefold() != "cindy":
+                continue
+            if normalize_engine(getattr(session, "backend", "")) not in {"codex", "pi", "claude"}:
                 continue
             status = str(getattr(session, "status", "") or "").casefold()
             details = getattr(session, "details", {})
@@ -2542,6 +2542,7 @@ class OperationCoordinator:
             self._action_document(
                 context, action,
                 manual_record=getattr(manual_actions.get(action.action_id), "root", None),
+                client=str(scope["client"]),
             )
             for action in candidates
         ]
@@ -2650,14 +2651,14 @@ class OperationCoordinator:
         return payload
 
     def _action_document(
-        self, context: Any, action: Any, *, manual_record: Any = None,
+        self, context: Any, action: Any, *, manual_record: Any = None, client: str | None = None,
     ) -> dict[str, Any]:
         raw = getattr(
             action, "to_dict", lambda: {"action_id": str(action.action_id)}
         )()
         result = self._metadata(raw)
         result["binding"] = self._metadata(action_binding(action))
-        result["classification"] = self._classification(context, action, manual_record)
+        result["classification"] = self._classification(context, action, manual_record, client)
         return result
 
     def _batch_scope_metadata(
@@ -2690,7 +2691,7 @@ class OperationCoordinator:
         return metadata
 
     @staticmethod
-    def _classification(context: Any, action: Any, manual_record: Any = None) -> str:
+    def _classification(context: Any, action: Any, manual_record: Any = None, client: str | None = None) -> str:
         from .inventory import ManagedConversation, classify_managed_conversation
 
         if str(
@@ -2721,7 +2722,17 @@ class OperationCoordinator:
         if any("index" in value for value in types):
             return "stale_index"
         if not wanted and isinstance(manual_record, ManagedConversation):
-            return classify_managed_conversation(manual_record).value
+            return classify_managed_conversation(manual_record, frontend_required=client not in {"native", "codex-desktop"}).value
+        if types and types <= {"pi_session", "claude_session"}:
+            from .record_identity import classify_record_state
+            payload = getattr(getattr(action, "impact", None), "external_action_payload", {}) or {}
+            category = payload.get("reference_classification", payload.get("classification", "unreferenced"))
+            return classify_record_state(
+                native_present=category != "frontend_only",
+                frontend_present=category in {"live_current_reference", "live_historical_reference", "deleted_frontend_reference", "frontend_only"},
+                frontend_required=client not in {"pi", "claude", "native"},
+                corrupt_unreadable=category == "inventory_incomplete",
+            ).value
         return "orphan_native"
 
     @staticmethod

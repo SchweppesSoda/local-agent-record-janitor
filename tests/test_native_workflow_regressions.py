@@ -93,6 +93,22 @@ class NativeWorkflowRegressions(unittest.TestCase):
         self.assertFalse(next(r for r in catalog.records if r.thread_id == "delete").deletable)
         self.assertIn("lineage_conflict", next(r for r in catalog.records if r.thread_id == "child").blocker_codes)
 
+    def test_standalone_codex_root_needs_no_desktop_frontend_reference(self):
+        self.fixture([("root", "work", None)])
+        with closing(sqlite3.connect(self.home / "sqlite" / "codex-dev.db")) as db:
+            db.execute("DELETE FROM local_thread_catalog")
+            db.commit()
+        for selector in ("--client", "--platform"):
+            output = StringIO()
+            status = main(["records", selector, "native", "--json"], adapters=(self.adapter,),
+                          stdout=output, stderr=StringIO())
+            self.assertEqual(status, 0, output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["records"][0]["classification"], "healthy")
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        plan = coordinator.plan_operation(client="native", record_ids=("root",),
+            adapters=(self.adapter,), plan_path=self.root / "standalone.json")
+        self.assertEqual(plan["actions"][0]["classification"], "healthy")
+
     def test_sqlite_only_parent_is_in_the_same_graph(self):
         self.fixture([("root", "work", None), ("child", "work", None)])
         with closing(sqlite3.connect(self.home / "state_5.sqlite")) as db:

@@ -63,7 +63,9 @@ The high-level operation output is grouped by project, engine, and physical
 location and contains metadata only. It uses the stable classifications
 `healthy`, `orphan_native`, `orphan_frontend`, `orphan_project`,
 `broken_relation`, `stale_index`, `partial_remote`, `corrupt_unreadable`, and
-`unknown_operation`. These are stable classifications, not a promise that
+`unknown_operation`, and `unverified`. `unverified` reports an unsupported backend
+or unproven native ownership and never grants deletion capability. These are
+inventory classifications, not a promise that
 every adapter discovers or deletes every class. Unsupported backends and
 unproven schemas are inventory-only. AionUI orphan project/conversations rows
 are executable only when the adapter proves the supported schema, immutable

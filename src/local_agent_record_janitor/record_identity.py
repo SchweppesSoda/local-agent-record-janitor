@@ -50,8 +50,6 @@ def normalize_client(value: object) -> str:
         "codex": "native",
         "codex-cli": "native",
         "codex-native": "native",
-        "chatgpt": "native",
-        "chatgpt-desktop": "native",
         "desktop": "codex-desktop",
         "aion-ui": "aionui",
         "claude-code": "claude",
@@ -344,6 +342,7 @@ class RecordClassification(str, Enum):
     PARTIAL_REMOTE = "partial_remote"
     CORRUPT_UNREADABLE = "corrupt_unreadable"
     UNKNOWN_OPERATION = "unknown_operation"
+    UNVERIFIED = "unverified"
 
 
 def classify_record_state(
@@ -351,6 +350,7 @@ def classify_record_state(
     native_present: bool,
     frontend_present: bool,
     native_parent_present: bool = False,
+    frontend_required: bool = True,
     project_present: bool = True,
     relation_broken: bool = False,
     index_stale: bool = False,
@@ -370,7 +370,7 @@ def classify_record_state(
         return RecordClassification.BROKEN_RELATION
     if index_stale:
         return RecordClassification.STALE_INDEX
-    if native_present and (frontend_present or native_parent_present):
+    if native_present and (frontend_present or native_parent_present or not frontend_required):
         return RecordClassification.HEALTHY
     if native_present:
         return RecordClassification.ORPHAN_NATIVE

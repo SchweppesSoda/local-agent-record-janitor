@@ -79,15 +79,22 @@ stale_index
 partial_remote
 corrupt_unreadable
 unknown_operation
+unverified
 ```
 
 Codex child records do not need their own frontend reference to be `healthy`.
 The complete catalog resolves their parent chain within the same native store
 before project or record filtering. Each ancestor must have a native index row
 or a verifiable rollout; a frontend reference or graph-only placeholder is not
-proof that the parent exists. Unreferenced roots retain `orphan_native`, as do
+proof that the parent exists. In third-party client scope, unreferenced roots retain `orphan_native`, as do
 children whose immediate native parent is confirmed missing. Unknown or
 conflicting parent chains are `broken_relation`, not confirmed orphans.
+Normal standalone Codex/Pi/Claude records are `healthy` without frontend
+references. Unknown backends or unverified native ownership are `unverified`.
+Unknown backends remain inventory-only; unverified native roots cannot grant a
+native writer, even when a separate exact frontend writer is supported.
+Consumers must tolerate additional inventory
+classifications and must never treat a classification as write authorization.
 
 Record metadata includes `is_subagent`, `parent_thread_ids`,
 `descendant_thread_ids`, and `lineage_status` (`root`, `known`, `missing_parent`,
@@ -96,6 +103,18 @@ Record metadata includes `is_subagent`, `parent_thread_ids`,
 explicit anomaly findings retain their anomaly classification. Classification
 is inventory metadata, not deletion authorization: exact scope, descendant
 closure, parent protection, and frozen-plan checks still apply.
+
+`frontend_reference_ids` retains compatibility display IDs;
+`frontend_binding_keys` qualifies each binding by client, database, frontend ID,
+engine, native target, reference kind and historical boundary. Matching, grouping
+and record selection use these qualified bindings. Native catalog errors and
+per-record blockers remain visible through the client projection. Every selected
+profile participates in initial inventory and revalidation. Cindy's default
+inventory also probes supported native engines with no remaining frontend rows.
+
+Pi `parentSession` is fork provenance, not a recursive deletion rule. Claude
+subagent files are members of a session manifest. Neither relationship inherits
+Codex's descendant deletion semantics. See [adapter contracts](adapters.md).
 
 An unsupported AionUI backend is still inventoried and reported as
 `inventory_only`/`unsupported`; the operation is not marked deleted. An

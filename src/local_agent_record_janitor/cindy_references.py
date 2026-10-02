@@ -215,9 +215,7 @@ def build_cindy_reference_catalog(
                 raise CindyReferenceError("sessions.id is duplicated")
             sessions[session_id] = row
             kind = _agent_kind(row["agent_kind"], "sessions.agent_kind")
-            backend = _BACKENDS.get(kind)
-            if backend is None:
-                continue
+            backend = _BACKENDS.get(kind, f"unsupported:{kind}")
             references.append(
                 _reference(
                     database,
@@ -253,8 +251,8 @@ def build_cindy_reference_catalog(
             native_id = _optional_native_id(
                 payload.get("fromSdkSessionId"), "agent_switch.fromSdkSessionId"
             )
-            backend = _BACKENDS.get(kind)
-            if backend is None or native_id is None:
+            backend = _BACKENDS.get(kind, f"unsupported:{kind}")
+            if native_id is None:
                 continue
             references.append(
                 _reference(

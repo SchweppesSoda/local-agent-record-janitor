@@ -8,6 +8,7 @@ No transcript/body is read.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -64,6 +65,8 @@ class ClientTarget:
     parent_thread_ids: tuple[str, ...] = ()
     descendant_thread_ids: tuple[str, ...] = ()
     lineage_status: str | None = None
+    # Display IDs are not identities: one UI row can retain several bindings.
+    frontend_binding_keys: tuple[str, ...] = ()
 
     @property
     def record_id(self) -> str | None:
@@ -80,6 +83,7 @@ class ClientTarget:
         if self.native_thread_id:
             values.append(self.native_thread_id)
         values.extend(self.frontend_reference_ids)
+        values.extend(self.frontend_binding_keys)
         return tuple(dict.fromkeys(value for value in values if value))
 
     def to_dict(self) -> dict[str, Any]:
@@ -107,6 +111,7 @@ class ClientTarget:
                 and lineage_status not in {"unknown", "conflict"}
             ),
             "frontend_reference_ids": list(self.frontend_reference_ids),
+            "frontend_binding_keys": list(self.frontend_binding_keys),
             "classification": self.classification.value,
             "capability": self.capability.to_dict(),
             "action_ids": list(self.action_ids),
@@ -308,7 +313,12 @@ def build_client_engine_contexts(
             adapter_list, client=selected_client, engines=engines
         )
     requested = _normalize_engines(engines)
-    engine_names = requested or inventory.engines
+    engine_names = requested or tuple(dict.fromkeys((
+        *inventory.engines,
+        *(normalize_engine(engine) for adapter in adapter_list
+          if _adapter_client(adapter) == selected_client
+          for engine in getattr(adapter, "inventory_engines", ())),
+    )))
     catalogs = native_catalogs or {}
     declared = writer_capabilities or {}
     contexts: list[ClientEngineContext] = []
@@ -329,6 +339,10 @@ def build_client_engine_contexts(
                 selected_client,
                 normalized_engine,
             )
+        if catalog is None and normalized_engine == "codex":
+            catalog = replace(inventory.catalog, records=tuple(
+                r for r in inventory.records if _record_engine(r) == "codex"
+            ))
         capability = _declared_capability(
             declared,
             selected_client,
@@ -378,7 +392,38 @@ def build_client_engine_contexts(
                 capability=capability,
             )
         )
-    return tuple(contexts)
+    native_errors = tuple(
+        InventoryFailure(
+            source=f"{context.engine}-catalog:{getattr(error, 'source', 'inventory')}",
+            codex_home=Path(getattr(error, "session_root", None)
+                            or getattr(error, "config_dir", None)
+                            or getattr(error, "agent_dir", None)
+                            or getattr(error, "codex_home", None)
+                            or getattr(error, "profile_root", ".")),
+            message=str(getattr(error, "message", "Native inventory failed")),
+            database=getattr(error, "database", None),
+            error_type=str(getattr(error, "error_type", type(error).__name__)),
+            blocks_delete=bool(getattr(error, "blocks_delete", True)),
+        )
+        for context in contexts
+        for error in getattr(context.native_catalog, "errors", ())
+    )
+    targets = _deduplicate_targets(target for context in contexts for target in context.targets)
+    projects = {p.stable_id: p for p in inventory.projects}
+    projects.update({t.project_key.stable_id: t.project_key for t in targets if t.project_key})
+    native_bindings = {key for target in targets if target.record_key is not None
+                       for key in target.frontend_binding_keys}
+    inventory = replace(
+        inventory, targets=targets, projects=tuple(projects.values()),
+        engines=tuple(context.engine for context in contexts),
+        unmapped_frontend_sessions=tuple(
+            s for s in inventory.unmapped_frontend_sessions
+            if _frontend_binding_key(s) not in native_bindings
+        ),
+        capabilities={c.engine: c.capability for c in contexts},
+        errors=tuple(dict.fromkeys((*inventory.errors, *native_errors))),
+    )
+    return tuple(replace(context, inventory=inventory) for context in contexts)
 
 
 build_client_contexts = build_client_engine_contexts
@@ -404,11 +449,24 @@ def _build_native_catalog(
     client: str,
     engine: str,
 ) -> object | None:
-    """Ask an adapter for one engine catalog without a second frontend scan."""
-
-    for adapter in adapters:
-        if _adapter_client(adapter) != client:
+    """Collect every selected profile, retaining native catalog failures."""
+    selected = tuple(a for a in adapters if _adapter_client(a) == client)
+    values: list[Any] = []
+    handled: set[int] = set()
+    for adapter in selected:
+        if id(adapter) in handled:
             continue
+        group_builder = getattr(adapter, "native_catalog_group", None)
+        if callable(group_builder):
+            peers = tuple(a for a in selected if type(a) is type(adapter))
+            try:
+                value = group_builder(engine, peers)
+            except Exception as exc:
+                raise ClientInventoryError(f"{client}/{engine} native catalog group failed ({type(exc).__name__})") from exc
+            if value is not None:
+                values.append(value)
+                handled.update(id(a) for a in peers)
+                continue
         if _adapter_engine(adapter) not in {engine, "codex"}:
             # Multi-backend frontend adapters often advertise their default
             # backend as codex; their explicit engine builder is still valid.
@@ -418,10 +476,11 @@ def _build_native_catalog(
         if callable(builder):
             try:
                 value = builder(engine)
-            except Exception:
-                value = None
+            except Exception as exc:
+                raise ClientInventoryError(f"{client}/{engine} native catalog failed ({type(exc).__name__})") from exc
             if value is not None:
-                return value
+                values.append(value)
+            continue
         for name in ("engine_catalog", "native_catalog"):
             builder = getattr(adapter, name, None)
             if not callable(builder):
@@ -431,13 +490,27 @@ def _build_native_catalog(
             except TypeError:
                 try:
                     value = builder(engine)
-                except Exception:
-                    value = None
-            except Exception:
-                value = None
+                except Exception as exc:
+                    raise ClientInventoryError(f"{client}/{engine} native catalog failed ({type(exc).__name__})") from exc
+            except Exception as exc:
+                raise ClientInventoryError(f"{client}/{engine} native catalog failed ({type(exc).__name__})") from exc
             if value is not None:
-                return value
-    return None
+                values.append(value)
+                break
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    catalogs = tuple(child for value in values for child in getattr(value, "catalogs", (value,)))
+    if engine == "pi":
+        from .pi_sessions import PiMultiRootCatalog
+        return PiMultiRootCatalog(catalogs=catalogs)
+    if engine == "claude":
+        from .claude_sessions import ClaudeMultiRootCatalog
+        return ClaudeMultiRootCatalog(catalogs=catalogs, root_errors=tuple(
+            error for value in values for error in getattr(value, "root_errors", ())
+        ))
+    raise ClientInventoryError(f"No multi-store catalog contract for engine {engine!r}")
 
 
 def _native_catalog_records(catalog: object | None) -> tuple[Any, ...]:
@@ -490,6 +563,9 @@ def _catalog_has_verified_native_root(
     catalog: object | None,
     engine: str,
 ) -> bool:
+    nested = getattr(catalog, "catalogs", None)
+    if nested is not None:
+        return bool(nested) and all(_catalog_has_verified_native_root(item, engine) for item in nested)
     records = _native_catalog_records(catalog)
     root = _catalog_root(catalog, engine)
     roots = {
@@ -504,7 +580,7 @@ def _catalog_has_verified_native_root(
         if roots and roots != {root_key}:
             return False
         return True
-    return len(roots) == 1
+    return bool(roots) and all(_native_record_root(record, engine) is not None for record in records)
 
 
 def _constrain_capability(
@@ -519,7 +595,11 @@ def _constrain_capability(
     if client in {"aionui", "cindy"} and engine in {"codex", "pi", "claude"}:
         verified = _catalog_has_verified_native_root(catalog, engine)
         if not verified and capability.native_delete:
-            return _capability_for(client, engine)
+            return replace(capability, native_delete=False, blockers=(
+                *capability.blockers,
+                {"blocker_code": NATIVE_ROOT_UNVERIFIED, "scope": "native_root",
+                 "message": "No storage-qualified native catalog is available"},
+            ))
         if client == "aionui" and engine in {"pi", "claude"} and not verified:
             return _capability_for(client, engine)
     return capability
@@ -613,7 +693,8 @@ def build_client_inventory(
         proxies.append(
             _SnapshotAdapter(
                 source=adapter,
-                rows=rows,
+                rows=tuple(row for row in rows if _session_engine(row) == "codex"),
+                frontend_rows=rows,
                 codex_home=home,
                 database=database or home / "state_5.sqlite",
             )
@@ -624,7 +705,7 @@ def build_client_inventory(
     home_keys = {_path_key(proxy.codex_home) for proxy in proxies}
     all_frontend = tuple(
         sorted(
-            (session for proxy in proxies for session in proxy.rows),
+            (session for proxy in proxies for session in proxy.frontend_rows),
             key=_frontend_sort_key,
         )
     )
@@ -640,7 +721,8 @@ def build_client_inventory(
         and _record_belongs_to_client(record, selected_client, home_keys)
     )
     unmapped = tuple(
-        session for session in catalog.unmapped_frontend_sessions
+        session for session in (*catalog.unmapped_frontend_sessions,
+                                *(s for s in all_frontend if _session_engine(s) != "codex"))
         if not requested_engines or _session_engine(session) in requested_engines
     )
 
@@ -832,12 +914,7 @@ def _select_record_ids(
                 f"{len(matches)} storage-qualified targets"
             )
         target = matches[0]
-        identity = (
-            target.record_key.value if target.record_key is not None
-            else target.frontend_reference_ids[0]
-            if target.frontend_reference_ids
-            else target.native_thread_id
-        )
+        identity = _target_identity(target)
         if identity not in seen:
             seen.add(identity)
             selected.append(target)
@@ -895,22 +972,11 @@ def _bind_native_targets(
     bound_refs = {
         reference_id
         for target in native_targets
-        for reference_id in target.frontend_reference_ids
-    }
-    bound_native_ids = {
-        (target.native_thread_id, target.engine)
-        for target in native_targets
-        if target.native_thread_id
+        for reference_id in target.frontend_binding_keys
     }
     residual: list[ClientTarget] = []
     for target in inventory_targets:
-        if bound_refs.intersection(target.frontend_reference_ids):
-            continue
-        if (
-            target.record_key is None
-            and target.native_thread_id
-            and (target.native_thread_id, target.engine) in bound_native_ids
-        ):
+        if target.frontend_binding_keys and set(target.frontend_binding_keys) <= bound_refs:
             continue
         residual.append(_retarget_target(target, capability))
     return _deduplicate_targets((*native_targets, *residual))
@@ -971,6 +1037,8 @@ def _target_from_native_record(
         native_present=native_present,
         frontend_present=bool(references),
         project_present=project is not None,
+        frontend_required=client not in {"native", "pi", "claude"},
+        corrupt_unreadable=getattr(record, "reference_classification", None) == "inventory_incomplete",
     )
     actions: list[str] = []
     native_action_id = getattr(record, "action_id", None)
@@ -1003,8 +1071,15 @@ def _target_from_native_record(
         classification=classification,
         capability=capability,
         action_ids=tuple(dict.fromkeys(actions)),
-        blocker_codes=capability.blocker_codes,
-        blockers=capability.blockers,
+        blocker_codes=tuple(dict.fromkeys((
+            *capability.blocker_codes,
+            *(("native_record_blocked",) if not getattr(record, "deletable", True) else ()),
+        ))),
+        blockers=(*capability.blockers, *(
+            {"blocker_code": "native_record_blocked", "message": str(message)}
+            for message in getattr(record, "blockers", ())
+        )),
+        frontend_binding_keys=tuple(_frontend_binding_key(s) for s in references),
     )
 
 
@@ -1063,26 +1138,41 @@ def _native_record_frontend_sessions(
         raw_references = getattr(record, "frontend_references", ())
     if not raw_references:
         raw_references = getattr(record, "references", ())
-    wanted_ids = {
-        value
-        for reference in raw_references
-        if (value := _frontend_reference_id(reference)) is not None
-    }
-    selected: list[FrontendSessionRecord] = []
-    for session in frontend_sessions:
-        if _session_engine(session) != engine:
-            continue
-        if (
-            session.platform_session_id in wanted_ids
-            or session.thread_id == record_id
-        ):
-            selected.append(session)
-    if wanted_ids:
-        return _deduplicate_frontend_sessions(selected)
+    def matches_reference(session: FrontendSessionRecord, reference: Any) -> bool:
+        def field(name: str) -> Any:
+            return reference.get(name) if isinstance(reference, Mapping) else getattr(reference, name, None)
+        database = field("database")
+        return bool(database) and canonical_path(database) == canonical_path(session.database) and (
+            _frontend_reference_id(reference) == session.platform_session_id
+            and (field("native_session_id") or field("session_id") or record_id) == session.thread_id
+            and (field("boundary_id") or None) == (session.details.get("boundary_id") or None)
+            and (field("reference_kind") or "current") == (session.details.get("reference_kind") or "current")
+        )
+
+    def qualified(session: FrontendSessionRecord) -> bool:
+        if raw_references:
+            return any(matches_reference(session, reference) for reference in raw_references)
+        # Do not guess a Pi/Claude root from an adapter's Codex home.
+        root = _native_record_root(record, engine)
+        declared = session.details.get("native_storage_root")
+        if root is not None and declared:
+            return canonical_path(root) == canonical_path(declared)
+        return False
+
     return _deduplicate_frontend_sessions(
         session
         for session in frontend_sessions
-        if _session_engine(session) == engine and session.thread_id == record_id
+        if _session_engine(session) == engine and qualified(session)
+        and (bool(raw_references) or session.thread_id == record_id)
+    )
+
+
+def _frontend_binding_key(session: FrontendSessionRecord) -> str:
+    return json.dumps(
+        (normalize_client(session.platform), canonical_path(session.database),
+         session.platform_session_id, _session_engine(session), session.thread_id,
+         session.details.get("reference_kind", "current"), session.details.get("boundary_id")),
+        separators=(",", ":"),
     )
 
 
@@ -1108,13 +1198,9 @@ def _deduplicate_frontend_sessions(
     sessions: Iterable[FrontendSessionRecord],
 ) -> tuple[FrontendSessionRecord, ...]:
     result: list[FrontendSessionRecord] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[str] = set()
     for session in sessions:
-        key = (
-            str(session.platform),
-            str(session.database).casefold(),
-            str(session.platform_session_id),
-        )
+        key = _frontend_binding_key(session)
         if key in seen:
             continue
         seen.add(key)
@@ -1220,7 +1306,7 @@ def _target_identity(target: ClientTarget) -> str:
     if target.frontend_reference_ids:
         return (
             f"{target.client}:{target.engine}:frontend:"
-            + "|".join(sorted(target.frontend_reference_ids))
+            + "|".join(sorted(target.frontend_binding_keys or target.frontend_reference_ids))
         )
     return f"{target.client}:{target.engine}:record:{target.native_thread_id or ''}"
 
@@ -1245,6 +1331,7 @@ def _deduplicate_targets(
                     (*current.frontend_reference_ids, *target.frontend_reference_ids)
                 )
             ),
+            frontend_binding_keys=tuple(dict.fromkeys((*current.frontend_binding_keys, *target.frontend_binding_keys))),
             action_ids=tuple(dict.fromkeys((*current.action_ids, *target.action_ids))),
             blocker_codes=tuple(
                 dict.fromkeys((*current.blocker_codes, *target.blocker_codes))
@@ -1568,6 +1655,7 @@ def _target_from_record(client: str, record: ManagedConversation) -> ClientTarge
     )
     classification = classify_managed_conversation(
         record, project_present=project is not None,
+        frontend_required=client not in {"native", "codex-desktop"},
     ) if engine == "codex" else classify_record_state(
         native_present=native_present,
         frontend_present=bool(record.frontend_sessions),
@@ -1615,6 +1703,7 @@ def _target_from_record(client: str, record: ManagedConversation) -> ClientTarge
         parent_thread_ids=record.summary.parent_thread_ids,
         descendant_thread_ids=record.descendant_thread_ids,
         lineage_status=record.lineage_status,
+        frontend_binding_keys=tuple(_frontend_binding_key(s) for s in record.frontend_sessions),
     )
 
 
@@ -1635,9 +1724,13 @@ def _target_from_frontend(
         project_key=project,
         native_thread_id=session.thread_id,
         frontend_reference_ids=(f"{session.platform}:{session.platform_session_id}",),
-        classification=RecordClassification.ORPHAN_FRONTEND,
+        frontend_binding_keys=(_frontend_binding_key(session),),
+        classification=(RecordClassification.UNVERIFIED
+                        if capability.mode in {"inventory_only", "unsupported"}
+                        or NATIVE_ROOT_UNVERIFIED in capability.blocker_codes
+                        else RecordClassification.ORPHAN_FRONTEND),
         capability=capability,
-        action_ids=(
+        action_ids=() if capability.mode in {"inventory_only", "unsupported"} else (
             f"{session.platform}:{session.platform_session_id}",
             *(
                 ("delete_frontend_reference",)

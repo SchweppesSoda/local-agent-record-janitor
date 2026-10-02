@@ -1,6 +1,84 @@
 # Adapter 贡献指南
 
-Adapter 用于把一个外部 Agent 平台的删除状态转换为保守的 Codex `Finding`。它不能直接删除前端或 Codex 数据。Codex Desktop 宿主状态是核心 native adapter 的内建、可选版本探测层，不是第三方 adapter 可仿照后直接写库的通用授权。
+接入一个客户端不等于接入一个引擎。客户端可以运行多个引擎、使用多个 profile，
+也可以与独立 CLI 共用存储。适配器只提供已验证的发现和归属证据；写入必须交给对应
+引擎或 frontend mutation family 的独立执行器。不能因为新客户端也使用 Codex，
+就继承 Cindy 的目录、引用、进程归属或删除规则。
+
+## 通用接入契约
+
+| 角色 | 必须提供的证据 | 不得推导的结论 |
+|---|---|---|
+| 客户端发现与引用 | client/profile、数据库或状态文件、原始 backend、current/history/restore 引用及稳定定位 | 无当前 UI 引用不等于孤儿；显示 ID 不能跨数据库去重 |
+| 引擎清单 | storage-qualified native identity、完整性、关系类型、文件/index/manifest、逐记录 blockers | 同名 ID 不等于同一记录；有 parent 不等于级联删除 |
+| 运行归属 | 真实写入方、owner process root、进程树、host/runtime | 窗口关闭不等于后台 writer 已停止；native root 不等于客户端 profile root |
+| 执行与验证 | 注册的 mutation family、冻结范围/指纹、漂移检查、未知结果恢复和最终验证 | 能盘点不等于能删除；单个路径消失不等于所有副本或引用清空 |
+
+本库已有接口包括 `list_sessions`/`snapshot_sessions`、`native_catalog_for`、
+`registered_capability` 与 `owner_process_root`。`inventory_engines` 声明默认需要
+检查的原生后端，避免前端引用全删后漏掉原生残留。多个 profile 共用 native root 时，
+可以通过 `native_catalog_group` 合并引用证据后一次构建清单。共享 root 中无该客户端
+归属证据的独立会话不能归入该客户端的项目删除范围。
+
+默认发现仍由显式代码注册，尚不是可动态加载任意客户端的插件系统。
+下面的 Codex `Finding` 接口是既有 compatibility adapter，不是所有引擎的必选接口。
+
+### 身份、错误与能力
+
+- 原生身份至少包含 engine、规范化 store 和完整 native ID；Pi 还包含精确 JSONL 路径。
+- 前端绑定身份包含 client、数据库、前端 ID、engine、native target、引用种类和历史
+  boundary。`cindy:ID` 只是兼容显示名；不能据此合并不同 profile 或 current/history。
+- 所有 profile 都必须进入清单与重验证；异常不得被吞成空清单。可归属的错误限制到其
+  store；无法定位的 builder 异常阻止该次操作，不能复用旧清单冒充成功。
+- 原始 backend 未被客户端适配器验证时，只能 inventory-only。Cindy 用
+  `unsupported:<原始 agent_kind>` 保留未知值，避免公共引擎别名意外恢复删除能力。
+- `healthy`、`unreferenced` 和 `cleanup_eligible` 分别是分类、引用状态、可选择性；
+  都不能替代 plan/apply 的范围和删除授权。
+- 当前 host/path 模型只适用于本地执行。接入 WSL/SSH/远端存储前必须显式建模 host、
+  路径命名空间和执行端，不能把远端路径直接交给本机 `Path`。
+
+### 关系语义
+
+| 证据 | 盘点含义 | 删除范围 |
+|---|---|---|
+| Codex spawn/source parent | 同 store 的父链和后代图 | 依据实际 runtime 的 thread/delete 契约冻结后代，并验证结果 |
+| Pi `parentSession` | 分支来源文件路径 | 各 JSONL 独立批准；删除父文件不自动删除子文件 |
+| Claude session 下 `subagents/` | session 专属 manifest 成员 | 与已批准 session manifest 一起处理；不把消息 `parentUuid` 当另一个 session |
+| 前端 parent/pane/layout 关系 | UI、恢复或运行组织关系 | 没有已验证生命周期契约时只展示，不扩大 native 删除范围 |
+
+### 接入验收
+
+每个新客户端与引擎组合都要有临时存储用例覆盖：多 profile、同名 native/前端 ID、
+跨引擎同 ID、无前端行但原生存在、current/history/restore 的交叉引用、共享 root、
+不完整清单、未知 backend/别名、原生独立会话、并发漂移及 unknown 不重发。
+同时验证完整副本范围、关系语义、运行方检查、精确选择、schema 变化和跨进程恢复。
+没有 writer/运行归属/验证证据的组合保持 inventory-only；已知引擎名不能跳过验收。
+
+## Orca 与 Herdr 的接入边界
+
+当前没有 Orca 或 Herdr 专用 adapter/writer，也没有其本地实机兼容性验证。
+以下是根据上游公开实现得到的接入要求，不是支持声明。
+
+- **Orca**：上游枚举按账号隔离的 Codex homes，WSL homes 另走自己的发现路径；
+  session bridge 的链接实现优先 hardlink，失败后尝试 symlink。因此需要同时保留逻辑
+  store 身份和物理文件别名证据，检查所有受影响链接及 frontend 引用，不能按账号或单
+  一目录推导完整删除范围。本库已有部分链接保护，尚未建模 Orca 的完整桥接图。
+  依据：[account home discovery](https://github.com/stablyai/orca/blob/main/src/main/codex/codex-account-home-discovery.ts)、
+  [session link](https://github.com/stablyai/orca/blob/main/src/main/codex/codex-session-link.ts)。
+- **Herdr**：detach 后 server、pane 和 agent 可以继续运行；`session.json` 和 layout
+  snapshots 保留 native session 恢复引用。因此应识别 server/session/host 和真实 writer，
+  盘点恢复引用；关闭 pane 的 API 不能当作删除原生 conversation 的协议。
+  依据：[session state](https://herdr.dev/docs/session-state/)、
+  [socket API](https://herdr.dev/docs/socket-api/)。
+
+接入顺序是先确认真实版本和 schema，提供只读归属/引用清单，再验证 native writer 与
+关闭检查，最后开放精确删除及恢复。公共身份、错误与关系契约先保持一致；只有出现
+真实可复用实现时再提取 registry，避免为未验证的产品增加空壳支持。
+
+## 既有 Codex Finding adapter
+
+Codex compatibility adapter 将外部平台的删除状态转换为保守的 `Finding`，不能直接
+删除前端或 Codex 数据。Codex Desktop 私有宿主状态由独立、版本探测的实现负责。
 
 ## 最低要求
 

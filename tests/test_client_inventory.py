@@ -12,6 +12,10 @@ from unittest.mock import patch
 
 from local_agent_record_janitor.adapters import AionUIAdapter, CindyAdapter
 from local_agent_record_janitor.cli import main
+from local_agent_record_janitor.cleanup_service import CleanupService
+from local_agent_record_janitor.operation_coordinator import OperationCoordinator
+from local_agent_record_janitor.claude_sessions import build_claude_session_catalog, resolve_claude_paths
+from local_agent_record_janitor.pi_sessions import build_pi_session_catalog
 from local_agent_record_janitor.client_inventory import (
     ClientInventory,
     ClientTarget,
@@ -31,6 +35,7 @@ from local_agent_record_janitor.record_identity import (
     resolve_project_selector,
 )
 from tests.support import create_thread_index, write_rollout
+from tests.test_cindy_references import create_database
 
 
 @dataclass
@@ -147,6 +152,234 @@ def _create_aionui_database(path: Path) -> None:
 
 
 class ClientInventoryTests(unittest.TestCase):
+    def _engine_profile(self, root, engine, session_id, *, status="active", frontend_id="same-ui-id"):
+        home = root / "codex-home"
+        home.mkdir(parents=True)
+        database = root / "cindy.db"
+        create_database(database, [(frontend_id, session_id, status, "cc" if engine == "claude" else engine)])
+        if engine == "pi":
+            _write_pi_session(root / "pi-agent-home", session_id)
+        else:
+            _write_claude_session(root / "claude-home", session_id)
+        return CindyAdapter(database=database, codex_home=home, cindy_root=root)
+
+    def test_all_profiles_and_exact_bindings_survive_engine_projection_and_selection(self):
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sid = "11111111-1111-4111-8111-111111111111"
+                adapters = tuple(self._engine_profile(root / name, engine, sid) for name in ("one", "two"))
+                context = build_client_engine_contexts(adapters, client="cindy", engines=(engine,))[0]
+                self.assertEqual(len(context.native_records), 2)
+                self.assertEqual(len(context.targets), 2)
+                self.assertEqual(context.inventory.errors, ())
+                self.assertEqual(context.inventory.unmapped_frontend_sessions, ())
+                self.assertEqual(len({t.frontend_binding_keys for t in context.targets}), 2)
+                for target in context.targets:
+                    self.assertEqual(len(target.frontend_binding_keys), 1)
+                    self.assertFalse(target.to_dict()["cleanup_eligible"])
+                    self.assertIn("native_record_blocked", target.blocker_codes)
+                output = StringIO()
+                result = main(["records", "--client", "cindy", "--engine", engine, "--record-id",
+                               context.targets[1].record_key.value, "--json"], adapters=adapters,
+                              stdout=output, stderr=StringIO())
+                self.assertEqual(result, 0, output.getvalue())
+                data = json.loads(output.getvalue())
+                self.assertEqual(data["count"], 1)
+                self.assertEqual(data["records"][0]["record_key"]["value"], context.targets[1].record_key.value)
+
+    def test_multi_profile_plan_and_revalidation_retain_every_store(self):
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                ids = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
+                adapters = tuple(self._engine_profile(root / str(i), engine, sid, status="deleted")
+                                 for i, sid in enumerate(ids))
+                coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+                plan = coordinator.plan_operation(client="cindy", engines=(engine,), record_ids=ids,
+                    adapters=adapters, plan_path=root / "plan.json")
+                self.assertIn("actions", plan, plan)
+                actions = [a for a in plan["actions"] if a["kind"] == f"delete_{engine}_session"]
+                self.assertEqual(len(actions), 2, plan)
+                self.assertEqual(len({a["target"]["storage_id"] for a in actions}), 2)
+                live = coordinator._live[plan["operation_id"]]
+                for action in actions:
+                    context = live.action_contexts[action["action_id"]]
+                    fresh = context.session_catalog_builder()
+                    self.assertEqual({r.session_id for r in fresh.records}, set(ids))
+
+    def test_default_inventory_finds_native_sessions_without_frontend_rows(self):
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                adapter = self._engine_profile(Path(temporary), engine, "11111111-1111-4111-8111-111111111111")
+                with closing(sqlite3.connect(adapter.database)) as db:
+                    db.execute("DELETE FROM sessions")
+                    db.commit()
+                contexts = build_client_engine_contexts((adapter,), client="cindy")
+                targets = [t for context in contexts for t in context.targets]
+                self.assertEqual(len(targets), 1)
+                self.assertEqual(targets[0].engine, engine)
+                self.assertEqual(targets[0].classification, RecordClassification.ORPHAN_NATIVE)
+
+    def test_codex_and_pi_same_id_never_share_native_identity_or_capability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._engine_profile(Path(temporary), "pi", "same-id")
+            path = write_rollout(adapter.codex_home, "same-id", originator="cindy")
+            create_thread_index(adapter.codex_home, [{"id": "same-id", "rollout_path": str(path)}])
+            with closing(sqlite3.connect(adapter.database)) as db:
+                db.execute("INSERT INTO sessions(id,sdk_session_id,status,agent_kind) VALUES('codex-ui','same-id','active','codex')")
+                db.commit()
+            contexts = build_client_engine_contexts((adapter,), client="cindy")
+            targets = [t for context in contexts for t in context.targets]
+            self.assertEqual(len(targets), 2)
+            self.assertEqual({t.engine for t in targets}, {"codex", "pi"})
+            for target in targets:
+                self.assertEqual(target.engine, target.capability.engine)
+                self.assertEqual(len(target.frontend_binding_keys), 1)
+
+    def test_missing_current_binding_is_not_hidden_by_existing_historical_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "codex-home"
+            home.mkdir()
+            database = root / "cindy.db"
+            old = _write_pi_session(root / "pi-agent-home", "old")
+            create_database(database, [("ui", "missing", "active", "pi")], [
+                ("switch", "ui", {"fromAgentKind": "pi", "fromSdkSessionId": str(old)}, 1, None),
+            ])
+            adapter = CindyAdapter(database=database, codex_home=home, cindy_root=root)
+            context = build_client_engine_contexts((adapter,), client="cindy", engines=("pi",))[0]
+            self.assertEqual(len(context.targets), 2)
+            by_id = {t.record_id: t for t in context.targets}
+            self.assertEqual(by_id["missing"].classification, RecordClassification.ORPHAN_FRONTEND)
+            self.assertEqual(by_id["old"].classification, RecordClassification.HEALTHY)
+            self.assertFalse(by_id["old"].to_dict()["cleanup_eligible"])
+            self.assertNotEqual(by_id["missing"].frontend_binding_keys, by_id["old"].frontend_binding_keys)
+            old.unlink()
+            missing = build_client_engine_contexts((adapter,), client="cindy", engines=("pi",))[0]
+            selected = missing.inventory.select(record_ids=("missing", str(old)))
+            self.assertEqual(len(selected.targets), 2)
+
+    def test_native_catalog_failures_are_visible_and_cannot_report_success(self):
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sid = "11111111-1111-4111-8111-111111111111"
+                adapter = self._engine_profile(root, engine, sid, status="deleted")
+                bad = (root / "pi-agent-home" / "sessions" / "bad.jsonl" if engine == "pi"
+                       else root / "claude-home" / "projects" / "project" / "bad.jsonl")
+                bad.write_text("not a session", encoding="utf-8")
+                output = StringIO()
+                status = main(["records", "--client", "cindy", "--engine", engine, "--json"],
+                              adapters=(adapter,), stdout=output, stderr=StringIO())
+                data = json.loads(output.getvalue())
+                self.assertNotEqual(status, 0)
+                self.assertEqual(data["goal_status"], "blocked")
+                self.assertTrue(data["errors"])
+                self.assertFalse(any(r["cleanup_eligible"] for r in data["records"]))
+
+    def test_builder_exception_is_not_an_empty_successful_inventory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._engine_profile(Path(temporary), "pi", "pi-id")
+            output = StringIO()
+            with patch.object(adapter, "native_catalog_for", side_effect=OSError("fixture")):
+                status = main(["records", "--client", "cindy", "--engine", "pi", "--json"],
+                              adapters=(adapter,), stdout=output, stderr=StringIO())
+            self.assertNotEqual(status, 0)
+            self.assertEqual(json.loads(output.getvalue())["goal_status"], "blocked")
+
+    def test_shared_claude_root_keeps_all_profile_references_and_excludes_standalone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shared = root / "shared-claude"
+            sid = "11111111-1111-4111-8111-111111111111"
+            other = "22222222-2222-4222-8222-222222222222"
+            _write_claude_session(shared, sid)
+            _write_claude_session(shared, other)
+            adapters = []
+            for name in ("Cindy", "CindyGlobal"):
+                profile = root / name
+                (profile / "codex-home").mkdir(parents=True)
+                _create_cindy_database(profile / "cindy.db", [("same-ui", sid, "active", "cc")])
+                adapters.append(CindyAdapter(database=profile / "cindy.db", codex_home=profile / "codex-home", cindy_root=profile))
+            effective = resolve_claude_paths(environ={"CLAUDE_CONFIG_DIR": str(shared)}, home=root)
+            with patch("local_agent_record_janitor.claude_sessions.resolve_claude_paths", return_value=effective):
+                context = build_client_engine_contexts(adapters, client="cindy", engines=("claude",))[0]
+            self.assertEqual(context.inventory.errors, ())
+            self.assertEqual(len(context.native_records), 1)
+            self.assertEqual(context.native_records[0].session_id, sid)
+            self.assertEqual(len(context.targets), 1)
+            self.assertEqual(len(context.targets[0].frontend_binding_keys), 2)
+            self.assertFalse(context.targets[0].to_dict()["cleanup_eligible"])
+
+    def test_standalone_pi_claude_inventory_and_plan_classification_are_healthy(self):
+        for engine in ("pi", "claude"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                sid = "11111111-1111-4111-8111-111111111111"
+                if engine == "pi":
+                    _write_pi_session(root, sid)
+                    catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
+                else:
+                    _write_claude_session(root, sid)
+                    catalog = build_claude_session_catalog(config_dir=root)
+                output = StringIO()
+                with patch(f"local_agent_record_janitor.cli._build_{engine}_catalog", return_value=catalog):
+                    status = main(["records", "--client", engine, "--json"], adapters=(),
+                                  stdout=output, stderr=StringIO(), **{f"{engine}_catalog_builder": lambda **_: catalog})
+                self.assertEqual(status, 0, output.getvalue())
+                self.assertEqual(json.loads(output.getvalue())["records"][0]["classification"], "healthy")
+                coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+                with patch(f"local_agent_record_janitor.session_catalog_factory.build_{engine}_catalog", return_value=catalog):
+                    plan = coordinator.plan_operation(client=engine, record_ids=(sid,), plan_path=root / "plan.json")
+                self.assertEqual(plan["actions"][0]["classification"], "healthy")
+
+    def test_unknown_cindy_engines_are_visible_and_never_have_delete_actions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "codex-home").mkdir()
+            create_database(root / "cindy.db", [("active", None, "active", "gemini"),
+                                                ("deleted", "unknown-id", "deleted", "gemini"),
+                                                ("alias-0", None, "deleted", "codex-cli"),
+                                                ("alias-1", None, "active", "codex_native"),
+                                                ("alias-2", None, "deleted", "claude-code")], [
+                ("switch", "active", {"fromAgentKind": "future-engine", "fromSdkSessionId": "old"}, 1, None),
+            ])
+            adapter = CindyAdapter(database=root / "cindy.db", codex_home=root / "codex-home", cindy_root=root)
+            output = StringIO()
+            status = main(["records", "--client", "cindy", "--json"], adapters=(adapter,), stdout=output, stderr=StringIO())
+            self.assertEqual(status, 0, output.getvalue())
+            records = json.loads(output.getvalue())["records"]
+            self.assertEqual(len(records), 6)
+            self.assertTrue(all(r["classification"] == "unverified" and not r["action_ids"] for r in records), records)
+            for selector in ("active", "unknown-id", "alias-0", "alias-1", "alias-2"):
+                coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+                plan = coordinator.plan_operation(client="cindy", record_ids=(selector,), adapters=(adapter,),
+                    plan_path=root / f"{selector}.json")
+                self.assertEqual(plan["actions"], [])
+
+    def test_unimplemented_clients_do_not_inherit_native_capabilities(self):
+        for client in ("chatgpt", "chatgpt-desktop", "orca", "herdr"):
+            with self.subTest(client=client):
+                capability = capability_for(client, "codex")
+                self.assertFalse(capability.native_delete)
+                self.assertFalse(capability.frontend_session_delete)
+
+    def test_cindy_client_inspection_uses_owner_root_for_frontend_only_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "codex-home").mkdir()
+            _create_cindy_database(root / "cindy.db", [("ui", "missing", "deleted", "pi")])
+            adapter = CindyAdapter(database=root / "cindy.db", codex_home=root / "codex-home", cindy_root=root)
+            output = StringIO()
+            with patch("local_agent_record_janitor.codex_desktop_state.inspect_client_ownership",
+                       return_value={"clients_closed": False}) as inspect:
+                status = main(["records", "--client", "cindy", "--engine", "pi", "--inspect-clients", "--json"],
+                              adapters=(adapter,), stdout=output, stderr=StringIO())
+            self.assertEqual(status, 0, output.getvalue())
+            inspect.assert_called_once_with(root, owner_client="cindy")
+            self.assertFalse(json.loads(output.getvalue())["client_ownership"][0]["clients_closed"])
+
     def _lineage_fixture(self, root, parents, *, references=("parent",)):
         home = root / "codex-home"
         rows = []
@@ -410,7 +643,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_cindy_all_backend_snapshot_and_pi_claude_native_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cindy_root = root / "cindy"
+            cindy_root = root / "CindyDev"
             database = cindy_root / "cindy.db"
             codex_home = cindy_root / "codex-home"
             codex_home.mkdir(parents=True)
@@ -609,6 +842,7 @@ class ClientInventoryTests(unittest.TestCase):
                     "partial_remote",
                     "corrupt_unreadable",
                     "unknown_operation",
+                    "unverified",
                 },
             )
 

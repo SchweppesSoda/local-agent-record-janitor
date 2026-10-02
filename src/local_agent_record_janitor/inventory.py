@@ -695,6 +695,7 @@ def classify_managed_conversation(
     record: ManagedConversation,
     *,
     project_present: bool = False,
+    frontend_required: bool = True,
 ) -> RecordClassification:
     """Classify native presence separately from a child's direct UI binding."""
     lineage_status = record.lineage_status
@@ -708,6 +709,7 @@ def classify_managed_conversation(
         native_present=record.artifact_present,
         frontend_present=bool(record.frontend_sessions),
         native_parent_present=lineage_status == "known",
+        frontend_required=frontend_required,
         project_present=project_present,
         relation_broken=lineage_status in {"unknown", "conflict"},
         index_stale=(record.legacy_indexed and not record.artifact_present),

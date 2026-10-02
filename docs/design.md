@@ -51,6 +51,25 @@ Codex thread 的身份是 `(CODEX_HOME, thread_id)`；Pi session 和 Claude sess
 还绑定各自的 session/config root。相同 ID 出现在不同物理存储时必须拆成不同目标。
 认证来源、账号、登录状态和前端 owner 只属于诊断信息，不能替代物理存储身份。
 
+前端显示 ID 不承担绑定身份：当前引用与历史切换可能来自同一 UI 会话、指向不同原生
+记录；不同数据库也可能复用相同 UI ID。清单、筛选和分组都以数据库、引擎、原生目标
+及历史 boundary 限定绑定。读取失败与逐记录 blockers 在每次投影中保留，不能把底层
+不可删除记录显示为可清理，也不能把失败清单当成“没有残留”。
+
+原生 Codex/Pi/Claude 的正常独立记录不要求 Cindy 或 Desktop 引用。第三方客户端范围
+中的 `orphan_native` 表示已验证存储中的无绑定根或确认缺失父的 Codex 子记录，仍须
+明确选择和删除保护；未知引擎输出 `unverified`，只提供盘点。未验证原生归属也输出
+`unverified`，不能授予 native 删除能力；已验证的独立前端 writer 仍遵循自己的精确契约。
+分类、引用状态和删除能力是独立判断。
+
+Codex 的 native parent、Pi 的分支来源和 Claude manifest 下的 subagent 文件具有不同
+删除语义，不能统一为“父子全删”。具体关系与新客户端接入要求见
+[Adapter 贡献指南](adapters.md)。
+
+`native`/`codex-native` 仅表示官方 Codex 本地存储，以及可探测的 Codex/ChatGPT
+Desktop 编码环境本地状态。ChatGPT 云端聊天、云端项目和远程记录不在本工具范围内；
+`chatgpt` 不作为本地 Codex 客户端别名。
+
 一份授权计划只处理一个物理存储和一种 mutation family。前一批完成后必须重新扫描，
 新发现的动作不会被吸收到旧计划中。
 

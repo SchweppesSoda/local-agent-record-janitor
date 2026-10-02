@@ -81,6 +81,12 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 
 工具依据实际 storage 和 reference 证据识别记录；登录状态和认证状态不用于推断 native store 或跨设备同步。
 
+正常独立 Codex/Pi/Claude 会话无需前端引用；Codex 子记录的完整父链也不要求独立 UI
+绑定。未知 backend 仅显示 `unverified`/`inventory_only`，不提供删除动作。`native`
+涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
+Orca、Herdr 尚未接入；关系语义、共享存储和未来接入条件见
+[Adapter 贡献指南](docs/adapters.md)。
+
 ## 为什么需要它
 
 Codex 的本地 thread 不是一个文件，而是至少包含：

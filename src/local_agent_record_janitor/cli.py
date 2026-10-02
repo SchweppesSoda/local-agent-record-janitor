@@ -2372,9 +2372,9 @@ _ANOMALY_CLASSIFICATIONS = {
 }
 
 
-def _record_classification(record: Any) -> str:
+def _record_classification(record: Any, *, frontend_required: bool = True) -> str:
     if isinstance(record, ManagedConversation):
-        return classify_managed_conversation(record).value
+        return classify_managed_conversation(record, frontend_required=frontend_required).value
     explicit = _record_field(
         record,
         "classification",
@@ -2430,11 +2430,11 @@ def _record_classification(record: Any) -> str:
     return "healthy"
 
 
-def _record_metadata_payload(record: Any) -> dict[str, Any]:
+def _record_metadata_payload(record: Any, *, frontend_required: bool = True) -> dict[str, Any]:
     payload = _metadata_only(_object_dict(record))
     if not isinstance(payload, dict):
         payload = {"record": payload}
-    payload["classification"] = _record_classification(record)
+    payload["classification"] = _record_classification(record, frontend_required=frontend_required)
     return payload
 
 
@@ -2569,6 +2569,7 @@ def _run_client_records(
 
     from .client_inventory import (
         ClientInventoryError,
+        _frontend_binding_key,
         build_client_engine_contexts,
         build_client_inventory,
     )
@@ -2602,6 +2603,8 @@ def _run_client_records(
                 engines=engines,
                 inventory=inventory,
             )
+        if contexts:
+            inventory = contexts[0].inventory
         record_ids = tuple(
             getattr(args, "record_id", ()) or ()
         ) or tuple(getattr(args, "thread_id", ()) or ())
@@ -2672,20 +2675,23 @@ def _run_client_records(
     def selection_key(target: Any) -> tuple[Any, ...]:
         return (target.client, target.engine,
             target.record_key.value if target.record_key else None,
-            target.native_thread_id, tuple(target.frontend_reference_ids))
+            target.native_thread_id, tuple(target.frontend_binding_keys or target.frontend_reference_ids))
     selected_ids = {selection_key(target) for target in selected}
     selected_projects = {
         target.project_key.stable_id
         for target in selected
         if target.project_key is not None
     }
+    def has_binding(target: Any, session: Any) -> bool:
+        if target.frontend_binding_keys:
+            return _frontend_binding_key(session) in target.frontend_binding_keys
+        return f"{session.platform}:{session.platform_session_id}" in target.frontend_reference_ids
+
     def target_store(target: Any, context: Any) -> dict[str, Any] | None:
         if target.record_key is not None:
             return target.record_key.store.to_dict()
-        references = set(target.frontend_reference_ids)
         for session in context.frontend_sessions:
-            reference = f"{session.platform}:{session.platform_session_id}"
-            if reference in references:
+            if has_binding(target, session):
                 return StoreKey(
                     target.engine,
                     session.database,
@@ -2729,8 +2735,7 @@ def _run_client_records(
                     Path(target.record_key.store.path)
                 ))
             for session in context.frontend_sessions:
-                reference = f"{session.platform}:{session.platform_session_id}"
-                if reference in set(target.frontend_reference_ids):
+                if has_binding(target, session):
                     locations.add(canonical_existing_path_key(Path(session.codex_home)))
                     locations.add(canonical_existing_path_key(Path(session.database)))
             target_payload = _metadata_only(target.to_dict())
@@ -2803,9 +2808,7 @@ def _run_client_records(
         "frontend_sessions": [
             _metadata_only(session.to_dict())
             for session in inventory.frontend_sessions
-            if not has_scope or f"{session.platform}:{session.platform_session_id}" in {
-                ref for target in selected for ref in target.frontend_reference_ids
-            }
+            if not has_scope or any(has_binding(target, session) for target in selected)
         ],
         "unmapped_frontend_sessions": [
             _metadata_only(session.to_dict())
@@ -2843,7 +2846,13 @@ def _run_client_records(
     ).hexdigest()
     if getattr(args, "inspect_clients", False):
         from .codex_desktop_state import inspect_client_ownership
-        roots = {Path(target.record_key.store.path) for target in selected if target.record_key is not None}
+        roots = set()
+        for adapter in active_adapters:
+            root = getattr(adapter, "owner_process_root", None)
+            if root is not None:
+                roots.add(Path(root))
+        if not roots and client in {"native", "pi", "claude"}:
+            roots = {Path(target.record_key.store.path) for target in selected if target.record_key is not None}
         payload["client_ownership"] = []
         for root in sorted(roots, key=str):
             try:
@@ -2957,7 +2966,7 @@ def _build_native_client_contexts(
         raw_references = (
             getattr(record, "frontend_sessions", ())
             if engine == "codex"
-            else getattr(record, "frontend_references", ())
+            else getattr(record, "frontend_references", getattr(record, "cindy_references", ()))
         )
         refs = tuple(
             _native_reference_id(reference)
@@ -2965,11 +2974,13 @@ def _build_native_client_contexts(
         )
         refs = tuple(value for value in refs if value)
         classification = classify_managed_conversation(
-            record, project_present=project is not None,
+            record, project_present=project is not None, frontend_required=False,
         ) if isinstance(record, ManagedConversation) else classify_record_state(
             native_present=native_present,
             frontend_present=bool(refs),
             project_present=project is not None,
+            frontend_required=False,
+            corrupt_unreadable=getattr(record, "reference_classification", None) == "inventory_incomplete",
         )
         deletable = bool(getattr(record, "deletable", True))
         native_action_id = getattr(record, "action_id", None)
@@ -3196,8 +3207,12 @@ def _run_records(
             "count": 0,
         }
         payload["command"] = "records"
+        native_homes = {canonical_existing_path_key(Path(a.codex_home)) for a in active_adapters
+                        if str(getattr(a, "name", "")) in {"native", "codex-native", "codex-desktop"}}
         payload["records"] = [
-            _record_metadata_payload(conversation)
+            _record_metadata_payload(conversation, frontend_required=(
+                canonical_existing_path_key(Path(conversation.codex_home)) not in native_homes
+            ))
             for conversation in conversations
         ]
         payload["unmapped_frontend_sessions"] = [

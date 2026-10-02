@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
 from .discovery import (
@@ -57,18 +58,10 @@ def build_claude_catalog(args: Any, builder: Any | None = None) -> Any:
             claude_config_dir=getattr(args, "claude_config_dir", None)
         )
 
-    from .cindy_references import (
-        CindyReferenceFailure,
-        build_cindy_reference_catalog,
-    )
-    from .claude_sessions import (
-        build_claude_multi_root_catalog,
-        resolve_claude_paths,
-    )
+    from .claude_sessions import resolve_claude_paths
 
     configured_root = getattr(args, "claude_config_dir", None)
     effective = resolve_claude_paths(config_dir=configured_root)
-    roots: list[Path] = [effective.config_dir]
     explicit_root = configured_root is not None
     appdata = (
         getattr(args, "appdata", None) or default_appdata()
@@ -103,6 +96,24 @@ def build_claude_catalog(args: Any, builder: Any | None = None) -> Any:
                     )
                 )
 
+    return build_claude_profile_catalog(
+        profiles, effective=effective, explicit_root=explicit_root,
+        include_standalone=True,
+    )
+
+
+def build_claude_profile_catalog(
+    profiles: Any, *, effective: Any = None, explicit_root: bool = False,
+    include_standalone: bool = False, reference_catalogs: Any = None,
+) -> Any:
+    """Share root attribution between client and engine inventory facades."""
+    from .cindy_references import CindyReferenceFailure, build_cindy_reference_catalog
+    from .claude_sessions import ClaudeInventoryFailure, build_claude_multi_root_catalog, resolve_claude_paths
+
+    effective = effective or resolve_claude_paths()
+    roots: list[Path] = [effective.config_dir] if include_standalone else []
+    dedicated_roots: set[str] = set()
+    reference_catalogs = reference_catalogs or {}
     default_root = Path.home() / ".claude"
     qualified_references: list[dict[str, Any]] = []
     reference_failures: list[Any] = []
@@ -112,10 +123,11 @@ def build_claude_catalog(args: Any, builder: Any | None = None) -> Any:
         if database_key in seen_databases:
             continue
         seen_databases.add(database_key)
-        reference_catalog = build_cindy_reference_catalog(
-            profile.database,
-            profile_root=profile.root,
-        )
+        reference_catalog = reference_catalogs.get(database_key)
+        if reference_catalog is None:
+            reference_catalog = build_cindy_reference_catalog(
+                profile.database, profile_root=profile.root,
+            )
         cc_references = tuple(reference_catalog.for_backend("claude"))
         dedicated_root = profile.root / "claude-home"
         try:
@@ -133,6 +145,7 @@ def build_claude_catalog(args: Any, builder: Any | None = None) -> Any:
 
         if dedicated_exists and not explicit_root:
             roots.append(dedicated_root)
+            dedicated_roots.add(_path_identity(dedicated_root))
 
         target_root: Path | None
         production_profile = profile.root.name.casefold() in {
@@ -204,11 +217,26 @@ def build_claude_catalog(args: Any, builder: Any | None = None) -> Any:
         if key not in seen_roots:
             seen_roots.add(key)
             unique_roots.append(root)
-    return build_claude_multi_root_catalog(
+    catalog = build_claude_multi_root_catalog(
         unique_roots,
         frontend_references=qualified_references,
         reference_errors=reference_failures,
     )
+    if not catalog.catalogs and reference_failures:
+        catalog = replace(catalog, root_errors=(*catalog.root_errors, *(
+            ClaudeInventoryFailure(effective.config_dir, "cindy-root", "AmbiguousStorageRoot",
+                                   str(getattr(error, "message", "Claude root could not be verified")))
+            for error in reference_failures
+        )))
+    if not include_standalone:
+        # A shared default root contains independent Claude sessions too.
+        # A client-scoped request owns only its qualified references there.
+        catalog = replace(catalog, catalogs=tuple(
+            replace(item, records=tuple(r for r in item.records if r.frontend_references))
+            if _path_identity(item.config_dir) not in dedicated_roots else item
+            for item in catalog.catalogs
+        ))
+    return catalog
 
 
 def _path_identity(value: Any) -> str:
