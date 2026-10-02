@@ -1,0 +1,451 @@
+{
+  "agent_plan": {
+    "authorization": {
+      "authorization_required": true,
+      "blockers": [],
+      "mutation_kind": "delete_conversation",
+      "root_actions": [
+        {
+          "action_id": "delete_conversation-e3575288a06366d5cb879660",
+          "affected_thread_ids": [
+            "synthetic-thread"
+          ],
+          "capability": {
+            "implemented": true,
+            "kind": "delete_conversation",
+            "mutation_family": "delete_conversation",
+            "requires_clients_closed": true,
+            "verifies_by": "native_thread_artifacts_absent"
+          },
+          "impact": {
+            "affected_thread_ids": [
+              "synthetic-thread"
+            ],
+            "conversation_metadata_fingerprints": [
+              "synthetic-thread=v1:29fe2c59442712a78aa25aa07da3ed24d262a41dd2e90606684de7685fbc5521"
+            ],
+            "descendant_thread_count": 0,
+            "descendant_thread_ids": [],
+            "desktop_catalog_record_count": 0,
+            "desktop_database_paths": [],
+            "desktop_global_state_paths": [],
+            "desktop_global_state_reference_count": 0,
+            "external_action_payload": null,
+            "external_artifact_count": 0,
+            "external_artifact_paths": [],
+            "external_engine": null,
+            "external_storage_root": null,
+            "fingerprint_error": null,
+            "frontend_database_paths": [],
+            "frontend_project_database_paths": [],
+            "frontend_project_evidence": [],
+            "frontend_reference_count": 0,
+            "frontend_reference_evidence": [],
+            "frontend_references_preserved": true,
+            "frontend_residual_count": 0,
+            "frontend_session_database_paths": [],
+            "frontend_session_evidence": [],
+            "index_record_count": 0,
+            "indexed_thread_ids": [],
+            "legacy_expected_sha256": null,
+            "legacy_original_sha256": null,
+            "legacy_residual_line_count": 0,
+            "legacy_residual_thread_ids": [],
+            "owner_client": null,
+            "owner_process_root": null,
+            "relation_database_paths": [],
+            "relation_evidence": [],
+            "resource_path": null,
+            "rollout_file_count": 1,
+            "rollout_paths": [
+              "$STORE_ROOT/sessions/2026/07/31/rollout-synthetic-thread.jsonl"
+            ],
+            "rollout_state_fingerprints": [
+              "v1:3fd74032572bb1ff6b10a59c89b963438ea1a7832dcbeeb9703c2316a3c5af99"
+            ]
+          },
+          "kind": "delete_conversation",
+          "observation_ids": [
+            "observation-8f27e9b7df48c94de6a9"
+          ],
+          "snapshot_fingerprint": "2561410ba29313c7f74e6202dd812208a1aed85c3a02cea7b9bd8c8c94ba307d",
+          "storage_id": "storage-0d7161c80817f5e7",
+          "thread_id": "synthetic-thread"
+        }
+      ]
+    },
+    "counts": {
+      "affected_thread_count": 1,
+      "artifact_count": 1,
+      "blocked_group_count": 0,
+      "finding_count": 1,
+      "issue_group_count": 1,
+      "legacy_residual_line_count": 0,
+      "legacy_residual_unique_thread_count": 0,
+      "root_action_count": 1
+    },
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "document_type": "agent_cleanup_plan",
+    "mode": "agent",
+    "operation": "purge",
+    "operation_id": "compat-agent_plan",
+    "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+    "scan": {
+      "cleanup_plan_fingerprint": "50e63e0b2a57f00746a079e1ed5bedc66542144f9918439e8a465c627f8de5cf",
+      "errors": [],
+      "scan_complete": true
+    },
+    "scan_options": {
+      "codex_home": "$STORE_ROOT",
+      "platforms": [
+        "native"
+      ]
+    },
+    "schema_version": "larj.agent-plan.v1",
+    "target": {
+      "codex_home": "$STORE_ROOT",
+      "platforms": [
+        "native"
+      ],
+      "storage": {
+        "codex_bin_hint": null,
+        "errors": [],
+        "label": "store 数据目录",
+        "path": "$STORE_ROOT",
+        "scan_status": "ok",
+        "storage_id": "storage-0d7161c80817f5e7"
+      },
+      "storage_id": "storage-0d7161c80817f5e7"
+    }
+  },
+  "operation_plan": {
+    "actions": [
+      {
+        "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4",
+        "available": true,
+        "binding": {
+          "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4",
+          "affected_thread_ids": [
+            "synthetic-thread"
+          ],
+          "capability": {
+            "implemented": true,
+            "kind": "delete_conversation",
+            "mutation_family": "delete_conversation",
+            "requires_clients_closed": true,
+            "verifies_by": "native_thread_artifacts_absent"
+          },
+          "impact": {
+            "affected_thread_ids": [
+              "synthetic-thread"
+            ],
+            "conversation_metadata_fingerprints": [
+              "synthetic-thread=v1:29fe2c59442712a78aa25aa07da3ed24d262a41dd2e90606684de7685fbc5521"
+            ],
+            "descendant_thread_count": 0,
+            "descendant_thread_ids": [],
+            "desktop_catalog_record_count": 0,
+            "desktop_database_paths": [],
+            "desktop_global_state_paths": [],
+            "desktop_global_state_reference_count": 0,
+            "external_action_payload": {
+              "archived": false,
+              "cwd": "$FIXTURE_ROOT",
+              "indexed": false,
+              "is_subagent": false,
+              "metadata_conflicts": [],
+              "metadata_evidence_fingerprints": [
+                "session_meta=6150fa37bf078954574fa23e2ceebe7977abb996fc6a24d7c78453f5697a5da5"
+              ],
+              "metadata_sources": [
+                "session_meta"
+              ],
+              "originator": "test",
+              "parent_thread_ids": [],
+              "project_label": "tmpefom_nbu",
+              "schema_version": 1,
+              "thread_id": "synthetic-thread"
+            },
+            "external_artifact_count": 0,
+            "external_artifact_paths": [],
+            "external_engine": "codex",
+            "external_storage_root": "$STORE_ROOT",
+            "frontend_database_paths": [],
+            "frontend_project_database_paths": [],
+            "frontend_project_evidence": [],
+            "frontend_reference_count": 0,
+            "frontend_reference_evidence": [],
+            "frontend_references_preserved": true,
+            "frontend_residual_count": 0,
+            "frontend_session_database_paths": [],
+            "frontend_session_evidence": [],
+            "index_record_count": 0,
+            "indexed_thread_ids": [],
+            "legacy_residual_line_count": 0,
+            "legacy_residual_thread_ids": [],
+            "relation_database_paths": [],
+            "relation_evidence": [],
+            "rollout_file_count": 1,
+            "rollout_paths": [
+              "$STORE_ROOT/sessions/2026/07/31/rollout-synthetic-thread.jsonl"
+            ],
+            "rollout_state_fingerprints": [
+              "v1:3fd74032572bb1ff6b10a59c89b963438ea1a7832dcbeeb9703c2316a3c5af99"
+            ]
+          },
+          "kind": "delete_conversation",
+          "observation_ids": [],
+          "snapshot_fingerprint": "v1:94190e4697f86d839b5ca063a200f2d94398c637adbae31a5cee010243bd71b6",
+          "storage_id": "storage-0d7161c80817f5e7",
+          "thread_id": "synthetic-thread"
+        },
+        "classification": "healthy",
+        "impact": {
+          "affected_thread_ids": [
+            "synthetic-thread"
+          ],
+          "conversation_metadata_fingerprints": [
+            "synthetic-thread=v1:29fe2c59442712a78aa25aa07da3ed24d262a41dd2e90606684de7685fbc5521"
+          ],
+          "descendant_thread_count": 0,
+          "descendant_thread_ids": [],
+          "desktop_catalog_record_count": 0,
+          "desktop_database_paths": [],
+          "desktop_global_state_paths": [],
+          "desktop_global_state_reference_count": 0,
+          "external_action_payload": {
+            "archived": false,
+            "cwd": "$FIXTURE_ROOT",
+            "indexed": false,
+            "is_subagent": false,
+            "metadata_conflicts": [],
+            "metadata_evidence_fingerprints": [
+              "session_meta=6150fa37bf078954574fa23e2ceebe7977abb996fc6a24d7c78453f5697a5da5"
+            ],
+            "metadata_sources": [
+              "session_meta"
+            ],
+            "originator": "test",
+            "parent_thread_ids": [],
+            "project_label": "tmpefom_nbu",
+            "schema_version": 1,
+            "thread_id": "synthetic-thread"
+          },
+          "external_artifact_count": 0,
+          "external_artifact_paths": [],
+          "external_engine": "codex",
+          "external_storage_root": "$STORE_ROOT",
+          "frontend_database_paths": [],
+          "frontend_project_database_paths": [],
+          "frontend_project_evidence": [],
+          "frontend_reference_count": 0,
+          "frontend_reference_evidence": [],
+          "frontend_references_preserved": true,
+          "frontend_residual_count": 0,
+          "frontend_session_database_paths": [],
+          "frontend_session_evidence": [],
+          "index_record_count": 0,
+          "indexed_thread_ids": [],
+          "legacy_residual_line_count": 0,
+          "legacy_residual_thread_ids": [],
+          "relation_database_paths": [],
+          "relation_evidence": [],
+          "rollout_file_count": 1,
+          "rollout_paths": [
+            "$STORE_ROOT/sessions/2026/07/31/rollout-synthetic-thread.jsonl"
+          ],
+          "rollout_state_fingerprints": [
+            "v1:3fd74032572bb1ff6b10a59c89b963438ea1a7832dcbeeb9703c2316a3c5af99"
+          ]
+        },
+        "kind": "delete_conversation",
+        "observation_ids": [],
+        "requires_explicit_selection": true,
+        "resource": {
+          "kind": "conversation",
+          "target": {
+            "storage_id": "storage-0d7161c80817f5e7",
+            "thread_id": "synthetic-thread"
+          }
+        },
+        "risk": "high",
+        "snapshot_fingerprint": "v1:94190e4697f86d839b5ca063a200f2d94398c637adbae31a5cee010243bd71b6",
+        "target": {
+          "storage_id": "storage-0d7161c80817f5e7",
+          "thread_id": "synthetic-thread"
+        }
+      }
+    ],
+    "blockers": [],
+    "capabilities": {
+      "codex": {
+        "blocker_codes": [],
+        "blockers": [],
+        "client": "native",
+        "engine": "codex",
+        "frontend_project_delete": false,
+        "frontend_reference_delete": false,
+        "frontend_session_delete": false,
+        "inventory": true,
+        "mode": "partial",
+        "native_delete": true,
+        "reason": null,
+        "remote_delete": false,
+        "verify": true
+      }
+    },
+    "child_batches": [
+      {
+        "action_count": 1,
+        "action_ids": [
+          "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4"
+        ],
+        "batch_id": "storage-0d7161c80817f5e7:delete_conversation:$STORE_ROOT",
+        "child_operation_id": "compat-operation_plan-1",
+        "engine": "codex",
+        "location": "$STORE_ROOT",
+        "mutation_family": "delete_conversation",
+        "project": "$FIXTURE_ROOT",
+        "project_paths": [
+          "$FIXTURE_ROOT"
+        ],
+        "resource_key": [
+          "$STORE_ROOT"
+        ],
+        "storage_id": "storage-0d7161c80817f5e7"
+      }
+    ],
+    "cleanup_plan_fingerprint": "",
+    "counts": {
+      "action_count": 1,
+      "batch_count": 1,
+      "blocked_count": 0
+    },
+    "document_type": "operation_plan",
+    "goal_status": "ready",
+    "operation_id": "compat-operation_plan",
+    "plan_path": "$FIXTURE_ROOT/operation.json",
+    "plan_sha256": "59db6cb2bfd4375a703dda846884577b696706d0851b16e47c90a1261329d164",
+    "schema_version": "larj.operation-plan.v1",
+    "scope": {
+      "all_projects": false,
+      "client": "native",
+      "engines": [
+        "codex"
+      ],
+      "projects": [],
+      "record_ids": [
+        "synthetic-thread"
+      ]
+    },
+    "snapshot_id": "snapshot:v1:073abf675812d6f1831ef27747b3b2642b68f827fcee08d457ee4a5e9e1ef6a3",
+    "storages": [
+      {
+        "codex_bin_hint": null,
+        "errors": [],
+        "label": "Codex data directory",
+        "path": "$STORE_ROOT",
+        "scan_status": "ok",
+        "storage_id": "storage-0d7161c80817f5e7"
+      }
+    ],
+    "created_at": "2026-01-01T00:00:00+00:00"
+  },
+  "states": {
+    "unstarted": {
+      "schema_version": "larj.agent-state.v1",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "goal_status": "unknown",
+      "goal_satisfied": false,
+      "modified": false,
+      "mutation_started": false,
+      "phase": "preflight",
+      "next_event_sequence": 1
+    },
+    "mutation_started": {
+      "schema_version": "larj.agent-state.v1",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "goal_status": "unknown",
+      "goal_satisfied": false,
+      "modified": false,
+      "mutation_started": true,
+      "phase": "executing",
+      "next_event_sequence": 2
+    },
+    "unknown": {
+      "schema_version": "larj.agent-state.v1",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "goal_status": "unknown",
+      "goal_satisfied": false,
+      "modified": false,
+      "mutation_started": true,
+      "phase": "recovery_required",
+      "next_event_sequence": 3
+    },
+    "partial": {
+      "schema_version": "larj.agent-state.v1",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "goal_status": "completed_with_residuals",
+      "goal_satisfied": false,
+      "modified": true,
+      "mutation_started": true,
+      "phase": "finished",
+      "next_event_sequence": 3
+    }
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "recorded_at": "2026-01-01T00:00:01+00:00",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "event": "mutation_started",
+      "action_id": "delete_conversation-e3575288a06366d5cb879660"
+    },
+    {
+      "sequence": 2,
+      "recorded_at": "2026-01-01T00:00:02+00:00",
+      "operation_id": "compat-agent_plan",
+      "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+      "event": "finished",
+      "goal_status": "unknown"
+    }
+  ],
+  "receipt": {
+    "schema_version": "larj.agent-receipt.v1",
+    "operation_id": "compat-agent_plan",
+    "plan_sha256": "7bf0d8b6b04b9980ec754cf1233b66b7e77eafe9df72ea326c3bfbece40bce93",
+    "goal_status": "complete",
+    "modified": true,
+    "mutation_started": true,
+    "phase": "finished",
+    "source_subcommand": "verify",
+    "blockers": [],
+    "counts": {
+      "affected_thread_count": 1,
+      "artifact_count": 1,
+      "blocked_group_count": 0,
+      "finding_count": 1,
+      "issue_group_count": 1,
+      "legacy_residual_line_count": 0,
+      "legacy_residual_unique_thread_count": 0,
+      "root_action_count": 1
+    },
+    "action_statuses": [
+      {
+        "action_id": "delete_conversation-e3575288a06366d5cb879660",
+        "status": "verified"
+      }
+    ],
+    "exact_goal_satisfied": true,
+    "full_scope_satisfied": true,
+    "full_scope_scan_complete": true,
+    "completed_at": "2099-01-01T00:00:00+00:00",
+    "receipt_expires_at": "2099-01-08T00:00:00+00:00",
+    "receipt_sha256": "34c4ef4138fa1eaa5e143cbc7febf4b89ef30a91553a84646d26b8156aa4577c"
+  }
+}

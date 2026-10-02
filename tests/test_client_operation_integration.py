@@ -180,146 +180,125 @@ class ClientOperationIntegrationTests(unittest.TestCase):
                     bool(statuses.intersection({"deleted", "cleaned", "repaired"}))
                 )
 
-    def test_cindy_pi_and_claude_child_contexts_stop_after_unknown(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            frontend_home = root / "cindy-home"
-            frontend_home.mkdir()
-            database = root / "cindy.db"
-            pi_root = root / "pi-sessions"
-            claude_root = root / "claude-config"
-            pi_root.mkdir()
-            claude_root.mkdir()
-            pi_artifact = pi_root / "pi-1"
-            claude_artifact = claude_root / "claude-1.jsonl"
-            pi_artifact.write_text("metadata", encoding="utf-8")
-            claude_artifact.write_text("metadata", encoding="utf-8")
-            rows = (
-                FrontendSessionRecord(
-                    platform="cindy",
-                    platform_session_id="cindy-pi",
-                    thread_id="pi-1",
-                    database=database,
-                    codex_home=frontend_home,
-                    backend="pi",
-                    details={"working_dir": str(root / "pi-project")},
-                ),
-                FrontendSessionRecord(
-                    platform="cindy",
-                    platform_session_id="cindy-claude",
-                    thread_id="claude-1",
-                    database=database,
-                    codex_home=frontend_home,
-                    backend="claude",
-                    details={"working_dir": str(root / "claude-project")},
-                ),
-            )
-            pi_record = SimpleNamespace(
-                session_id="pi-1",
-                session_root=pi_root,
-                path=pi_artifact,
-                cwd=str(root / "pi-project"),
-                cindy_references=({"cindy_session_id": "cindy-pi"},),
-                action_id="pi-action",
-                deletable=True,
-            )
-            claude_record = SimpleNamespace(
-                session_id="claude-1",
-                config_dir=claude_root,
-                transcript_paths=(claude_artifact,),
-                project_paths=(root / "claude-project",),
-                manifest=(),
-                frontend_references=({"cindy_session_id": "cindy-claude"},),
-                action_id="claude-action",
-                deletable=True,
-            )
-            adapter = _CompositeAdapter(
-                frontend_home,
-                database,
-                rows,
-                {
-                    "pi": SimpleNamespace(records=(pi_record,), session_root=pi_root),
-                    "claude": SimpleNamespace(records=(claude_record,), config_dir=claude_root),
-                },
-            )
-            # Build the real client inventory/context projection once up front;
-            # the operation coordinator then consumes those bound contexts.
-            inventory = build_client_inventory((adapter,), client="cindy")
-            engine_contexts = build_client_engine_contexts(
-                (adapter,), client="cindy", inventory=inventory
-            )
-            self.assertEqual({context.engine for context in engine_contexts}, {"pi", "claude"})
-            contexts = {
-                engine: _native_context(
-                    engine,
-                    pi_root if engine == "pi" else claude_root,
-                    "pi-1" if engine == "pi" else "claude-1",
-                    "pi-action" if engine == "pi" else "claude-action",
+    def test_cindy_pi_and_claude_child_contexts_route_independent_stores_and_stop_after_unknown(self) -> None:
+        for unknown_first in (True, False):
+            with self.subTest(unknown_first=unknown_first), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                frontend_home = root / "cindy-home"
+                frontend_home.mkdir()
+                database = root / "cindy.db"
+                pi_root = root / "pi-sessions"
+                claude_root = root / "claude-config"
+                pi_root.mkdir()
+                claude_root.mkdir()
+                pi_artifact = pi_root / "pi-1"
+                claude_artifact = claude_root / "claude-1.jsonl"
+                pi_artifact.write_text("metadata", encoding="utf-8")
+                claude_artifact.write_text("metadata", encoding="utf-8")
+                rows = (
+                    FrontendSessionRecord(
+                        platform="cindy",
+                        platform_session_id="cindy-pi",
+                        thread_id="pi-1",
+                        database=database,
+                        codex_home=frontend_home,
+                        backend="pi",
+                        details={"working_dir": str(root / "pi-project")},
+                    ),
+                    FrontendSessionRecord(
+                        platform="cindy",
+                        platform_session_id="cindy-claude",
+                        thread_id="claude-1",
+                        database=database,
+                        codex_home=frontend_home,
+                        backend="claude",
+                        details={"working_dir": str(root / "claude-project")},
+                    ),
                 )
-                for engine in ("pi", "claude")
-            }
-            service = _FakeWriterService(contexts, unknown_first=True)
-            coordinator = OperationCoordinator(service)
-            plan_path = root / "operation-plan.json"
-            with patch(
-                "local_agent_record_janitor.client_inventory.build_client_inventory",
-                return_value=inventory,
-            ), patch(
-                "local_agent_record_janitor.client_inventory.build_client_engine_contexts",
-                return_value=engine_contexts,
-            ):
-                result = coordinator.run_operation(
-                    client="cindy",
-                    record_ids=("pi-1", "claude-1"),
-                    adapters=(adapter,),
-                    plan_path=plan_path,
-                    clients_closed=True,
+                pi_record = SimpleNamespace(
+                    session_id="pi-1",
+                    session_root=pi_root,
+                    path=pi_artifact,
+                    cwd=str(root / "pi-project"),
+                    cindy_references=({"cindy_session_id": "cindy-pi"},),
+                    action_id="pi-action",
+                    deletable=True,
                 )
-                live = coordinator._live[str(result["operation_id"])]
-                self.assertEqual(
-                    {action.action_id for action in live.candidates},
-                    {"pi-action", "claude-action"},
+                claude_record = SimpleNamespace(
+                    session_id="claude-1",
+                    config_dir=claude_root,
+                    transcript_paths=(claude_artifact,),
+                    project_paths=(root / "claude-project",),
+                    manifest=(),
+                    frontend_references=({"cindy_session_id": "cindy-claude"},),
+                    action_id="claude-action",
+                    deletable=True,
                 )
-                self.assertEqual(
-                    {action.kind.value for action in live.candidates},
-                    {"delete_pi_session", "delete_claude_session"},
+                adapter = _CompositeAdapter(
+                    frontend_home,
+                    database,
+                    rows,
+                    {
+                        "pi": SimpleNamespace(records=(pi_record,), session_root=pi_root),
+                        "claude": SimpleNamespace(records=(claude_record,), config_dir=claude_root),
+                    },
                 )
-            self.assertEqual(result["goal_status"], "unknown")
-            self.assertEqual(len(result["batches"]), 1)
-            self.assertEqual(len(service.executions), 1)
-            first_engine, first_action_ids = service.executions[0]
-            self.assertIn(first_engine, {"pi", "claude"})
-            self.assertEqual(first_action_ids, ("pi-action" if first_engine == "pi" else "claude-action",))
+                # Build the real client inventory/context projection once up front;
+                # the operation coordinator then consumes those bound contexts.
+                inventory = build_client_inventory((adapter,), client="cindy")
+                engine_contexts = build_client_engine_contexts(
+                    (adapter,), client="cindy", inventory=inventory
+                )
+                self.assertEqual({context.engine for context in engine_contexts}, {"pi", "claude"})
+                contexts = {
+                    engine: _native_context(
+                        engine,
+                        pi_root if engine == "pi" else claude_root,
+                        "pi-1" if engine == "pi" else "claude-1",
+                        "pi-action" if engine == "pi" else "claude-action",
+                    )
+                    for engine in ("pi", "claude")
+                }
+                service = _FakeWriterService(contexts, unknown_first=unknown_first)
+                coordinator = OperationCoordinator(service)
+                plan_path = root / "operation-plan.json"
+                with patch(
+                    "local_agent_record_janitor.client_inventory.build_client_inventory",
+                    return_value=inventory,
+                ), patch(
+                    "local_agent_record_janitor.client_inventory.build_client_engine_contexts",
+                    return_value=engine_contexts,
+                ):
+                    result = coordinator.run_operation(
+                        client="cindy",
+                        record_ids=("pi-1", "claude-1"),
+                        adapters=(adapter,),
+                        plan_path=plan_path,
+                        clients_closed=True,
+                    )
+                    live = coordinator._live[str(result["operation_id"])]
+                    self.assertEqual(
+                        {action.action_id for action in live.candidates},
+                        {"pi-action", "claude-action"},
+                    )
+                    self.assertEqual(
+                        {action.kind.value for action in live.candidates},
+                        {"delete_pi_session", "delete_claude_session"},
+                    )
+                if unknown_first:
+                    self.assertEqual(result["goal_status"], "unknown")
+                    self.assertEqual(len(result["batches"]), 1)
+                    self.assertEqual(len(service.executions), 1)
+                    first_engine, first_action_ids = service.executions[0]
+                    self.assertIn(first_engine, {"pi", "claude"})
+                    self.assertEqual(first_action_ids, ("pi-action" if first_engine == "pi" else "claude-action",))
+                else:
+                    self.assertEqual({engine for engine, _ in service.executions}, {"pi", "claude"})
+                    self.assertEqual({aid for _, ids in service.executions for aid in ids}, {"pi-action", "claude-action"})
 
-            # A fresh operation proves that the same composite plan can route
-            # both child batches to their own native writer contexts.
-            success_service = _FakeWriterService(contexts, unknown_first=False)
-            success_coordinator = OperationCoordinator(success_service)
-            with patch(
-                "local_agent_record_janitor.client_inventory.build_client_inventory",
-                return_value=inventory,
-            ), patch(
-                "local_agent_record_janitor.client_inventory.build_client_engine_contexts",
-                return_value=engine_contexts,
-            ):
-                success = success_coordinator.run_operation(
-                    client="cindy",
-                    record_ids=("pi-1", "claude-1"),
-                    adapters=(adapter,),
-                    plan_path=root / "success-plan.json",
-                    clients_closed=True,
-                )
-            self.assertEqual(
-                {engine for engine, _action_ids in success_service.executions},
-                {"pi", "claude"},
-            )
-            self.assertEqual(
-                {action_id for _engine, action_ids in success_service.executions for action_id in action_ids},
-                {"pi-action", "claude-action"},
-            )
-            self.assertEqual(service.prepare_calls, 1)
-            self.assertEqual(adapter.frontend_reads, 1)
-            self.assertEqual(adapter.snapshot_sessions(), adapter.snapshot_sessions())
+                self.assertEqual(service.prepare_calls, 1 if unknown_first else 2)
+                self.assertEqual(adapter.frontend_reads, 1)
+                self.assertEqual(adapter.snapshot_sessions(), adapter.snapshot_sessions())
 
 
 if __name__ == "__main__":

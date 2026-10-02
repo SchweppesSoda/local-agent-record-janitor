@@ -23,6 +23,24 @@
 默认发现仍由显式代码注册，尚不是可动态加载任意客户端的插件系统。
 下面的 Codex `Finding` 接口是既有 compatibility adapter，不是所有引擎的必选接口。
 
+### 现有组合与兼容基线
+
+| 客户端与引擎 | 已有写入路径 | 必要限制 |
+|---|---|---|
+| Cindy / Codex | 原生 `thread/delete`、精确 current/history 引用、软删除 session 行 | 正常原生父链保留；独立批次及关闭、范围重验证仍必需 |
+| Cindy / Pi | 精确 JSONL、精确引用、软删除 session 行 | 每个 profile 单独定位；`parentSession` 不级联 |
+| Cindy / Claude | session manifest、精确引用、软删除 session 行 | 共享 root 聚合所有 profile 引用；无 Cindy 归属的独立 session 不纳入 Cindy 删除范围 |
+| AionUI / Codex | 精确 ACP 引用及支持 schema 的孤立 project 行 | 原生写入仍须独立证明归属和 writer；未知 schema 只读 |
+| AionUI / Pi、Claude | 精确 ACP 引用 | 原生 root 未证明，不提供 native writer |
+| native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
+| 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
+
+兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
+[跨进程 reader 测试](../tests/test_plan_compatibility.py)，覆盖未执行、mutation
+已经开始、unknown、partial 和终态回执。路径由测试重定位到临时存储；生产 reader
+保留旧计划原文与 hash，status/verify 不重发 mutation。新的成功场景使用独立临时
+存储，不能用一个 fresh operation 的成功代替旧 unknown operation 的收口。
+
 ### 身份、错误与能力
 
 - 原生身份至少包含 engine、规范化 store 和完整 native ID；Pi 还包含精确 JSONL 路径。
