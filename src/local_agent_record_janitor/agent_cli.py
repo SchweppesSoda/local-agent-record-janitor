@@ -42,6 +42,7 @@ from .operation_store import (
     write_new_json,
 )
 from .path_identity import canonical_existing_path_key
+from .mutation_guard import UnknownMutationError, mutation_guard, mutation_roots, scopes_for_frozen_plan
 from .planning import (
     ScanStatus,
     StorageLocation,
@@ -409,6 +410,28 @@ def _run_apply(
     client_inspector: ClientInspector,
     cleanup_service: CleanupService,
 ) -> int:
+    output = StringIO()
+    code = _run_apply_captured(
+        args, supplied_adapters, output, app_server_factory=app_server_factory,
+        binary_resolver=binary_resolver, client_inspector=client_inspector,
+        cleanup_service=cleanup_service,
+    )
+    # Context-manager exit can still fail after verification/compaction.
+    # Publish exactly one result only after every lock has exited.
+    stdout.write(output.getvalue())
+    return code
+
+
+def _run_apply_captured(
+    args: argparse.Namespace,
+    supplied_adapters: Iterable[FrontendAdapter] | None,
+    stdout: TextIO,
+    *,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    client_inspector: ClientInspector,
+    cleanup_service: CleanupService,
+) -> int:
     plan, error = _load_authorized_plan(
         Path(args.plan).expanduser(),
         str(args.authorized_plan_sha256 or ""),
@@ -446,91 +469,86 @@ def _run_apply(
     target_home = Path(str(target.get("codex_home") or ""))
     store = OperationStore(target_home, operation_id)
     try:
-        store.accept_plan(plan)
-        if store.lock_exists():
-            raise OperationLockedError(
-                "Operation apply lock already exists; status is unknown"
-            )
-        existing_result = store.read_result()
-        if existing_result is not None:
-            _write_document(existing_result, stdout)
-            return _exit_for_result(existing_result)
-        existing_state = store.read_state()
-        if existing_state and bool(existing_state.get("mutation_started")):
-            result = result_document(
-                subcommand="apply",
-                operation_id=operation_id,
-                plan_sha=plan_hash,
-                goal_status="unknown",
-                modified=bool(existing_state.get("modified", False)),
-                mutation_started=True,
-                counts=counts,
-                blockers=[
-                    structured_blocker(
-                        "mutation_outcome_unknown",
-                        scope="operation",
-                        remediation=(
-                            f"Run agent verify --operation-id {operation_id} "
-                            f"--codex-home {target_home} before any new plan."
-                        ),
-                    )
-                ],
-                phase="recovery_required",
-            )
-            _write_document(result, stdout)
-            return EXIT_UNKNOWN
-        if (
-            existing_state
-            and existing_state.get("phase") == "executing"
-            and not store.lock_exists()
-        ):
-            result = result_document(
-                subcommand="apply",
-                operation_id=operation_id,
-                plan_sha=plan_hash,
-                goal_status="blocked",
-                modified=False,
-                mutation_started=False,
-                counts=counts,
-                blockers=[
-                    structured_blocker(
-                        "execution_attempt_aborted",
-                        scope="operation",
-                        retryable=False,
-                        remediation=(
-                            "Create a fresh plan; this operation stopped before "
-                            "a durable mutation checkpoint and will not be reused."
-                        ),
-                    )
-                ],
-                phase="blocked",
-            )
-            try:
-                store.write_result(result)
-            except OperationStoreError:
-                pass
-            _write_document(result, stdout)
-            return EXIT_BLOCKED
-        with store.mutation_lock():
-            return _apply_locked(
-                args,
-                plan,
-                store,
-                supplied_adapters,
-                stdout,
-                app_server_factory=app_server_factory,
-                binary_resolver=binary_resolver,
-                client_inspector=client_inspector,
-                cleanup_service=cleanup_service,
-            )
+        with mutation_roots((store.codex_home,)):
+            new_store = not store.directory.exists()
+            store.accept_plan(plan)
+            if store.lock_exists():
+                raise OperationLockedError(
+                    "Operation apply lock already exists; status is unknown"
+                )
+            existing_result = store.read_result()
+            if existing_result is not None:
+                _write_document(existing_result, stdout)
+                return _exit_for_result(existing_result)
+            existing_state = store.read_state()
+            if existing_state and bool(existing_state.get("mutation_started")):
+                result = result_document(
+                    subcommand="apply",
+                    operation_id=operation_id,
+                    plan_sha=plan_hash,
+                    goal_status="unknown",
+                    modified=bool(existing_state.get("modified", False)),
+                    mutation_started=True,
+                    counts=counts,
+                    blockers=[
+                        structured_blocker(
+                            "mutation_outcome_unknown",
+                            scope="operation",
+                            remediation=(
+                                f"Run agent verify --operation-id {operation_id} "
+                                f"--codex-home {target_home} before any new plan."
+                            ),
+                        )
+                    ],
+                    phase="recovery_required",
+                )
+                _write_document(result, stdout)
+                return EXIT_UNKNOWN
+            if (
+                existing_state
+                and existing_state.get("phase") == "executing"
+                and not store.lock_exists()
+            ):
+                raise UnknownMutationError(
+                    "Existing execution checkpoint is ambiguous; run status/verify before any new plan",
+                    recovery_required=True,
+                )
+            if existing_state is None:
+                if not new_store or store.events_path.exists():
+                    raise UnknownMutationError("Existing operation journal has no durable state; run status/verify",
+                                               recovery_required=True)
+                # Legacy agent initializes its checkpoint before admission.
+                # A plan-only sibling never counts as a trustworthy fresh
+                # operation, and the ticket never exempts missing state.
+                store.write_state({
+                    "schema_version": "larj.agent-state.v1",
+                    "operation_id": operation_id, "plan_sha256": plan_hash,
+                    "phase": "preflight", "goal_status": "unknown",
+                    "goal_satisfied": False, "modified": False,
+                    "mutation_started": False, "current_action_state": "not_started",
+                    "current_action_ids": [], "next_event_sequence": 1,
+                })
+            with mutation_guard(scopes_for_frozen_plan(plan), store=store), store.mutation_lock():
+                return _apply_locked(
+                    args,
+                    plan,
+                    store,
+                    supplied_adapters,
+                    stdout,
+                    app_server_factory=app_server_factory,
+                    binary_resolver=binary_resolver,
+                    client_inspector=client_inspector,
+                    cleanup_service=cleanup_service,
+                )
     except OperationLockedError as exc:
+        evidence = _publication_evidence(store, stdout)
         result = result_document(
             subcommand="apply",
             operation_id=operation_id,
             plan_sha=plan_hash,
             goal_status="unknown",
-            modified=False,
-            mutation_started=bool((store.read_state() or {}).get("mutation_started")),
+            modified=bool(evidence.get("modified")),
+            mutation_started=bool(evidence.get("mutation_started")),
             counts=counts,
             blockers=[
                 structured_blocker(
@@ -541,17 +559,21 @@ def _run_apply(
                 )
             ],
             phase="recovery_required",
+            details=_publication_details(evidence),
         )
         _write_document(result, stdout)
         return EXIT_UNKNOWN
     except OperationStoreError as exc:
-        mutation_started = _safe_mutation_started(store)
+        evidence = _publication_evidence(store, stdout)
+        mutation_started = bool(evidence.get("mutation_started"))
+        uncertain = bool(mutation_started or evidence.get("modified") or evidence.get("computed")
+                         or getattr(exc, "recovery_required", False))
         result = result_document(
             subcommand="apply",
             operation_id=operation_id,
             plan_sha=plan_hash,
-            goal_status="unknown" if mutation_started else "blocked",
-            modified=False,
+            goal_status="unknown" if uncertain else "blocked",
+            modified=bool(evidence.get("modified")),
             mutation_started=mutation_started,
             counts=counts,
             blockers=[
@@ -559,30 +581,32 @@ def _run_apply(
                     (
                         "operation_persistence_failed"
                         if mutation_started
-                        else "operation_plan_conflict"
+                        else getattr(exc, "kind", "operation_plan_conflict")
                     ),
                     scope="operation",
                     retryable=False,
                     remediation=(
                         "Run agent verify; never repeat apply."
-                        if mutation_started
+                        if uncertain
                         else "Use the operation ID only with its original authorized plan."
                     ),
                     message=str(exc),
                 )
             ],
-            phase="recovery_required" if mutation_started else "preflight",
+            phase="recovery_required" if uncertain else "preflight",
+            details=_publication_details(evidence),
         )
         _write_document(result, stdout)
-        return EXIT_UNKNOWN if mutation_started else EXIT_BLOCKED
+        return EXIT_UNKNOWN if uncertain else EXIT_BLOCKED
     except Exception as exc:
-        mutation_started = _safe_mutation_started(store)
+        evidence = _publication_evidence(store, stdout)
+        mutation_started = bool(evidence.get("mutation_started"))
         result = result_document(
             subcommand="apply",
             operation_id=operation_id,
             plan_sha=plan_hash,
             goal_status="unknown",
-            modified=False,
+            modified=bool(evidence.get("modified")),
             mutation_started=mutation_started,
             counts=counts,
             blockers=[
@@ -599,6 +623,7 @@ def _run_apply(
                 )
             ],
             phase="recovery_required" if mutation_started else "failed",
+            details=_publication_details(evidence),
         )
         _write_document(result, stdout)
         return EXIT_UNKNOWN
@@ -1232,29 +1257,50 @@ def _run_status(args: argparse.Namespace, stdout: TextIO) -> int:
         _write_document(document, stdout)
         return _exit_for_result(document)
     except OperationStoreError as exc:
+        root_busy = getattr(exc, "kind", "") == "mutation_root_locked"
+        state = {}
+        if root_busy:
+            try:
+                state = store.read_state() or {}
+            except OperationStoreError:
+                pass
         document = result_document(
             subcommand="status",
             operation_id=str(args.operation_id),
-            plan_sha="",
+            plan_sha=str(state.get("plan_sha256") or ""),
             goal_status="unknown",
-            modified=False,
-            mutation_started=False,
+            modified=bool(state.get("modified")),
+            mutation_started=bool(state.get("mutation_started")),
             blockers=[
                 structured_blocker(
-                    "operation_not_found",
+                    "mutation_root_locked" if root_busy else "operation_not_found",
                     scope="operation",
-                    retryable=False,
-                    remediation="Use an operation ID from agent plan/apply.",
+                    retryable=root_busy,
+                    remediation=("Wait for the active root operation and retry status."
+                                 if root_busy else "Use an operation ID from agent plan/apply."),
                     message=str(exc),
                 )
             ],
-            phase="failed",
+            phase="recovery_required" if root_busy else "failed",
         )
         _write_document(document, stdout)
         return EXIT_UNKNOWN
 
 
 def _run_verify(
+    args: argparse.Namespace,
+    supplied_adapters: Iterable[FrontendAdapter] | None,
+    stdout: TextIO,
+    *,
+    cleanup_service: CleanupService,
+) -> int:
+    output = StringIO()
+    code = _run_verify_captured(args, supplied_adapters, output, cleanup_service=cleanup_service)
+    stdout.write(output.getvalue())
+    return code
+
+
+def _run_verify_captured(
     args: argparse.Namespace,
     supplied_adapters: Iterable[FrontendAdapter] | None,
     stdout: TextIO,
@@ -1273,130 +1319,127 @@ def _run_verify(
     store: OperationStore | None = None
     try:
         store = OperationStore(_status_home(args), str(args.operation_id))
-        if not store.lock_exists():
-            existing = store.read_result()
-            if existing is not None and existing.get("compacted") is True:
-                document = dict(existing)
-                document["source_subcommand"] = document.get("subcommand")
-                document["subcommand"] = "verify"
-                _write_document(document, stdout)
-                return _exit_for_result(document)
-        with store.mutation_lock():
-            plan = store.read_plan()
-            state = store.read_state() or {}
-            (
-                verification,
-                final_scope,
-                verification_error,
-                final_scope_error,
-                verification_attempts,
-            ) = _verify_with_retry(
-                plan,
-                supplied_adapters,
-                total_timeout=float(args.verify_timeout),
-                retry_pending=bool(state.get("mutation_started", False)),
-                cleanup_service=cleanup_service,
-            )
-            mutation_started = bool(state.get("mutation_started", False))
-            if (
-                verification is not None
-                and final_scope is not None
-                and verification["all_satisfied"]
-                and final_scope["all_satisfied"]
-            ):
-                goal_status = "complete"
-                modified = mutation_started and bool(verification["verified_action_ids"])
-                blockers: list[dict[str, Any]] = []
-            elif (
-                verification is not None
-                and final_scope is not None
-                and bool(final_scope.get("scan_complete"))
-            ):
-                goal_status = (
-                    "completed_with_residuals" if mutation_started else "blocked"
-                )
-                modified = bool(state.get("modified", False))
-                blockers = [
-                    structured_blocker(
-                        "target_scope_residuals_remain",
-                        scope="operation",
-                        remediation=(
-                            "Review exact and target-scope residuals before creating "
-                            "a new immutable plan."
-                        ),
-                    )
-                ]
-            else:
-                goal_status = "unknown"
-                modified = bool(state.get("modified", False))
-                blockers = [
-                    structured_blocker(
-                        "verification_scan_incomplete",
-                        scope="operation",
-                        remediation="Resolve scan errors and run verify again; never repeat apply.",
-                        message=verification_error or final_scope_error,
-                    )
-                ]
-            result = result_document(
-                subcommand="verify",
-                operation_id=store.operation_id,
-                plan_sha=str(plan.get("plan_sha256") or ""),
-                goal_status=goal_status,
-                modified=modified,
-                mutation_started=mutation_started,
-                counts=_mapping(plan.get("counts"), zero_counts()),
-                blockers=blockers,
-                phase=(
-                    "recovery_required" if goal_status == "unknown" else "finished"
-                ),
-                details={
-                    "verification": verification,
-                    "final_scope_verification": final_scope,
-                    "verification_attempts": verification_attempts,
-                },
-            )
-            updated = dict(state)
-            updated.update(
-                {
-                    "schema_version": "larj.agent-state.v1",
-                    "operation_id": store.operation_id,
-                    "plan_sha256": plan.get("plan_sha256"),
-                    "phase": (
-                        "recovery_required"
-                        if goal_status == "unknown"
-                        else "finished"
-                    ),
-                    "goal_status": goal_status,
-                    "goal_satisfied": goal_status == "complete",
-                    "modified": modified,
-                    "mutation_started": mutation_started,
-                    "updated_at": utc_now(),
-                }
-            )
-            updated.setdefault("next_event_sequence", 1)
-            store.write_state(updated)
-            store.append_event(
-                {
-                    "event": "verification_finished",
-                    "goal_status": goal_status,
-                    "verified_action_ids": (
-                        verification.get("verified_action_ids", [])
-                        if verification is not None
-                        else []
-                    ),
-                }
-            )
-            _persist_operation_result(store, result)
-            _write_document(result, stdout)
-            return _exit_for_result(result)
-    except Exception as exc:
-        state: Mapping[str, Any] = {}
-        plan_sha = ""
-        if store is not None:
-            try:
+        with mutation_roots((store.codex_home,)):
+            if not store.lock_exists():
+                existing = store.read_result()
+                if existing is not None and existing.get("compacted") is True:
+                    document = dict(existing)
+                    document["source_subcommand"] = document.get("subcommand")
+                    document["subcommand"] = "verify"
+                    _write_document(document, stdout)
+                    return _exit_for_result(document)
+            with store.mutation_lock():
+                plan = store.read_plan()
                 state = store.read_state() or {}
-            except OperationStoreError:
-                pass
+                (
+                    verification,
+                    final_scope,
+                    verification_error,
+                    final_scope_error,
+                    verification_attempts,
+                ) = _verify_with_retry(
+                    plan,
+                    supplied_adapters,
+                    total_timeout=float(args.verify_timeout),
+                    retry_pending=bool(state.get("mutation_started", False)),
+                    cleanup_service=cleanup_service,
+                )
+                mutation_started = bool(state.get("mutation_started", False))
+                if (
+                    verification is not None
+                    and final_scope is not None
+                    and verification["all_satisfied"]
+                    and final_scope["all_satisfied"]
+                ):
+                    goal_status = "complete"
+                    modified = mutation_started and bool(verification["verified_action_ids"])
+                    blockers: list[dict[str, Any]] = []
+                elif (
+                    verification is not None
+                    and final_scope is not None
+                    and bool(final_scope.get("scan_complete"))
+                ):
+                    goal_status = (
+                        "completed_with_residuals" if mutation_started else "blocked"
+                    )
+                    modified = bool(state.get("modified", False))
+                    blockers = [
+                        structured_blocker(
+                            "target_scope_residuals_remain",
+                            scope="operation",
+                            remediation=(
+                                "Review exact and target-scope residuals before creating "
+                                "a new immutable plan."
+                            ),
+                        )
+                    ]
+                else:
+                    goal_status = "unknown"
+                    modified = bool(state.get("modified", False))
+                    blockers = [
+                        structured_blocker(
+                            "verification_scan_incomplete",
+                            scope="operation",
+                            remediation="Resolve scan errors and run verify again; never repeat apply.",
+                            message=verification_error or final_scope_error,
+                        )
+                    ]
+                result = result_document(
+                    subcommand="verify",
+                    operation_id=store.operation_id,
+                    plan_sha=str(plan.get("plan_sha256") or ""),
+                    goal_status=goal_status,
+                    modified=modified,
+                    mutation_started=mutation_started,
+                    counts=_mapping(plan.get("counts"), zero_counts()),
+                    blockers=blockers,
+                    phase=(
+                        "recovery_required" if goal_status == "unknown" else "finished"
+                    ),
+                    details={
+                        "verification": verification,
+                        "final_scope_verification": final_scope,
+                        "verification_attempts": verification_attempts,
+                    },
+                )
+                updated = dict(state)
+                updated.update(
+                    {
+                        "schema_version": "larj.agent-state.v1",
+                        "operation_id": store.operation_id,
+                        "plan_sha256": plan.get("plan_sha256"),
+                        "phase": (
+                            "recovery_required"
+                            if goal_status == "unknown"
+                            else "finished"
+                        ),
+                        "goal_status": goal_status,
+                        "goal_satisfied": goal_status == "complete",
+                        "modified": modified,
+                        "mutation_started": mutation_started,
+                        "updated_at": utc_now(),
+                    }
+                )
+                updated.setdefault("next_event_sequence", 1)
+                store.write_state(updated)
+                store.append_event(
+                    {
+                        "event": "verification_finished",
+                        "goal_status": goal_status,
+                        "verified_action_ids": (
+                            verification.get("verified_action_ids", [])
+                            if verification is not None
+                            else []
+                        ),
+                    }
+                )
+                _persist_operation_result(store, result)
+                _write_document(result, stdout)
+                return _exit_for_result(result)
+    except Exception as exc:
+        evidence = _publication_evidence(store, stdout)
+        plan_sha = str(evidence.get("plan_sha256") or "")
+        if store is not None:
             try:
                 plan_sha = str(store.read_plan().get("plan_sha256") or "")
             except OperationStoreError:
@@ -1406,8 +1449,9 @@ def _run_verify(
             operation_id=str(args.operation_id),
             plan_sha=plan_sha,
             goal_status="unknown",
-            modified=bool(state.get("modified", False)),
-            mutation_started=bool(state.get("mutation_started", False)),
+            modified=bool(evidence.get("modified")),
+            mutation_started=bool(evidence.get("mutation_started")),
+            counts=_mapping(evidence.get("counts"), zero_counts()),
             blockers=[
                 structured_blocker(
                     "verification_failed",
@@ -1417,6 +1461,7 @@ def _run_verify(
                 )
             ],
             phase="recovery_required",
+            details=_publication_details(evidence),
         )
         _write_document(document, stdout)
         return EXIT_UNKNOWN
@@ -2294,6 +2339,47 @@ def _safe_mutation_started(store: OperationStore) -> bool:
     except (OSError, UnicodeError):
         return True
     return False
+
+
+def _publication_evidence(store: OperationStore | None, output: TextIO) -> dict[str, Any]:
+    """Keep already computed facts when lock exit fails after compaction."""
+    assert isinstance(output, StringIO)
+    computed: Mapping[str, Any] = {}
+    try:
+        value = json.loads(output.getvalue())
+        if isinstance(value, Mapping):
+            computed = value
+    except ValueError:
+        pass
+    output.seek(0)
+    output.truncate(0)
+    sources: list[Mapping[str, Any]] = []
+    if store is not None:
+        for reader in (store.read_state, store.read_result):
+            try:
+                value = reader()
+                if isinstance(value, Mapping):
+                    sources.append(value)
+            except (OperationStoreError, OSError):
+                pass
+    sources.append(computed)
+    evidence: dict[str, Any] = {}
+    for source in sources:
+        evidence.update(source)
+    evidence["modified"] = any(bool(source.get("modified")) for source in sources)
+    evidence["mutation_started"] = any(bool(source.get("mutation_started")) for source in sources)
+    if store is not None:
+        evidence["mutation_started"] |= _safe_mutation_started(store)
+    evidence["computed"] = bool(computed)
+    return evidence
+
+
+def _publication_details(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: evidence[key] for key in (
+        "action_ids", "verified_action_ids", "verification",
+        "final_scope_verification", "verification_attempts", "root_results",
+        "action_results", "batches",
+    ) if key in evidence}
 
 
 def _mapping(value: Any, default: Mapping[str, Any]) -> dict[str, Any]:

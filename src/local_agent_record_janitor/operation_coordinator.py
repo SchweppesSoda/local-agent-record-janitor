@@ -16,6 +16,9 @@ from typing import Any
 from .action_registry import action_capability
 from .agent_operations import action_binding
 from .operation_store import OperationStore, plan_sha256, strict_json_load, write_new_json
+from .mutation_guard import (
+    frozen_operation_roots, mutation_guard, mutation_roots, scopes_for_actions,
+)
 from .record_identity import (
     capability_for,
     canonical_path,
@@ -452,6 +455,53 @@ class OperationCoordinator:
             )
 
     def verify_operation(
+        self,
+        *,
+        operation_id: str | None = None,
+        plan_path: Path | None = None,
+        operation_home: Path | None = None,
+        codex_home: Path | None = None,
+        scope: Mapping[str, Any] | None = None,
+        adapters: Iterable[Any] | None = None,
+        verify_timeout: int = 180,
+        **_unused: Any,
+    ) -> dict[str, Any]:
+        document: Mapping[str, Any] | None = None
+        computed: Mapping[str, Any] | None = None
+        try:
+            live = self._live.get(str(operation_id or ""))
+            document = live.document if live is not None else self._load_plan(
+                operation_id, plan_path, None,
+                operation_home=operation_home, codex_home=codex_home,
+            )
+            with mutation_roots(frozen_operation_roots(document)):
+                computed = self._verify_operation_locked(
+                    operation_id=operation_id, plan_path=plan_path,
+                    operation_home=operation_home, codex_home=codex_home,
+                    scope=scope, adapters=adapters, verify_timeout=verify_timeout,
+                )
+            return dict(computed)
+        except Exception as exc:
+            if document is not None:
+                status = self._status_for_document(document)
+                prior = computed or (live.result if live is not None else None) or {}
+                result = self._result_document(
+                    document, dict(scope or {}), goal_status="unknown",
+                    blockers=[self._blocker(getattr(exc, "kind", "operation_verify_failed"), str(exc))],
+                    batches=prior.get("batches") or status.get("batches", ()),
+                    modified=bool(prior.get("modified")) or bool(status.get("modified")),
+                    mutation_started=bool(prior.get("mutation_started")) or bool(status.get("mutation_started")),
+                )
+                if live is not None:
+                    live.result = result
+                return result
+            return self._error_document(
+                "verify", dict(scope or {}), str(exc) or repr(exc),
+                operation_id=operation_id,
+                blocker_code=getattr(exc, "kind", "operation_verify_failed"),
+            )
+
+    def _verify_operation_locked(
         self,
         *,
         operation_id: str | None = None,
@@ -3485,6 +3535,41 @@ class OperationCoordinator:
         app_server_factory: Any,
         binary_resolver: Any,
     ) -> dict[str, Any]:
+        entered = False
+        try:
+            with mutation_roots(frozen_operation_roots(live.document)):
+                entered = True
+                return self._execute_live_locked(
+                    live, timeout=timeout,
+                    app_server_factory=app_server_factory,
+                    binary_resolver=binary_resolver,
+                )
+        except Exception as exc:
+            inspection = self._inspect_child_states(live.document)
+            prior = live.result or {}
+            modified = bool(prior.get("modified")) or inspection.modified
+            started = bool(prior.get("mutation_started")) or inspection.mutation_started
+            # A lock exit failure can occur after a writer and publication.
+            # Preserve those facts; absence of a result after entering the
+            # execution scope is never proof of an unchanged outcome.
+            unknown = bool(started or modified or inspection.blockers or (entered and not live.result))
+            result = self._result_document(
+                live.document, live.document.get("scope", {}), goal_status="unknown" if unknown else "blocked",
+                blockers=[self._blocker(getattr(exc, "kind", "mutation_root_untrusted"), str(exc))],
+                batches=prior.get("batches", inspection.batches),
+                modified=modified, mutation_started=started,
+            )
+            live.result = result
+            return result
+
+    def _execute_live_locked(
+        self,
+        live: _LiveOperation,
+        *,
+        timeout: float,
+        app_server_factory: Any,
+        binary_resolver: Any,
+    ) -> dict[str, Any]:
         from .cleanup_service import partition_actions
         from .codex_app_server import CodexAppServer
         from .discovery import choose_codex_binary
@@ -3609,7 +3694,7 @@ class OperationCoordinator:
                 store, state = self._open_batch_store(
                     live, batch, child_id, storage_path, index
                 )
-                with store.mutation_lock():
+                with mutation_guard(scopes_for_actions(live.context.plan, batch.actions), store=store), store.mutation_lock():
                     def checkpoint(
                         phase: str,
                         action: Any,
@@ -3787,7 +3872,12 @@ class OperationCoordinator:
                 known_rollback = (
                     getattr(exc, "outcome_known_rolled_back", False) is True
                 )
+                admission_blocked = getattr(exc, "kind", "") in {
+                    "store_mutation_outcome_unknown", "mutation_root_locked",
+                }
                 batch_unknown = (
+                    not admission_blocked
+                    and
                     not known_rollback
                     and (
                         batch_mutation_started
@@ -3797,7 +3887,7 @@ class OperationCoordinator:
                 stopped_unknown = stopped_unknown or batch_unknown
                 error_details = self._error_details(exc)
                 failure_blocker = self._blocker(
-                    "batch_execution_blocked"
+                    getattr(exc, "kind", "batch_execution_blocked")
                     if not batch_unknown
                     else "mutation_outcome_unknown",
                     error_details["message"],
@@ -4129,12 +4219,13 @@ class OperationCoordinator:
         }
         child_plan["plan_sha256"] = plan_sha256(child_plan)
         store = OperationStore(storage_path, child_id)
+        new_store = not store.directory.exists()
         store.accept_plan(child_plan)
         # A second process may be resuming an existing preflight child. The
         # child plan is immutable, and its state/journal are durable evidence;
         # never rewrite either file while opening the batch. Recovery states
         # have already been rejected by ``_inspect_child_states``.
-        if store.state_path.exists() or store.events_path.exists() or store.receipt_path.exists():
+        if not new_store:
             state = store.read_state()
             if state is None:
                 raise OperationCoordinatorError(

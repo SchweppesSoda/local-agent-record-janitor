@@ -6,7 +6,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -26,6 +26,7 @@ from local_agent_record_janitor.operation_store import (
     _receipt_sha256,
     plan_sha256,
 )
+from local_agent_record_janitor.mutation_guard import mutation_roots
 
 from tests.support import create_thread_index, write_rollout
 
@@ -772,6 +773,67 @@ class AgentCliTests(unittest.TestCase):
         )
         self.assertFalse(operation.exists())
 
+    def test_root_exit_failure_emits_one_unknown_and_keeps_compacted_attempt_facts(self) -> None:
+        @contextmanager
+        def fail_exit(roots):
+            with mutation_roots(roots):
+                yield
+            raise OperationStoreError("Injected root exit failure after publication")
+        for command in ("apply", "verify"):
+            with self.subTest(command=command):
+                plan_path, plan, rollout = self.make_plan("exit-failure-" + command)
+                if command == "apply":
+                    server = _MutatingServer(lambda _id: rollout.unlink())
+                    argv = ("agent", "apply", "--plan", str(plan_path),
+                        "--authorized-plan-sha256", plan["plan_sha256"], "--clients-closed",
+                        "--verify-timeout", "0")
+                else:
+                    store = OperationStore(self.codex_home, plan["operation_id"])
+                    store.accept_plan(plan)
+                    store.write_state({"schema_version": "larj.agent-state.v1",
+                        "operation_id": plan["operation_id"], "plan_sha256": plan["plan_sha256"],
+                        "phase": "recovery_required", "goal_status": "unknown", "goal_satisfied": False,
+                        "modified": True, "mutation_started": True, "next_event_sequence": 1})
+                    store.append_event({"event": "mutation_started"})
+                    rollout.unlink()
+                    server = None
+                    argv = ("agent", "verify", "--operation-id", plan["operation_id"],
+                        "--codex-home", str(self.codex_home), "--verify-timeout", "0")
+                with patch("local_agent_record_janitor.agent_cli.mutation_roots", fail_exit):
+                    code, result, _ = self.invoke(argv, server=server)
+                self.assertEqual(code, 1)
+                self.assertEqual(result["goal_status"], "unknown")
+                self.assertTrue(result["modified"])
+                self.assertTrue(result["mutation_started"])
+                self.assertTrue(result["verification"]["all_satisfied"])
+                self.assertEqual(result["plan_sha256"], plan["plan_sha256"])
+                self.assertTrue((self.operation_directory(plan) / "receipt.json").exists())
+                if server is not None:
+                    self.assertEqual(server.deleted_thread_ids, ["exit-failure-apply"])
+                plan_path.unlink()
+
+    def test_legacy_ambiguous_checkpoint_requires_verify_without_claiming_no_attempt(self) -> None:
+        for checkpoint in ("plan_only", "executing", "blocked_missing_not_started"):
+            with self.subTest(checkpoint=checkpoint):
+                plan_path, plan, _ = self.make_plan("ambiguous-" + checkpoint)
+                store = OperationStore(self.codex_home, plan["operation_id"])
+                store.accept_plan(plan)
+                if checkpoint != "plan_only":
+                    store.write_state({"schema_version": "larj.agent-state.v1",
+                        "operation_id": plan["operation_id"], "plan_sha256": plan["plan_sha256"],
+                        "phase": "executing" if checkpoint == "executing" else "blocked",
+                        "goal_status": "unknown" if checkpoint == "executing" else "blocked",
+                        "goal_satisfied": False, "modified": False, "mutation_started": False,
+                        "next_event_sequence": 1})
+                code, result, _ = self.invoke(("agent", "apply", "--plan", str(plan_path),
+                    "--authorized-plan-sha256", plan["plan_sha256"], "--clients-closed"))
+                self.assertEqual(code, 1)
+                self.assertEqual(result["goal_status"], "unknown")
+                self.assertFalse(result["mutation_started"])
+                self.assertFalse(result["modified"])
+                self.assertFalse(store.receipt_path.exists())
+                plan_path.unlink()
+
     def test_agent_argument_errors_are_one_json_document_and_never_exit_two(
         self,
     ) -> None:
@@ -1070,13 +1132,15 @@ class AgentCliTests(unittest.TestCase):
     def test_mutation_gate_flush_failure_never_calls_modifier_or_retries(self) -> None:
         plan_path, document, _rollout = self.make_plan("durability-gate")
         operation_directory = self.operation_directory(document)
-        calls = 0
+        failed = False
 
         def fail_mutation_state_directory_flush(path: Path) -> None:
-            nonlocal calls
-            if path == operation_directory:
-                calls += 1
-                if calls == 6:
+            nonlocal failed
+            if path == operation_directory and not failed:
+                state_path = path / "state.json"
+                state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+                if state.get("phase") == "executing" and state.get("current_action_state") == "guard_pending":
+                    failed = True
                     raise OSError("simulated durable gate failure")
 
         server = _MutatingServer(lambda _thread_id: self.fail("must not mutate"))
@@ -1102,8 +1166,10 @@ class AgentCliTests(unittest.TestCase):
         self.assertFalse(result["mutation_started"])
         self.assertEqual(server.deleted_thread_ids, [])
         code, repeated, _ = self.invoke(argv, server=server)
-        self.assertEqual(code, 3)
-        self.assertEqual(repeated["goal_status"], "blocked")
+        # The original call proves dispatch did not happen. A new reader
+        # only has the ambiguous durable executing checkpoint and must verify.
+        self.assertEqual(code, 1)
+        self.assertEqual(repeated["goal_status"], "unknown")
         self.assertFalse(repeated["mutation_started"])
         self.assertEqual(server.deleted_thread_ids, [])
 

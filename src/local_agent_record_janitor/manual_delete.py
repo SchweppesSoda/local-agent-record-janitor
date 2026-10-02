@@ -27,6 +27,7 @@ from .discovery import choose_codex_binary
 from .models import ConversationSummary, Finding, RolloutRecord
 from .path_identity import canonical_existing_path_key
 from .blocker_codes import LIVE_FRONTEND_REFERENCE
+from .mutation_guard import guard_manual_execution
 
 
 class ManualDeletePlanError(ValueError):
@@ -514,6 +515,7 @@ def build_manual_delete_plan(catalog: Any) -> ManualDeletePlan:
     )
 
 
+@guard_manual_execution
 def execute_manual_delete(
     plan: ManualDeletePlan,
     *,

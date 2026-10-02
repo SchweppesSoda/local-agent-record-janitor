@@ -1,6 +1,6 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1 已落地，P2 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a 已落地，P2b 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -127,6 +127,10 @@ mutation 已开始、unknown、partial 和终态回执。
 **依赖：**P1。**改动范围：**`path_identity.py`、discovery/inspector、
 `targeted_guard.py`、`operation_coordinator.py`、`operation_store.py` 及协议测试。
 
+P2a 的同 root 协调与兼容恢复已落地，见
+[Adapter 协调契约](adapters.md#同-root-的-mutation-协调)。P2b 的文件别名和运行归属
+证据仍待实施；不能据 P2a 根路径归一宣称文件别名或共享 writer 已完整探测。
+
 - 建立本地文件身份/别名证据：在支持的平台探测文件 ID、链接数、symlink 目标及
   已发现路径；区分已知别名集合与已经证明完整的集合。链接数不一致、范围外目标、
   断链或探测失败都不能被当作完整范围。不遍历全盘寻找未知副本。
@@ -139,10 +143,15 @@ mutation 已开始、unknown、partial 和终态回执。
   结果未知的受影响批次；更换 operation ID 或 plan path 不能绕过。证据不足时阻止
   该 root，不扫描其他 operation home 或全盘，不承诺跨 root 桥接的全局防重发。
 - root 级 OS 跨进程互斥覆盖兄弟占用检查、持久化 mutation_started、writer 与结果
-  发布；verify 的读取和终态发布使用同一互斥。锁序为 root → per-operation → writer，
+  发布；verify 的读取和终态发布、status 读后 receipt 清理使用同一互斥。
+  固定永久 `.mutation.lock` 不删除或替换。锁序为 root → per-operation → writer，
   多 root 固定排序。锁失败不降级，unknown 无 TTL、不 compact；崩溃后通过
   [既有 status/verify 契约](agent-operation-contract.md)收口，不自动删除旧 apply.lock
   或重发 mutation。已知 blocked 且未尝试的操作可恢复，已知 partial 残留可重新计划。
+- manual、GUI 和直接服务入口共享门槛，阻止绕过既有 journal unknown；本阶段不为
+  这些旧入口新增第二套 journal，因此不声明它们新发生的 unknown 已有完整持久化
+  恢复。旧 `apply.lock` 保守阻止，新根锁不证明旧 writer 已退出；不同 native roots、
+  未证明桥接及未使用该锁的旧版本不在全局互斥保证内。
 - 为后续 adapter 提供上述证据接口；此阶段不新增跨 store 文件删除或远端执行器。
 
 **完成条件：**临时目录中的链接、路径替换和进程模拟能证明范围外记录不受影响；

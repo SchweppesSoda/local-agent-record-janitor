@@ -154,6 +154,13 @@ class OperationStore:
         self._plan_cache_revision: tuple[int, int, int, int, int] | None = None
 
     def accept_plan(self, plan: Mapping[str, Any]) -> None:
+        # Expiry may remove/recreate this directory. The root lock, rather
+        # than a per-operation lock file, serializes that generation change.
+        from .mutation_guard import mutation_roots
+        with mutation_roots((self.codex_home,)):
+            self._accept_plan_locked(plan)
+
+    def _accept_plan_locked(self, plan: Mapping[str, Any]) -> None:
         self._ensure_directory(create=True)
         if self._purge_expired_receipt_if_needed():
             self._ensure_directory(create=True)
@@ -414,6 +421,11 @@ class OperationStore:
         self._assert_safe()
 
     def compact_completed(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        from .mutation_guard import mutation_roots
+        with mutation_roots((self.codex_home,)):
+            return self._compact_completed_locked(result)
+
+    def _compact_completed_locked(self, result: Mapping[str, Any]) -> dict[str, Any]:
         """Replace a known terminal journal with one bounded metadata receipt."""
 
         self._assert_safe()
@@ -517,6 +529,15 @@ class OperationStore:
         return receipt
 
     def read_result(self) -> dict[str, Any] | None:
+        # Receipt reads can finish compaction or expire an old directory.
+        # Every caller, including status/inspection, needs the same mutex as
+        # a writer before it reads the receipt that authorizes that cleanup.
+        self._assert_safe()
+        from .mutation_guard import mutation_roots
+        with mutation_roots((self.codex_home,)):
+            return self._read_result_locked()
+
+    def _read_result_locked(self) -> dict[str, Any] | None:
         self._assert_safe()
         if self._purge_expired_receipt_if_needed():
             return None

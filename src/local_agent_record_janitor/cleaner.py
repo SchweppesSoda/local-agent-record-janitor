@@ -42,6 +42,7 @@ from .conversation_metadata import (
 from .discovery import choose_codex_binary
 from .models import Finding, RolloutRecord
 from .path_identity import canonical_existing_path_key
+from .mutation_guard import guard_finding_execution
 
 
 class ThreadSelectionError(ValueError):
@@ -615,6 +616,7 @@ def verify_finding_deleted(finding: Finding) -> VerificationResult:
     )
 
 
+@guard_finding_execution
 def clean_findings(
     findings: Iterable[Finding],
     *,

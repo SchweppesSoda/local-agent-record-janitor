@@ -40,6 +40,8 @@
 已经开始、unknown、partial 和终态回执。路径由测试重定位到临时存储；生产 reader
 保留旧计划原文与 hash，status/verify 不重发 mutation。新的成功场景使用独立临时
 存储，不能用一个 fresh operation 的成功代替旧 unknown operation 的收口。
+固定 child plan/state/receipt 同时重绑定全部存储引用，使用新的 coordinator 实例执行
+status/verify 并验证 apply 不重发；兼容 reader 不修改旧授权或 hash。
 
 ### 类型化清单入口
 
@@ -64,6 +66,24 @@ blocker 继续收紧每个目标。engine context 的 capability 是汇总，不
 family 在实际 writer 分派前按精确 metadata source 或 native store 再检查；前端
 引用按冻结的真实 backend 证据检查全部受影响引擎，不使用 Codex 默认值放宽 Pi/Claude
 限制。明确选择只读目标返回 blocked，独立可写 profile 保留原计划行为。
+
+### 同 root 的 mutation 协调
+
+`mutation_guard.py` 在同一受信本地物理 root 的既有 `operations` 下读取可信的
+legacy/child journal。unknown 占用被冻结的 native/frontend ID 和精确文件路径共同
+定位；更换 operation ID 或 plan path 不绕过占用。文件路径按原始 root anchor 的
+词法相对位置映射到已证明的物理 root，保留已消失路径，不重新 resolve 目标文件。
+未知 family、缺失路径/状态或损坏 journal 保守阻止相应 root。
+
+永久 `.mutation.lock` 使用 OS 跨进程互斥，固定多 root 顺序，覆盖占用检查、持久化
+checkpoint、writer 和终态发布；verify 及 receipt 清理也持同一锁。旧 `apply.lock`
+仍意味着结果未知，新根锁不能证明旧 writer 已退出；不自动删锁或给 unknown 设置
+TTL。已知未尝试的 blocked 可恢复，verify 确认 partial 后可为真实残留生成新计划。
+
+manual、GUI 和直接服务入口使用相同 gate，阻止绕过已有 journal 的 unknown；这些
+入口不因此新增持久化 journal，其新超时结果没有完整 operation 恢复保证。协调范围
+仅限既有受信本地 root，不承诺不同 native roots、未证明桥接或未使用该锁的旧版本
+之间全局互斥。接入方仍须提供完整 frozen footprint 和既有关闭、归属、终验契约。
 
 ### 身份、错误与能力
 

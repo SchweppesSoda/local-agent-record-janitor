@@ -447,5 +447,242 @@
     "completed_at": "2099-01-01T00:00:00+00:00",
     "receipt_expires_at": "2099-01-08T00:00:00+00:00",
     "receipt_sha256": "34c4ef4138fa1eaa5e143cbc7febf4b89ef30a91553a84646d26b8156aa4577c"
+  },
+  "child_recovery": {
+    "plan": {
+      "schema_version": "larj.child-operation-plan.v1",
+      "operation_id": "compat-operation_plan-1",
+      "parent_operation_id": "compat-operation_plan",
+      "target": {
+        "codex_home": "$STORE_ROOT",
+        "storage_id": "storage-0d7161c80817f5e7"
+      },
+      "mutation_family": "delete_conversation",
+      "actions": [
+        {
+          "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4",
+          "available": true,
+          "binding": {
+            "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4",
+            "affected_thread_ids": [
+              "synthetic-thread"
+            ],
+            "capability": {
+              "implemented": true,
+              "kind": "delete_conversation",
+              "mutation_family": "delete_conversation",
+              "requires_clients_closed": true,
+              "verifies_by": "native_thread_artifacts_absent"
+            },
+            "impact": {
+              "affected_thread_ids": [
+                "synthetic-thread"
+              ],
+              "conversation_metadata_fingerprints": [
+                "synthetic-thread=v1:29fe2c59442712a78aa25aa07da3ed24d262a41dd2e90606684de7685fbc5521"
+              ],
+              "descendant_thread_count": 0,
+              "descendant_thread_ids": [],
+              "desktop_catalog_record_count": 0,
+              "desktop_database_paths": [],
+              "desktop_global_state_paths": [],
+              "desktop_global_state_reference_count": 0,
+              "external_action_payload": {
+                "archived": false,
+                "cwd": "$FIXTURE_ROOT",
+                "indexed": false,
+                "is_subagent": false,
+                "metadata_conflicts": [],
+                "metadata_evidence_fingerprints": [
+                  "session_meta=6150fa37bf078954574fa23e2ceebe7977abb996fc6a24d7c78453f5697a5da5"
+                ],
+                "metadata_sources": [
+                  "session_meta"
+                ],
+                "originator": "test",
+                "parent_thread_ids": [],
+                "project_label": "tmpefom_nbu",
+                "schema_version": 1,
+                "thread_id": "synthetic-thread"
+              },
+              "external_artifact_count": 0,
+              "external_artifact_paths": [],
+              "external_engine": "codex",
+              "external_storage_root": "$STORE_ROOT",
+              "frontend_database_paths": [],
+              "frontend_project_database_paths": [],
+              "frontend_project_evidence": [],
+              "frontend_reference_count": 0,
+              "frontend_reference_evidence": [],
+              "frontend_references_preserved": true,
+              "frontend_residual_count": 0,
+              "frontend_session_database_paths": [],
+              "frontend_session_evidence": [],
+              "index_record_count": 0,
+              "indexed_thread_ids": [],
+              "legacy_residual_line_count": 0,
+              "legacy_residual_thread_ids": [],
+              "relation_database_paths": [],
+              "relation_evidence": [],
+              "rollout_file_count": 1,
+              "rollout_paths": [
+                "$STORE_ROOT/sessions/2026/07/31/rollout-synthetic-thread.jsonl"
+              ],
+              "rollout_state_fingerprints": [
+                "v1:3fd74032572bb1ff6b10a59c89b963438ea1a7832dcbeeb9703c2316a3c5af99"
+              ]
+            },
+            "kind": "delete_conversation",
+            "observation_ids": [],
+            "snapshot_fingerprint": "v1:94190e4697f86d839b5ca063a200f2d94398c637adbae31a5cee010243bd71b6",
+            "storage_id": "storage-0d7161c80817f5e7",
+            "thread_id": "synthetic-thread"
+          },
+          "classification": "healthy",
+          "impact": {
+            "affected_thread_ids": [
+              "synthetic-thread"
+            ],
+            "conversation_metadata_fingerprints": [
+              "synthetic-thread=v1:29fe2c59442712a78aa25aa07da3ed24d262a41dd2e90606684de7685fbc5521"
+            ],
+            "descendant_thread_count": 0,
+            "descendant_thread_ids": [],
+            "desktop_catalog_record_count": 0,
+            "desktop_database_paths": [],
+            "desktop_global_state_paths": [],
+            "desktop_global_state_reference_count": 0,
+            "external_action_payload": {
+              "archived": false,
+              "cwd": "$FIXTURE_ROOT",
+              "indexed": false,
+              "is_subagent": false,
+              "metadata_conflicts": [],
+              "metadata_evidence_fingerprints": [
+                "session_meta=6150fa37bf078954574fa23e2ceebe7977abb996fc6a24d7c78453f5697a5da5"
+              ],
+              "metadata_sources": [
+                "session_meta"
+              ],
+              "originator": "test",
+              "parent_thread_ids": [],
+              "project_label": "tmpefom_nbu",
+              "schema_version": 1,
+              "thread_id": "synthetic-thread"
+            },
+            "external_artifact_count": 0,
+            "external_artifact_paths": [],
+            "external_engine": "codex",
+            "external_storage_root": "$STORE_ROOT",
+            "frontend_database_paths": [],
+            "frontend_project_database_paths": [],
+            "frontend_project_evidence": [],
+            "frontend_reference_count": 0,
+            "frontend_reference_evidence": [],
+            "frontend_references_preserved": true,
+            "frontend_residual_count": 0,
+            "frontend_session_database_paths": [],
+            "frontend_session_evidence": [],
+            "index_record_count": 0,
+            "indexed_thread_ids": [],
+            "legacy_residual_line_count": 0,
+            "legacy_residual_thread_ids": [],
+            "relation_database_paths": [],
+            "relation_evidence": [],
+            "rollout_file_count": 1,
+            "rollout_paths": [
+              "$STORE_ROOT/sessions/2026/07/31/rollout-synthetic-thread.jsonl"
+            ],
+            "rollout_state_fingerprints": [
+              "v1:3fd74032572bb1ff6b10a59c89b963438ea1a7832dcbeeb9703c2316a3c5af99"
+            ]
+          },
+          "kind": "delete_conversation",
+          "observation_ids": [],
+          "requires_explicit_selection": true,
+          "resource": {
+            "kind": "conversation",
+            "target": {
+              "storage_id": "storage-0d7161c80817f5e7",
+              "thread_id": "synthetic-thread"
+            }
+          },
+          "risk": "high",
+          "snapshot_fingerprint": "v1:94190e4697f86d839b5ca063a200f2d94398c637adbae31a5cee010243bd71b6",
+          "target": {
+            "storage_id": "storage-0d7161c80817f5e7",
+            "thread_id": "synthetic-thread"
+          }
+        }
+      ],
+      "plan_sha256": "a6fe264bc723d62f02b948cf4eda02bd7a94b9bb9bc9ff8ed6e4d133c3305630"
+    },
+    "state": {
+      "schema_version": "larj.agent-state.v1",
+      "operation_id": "compat-operation_plan-1",
+      "plan_sha256": "a6fe264bc723d62f02b948cf4eda02bd7a94b9bb9bc9ff8ed6e4d133c3305630",
+      "goal_status": "unknown",
+      "goal_satisfied": false,
+      "modified": false,
+      "mutation_started": true,
+      "phase": "recovery_required",
+      "next_event_sequence": 3,
+      "current_action_state": "mutation_started",
+      "current_action_ids": [
+        "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4"
+      ]
+    },
+    "events": [
+      {
+        "sequence": 1,
+        "recorded_at": "2026-01-01T00:00:01+00:00",
+        "operation_id": "compat-operation_plan-1",
+        "plan_sha256": "a6fe264bc723d62f02b948cf4eda02bd7a94b9bb9bc9ff8ed6e4d133c3305630",
+        "event": "mutation_started",
+        "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4"
+      },
+      {
+        "sequence": 2,
+        "recorded_at": "2026-01-01T00:00:02+00:00",
+        "operation_id": "compat-operation_plan-1",
+        "plan_sha256": "a6fe264bc723d62f02b948cf4eda02bd7a94b9bb9bc9ff8ed6e4d133c3305630",
+        "event": "batch_finished",
+        "goal_status": "unknown",
+        "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4"
+      }
+    ],
+    "receipt": {
+      "schema_version": "larj.agent-receipt.v1",
+      "operation_id": "compat-operation_plan-1",
+      "plan_sha256": "a6fe264bc723d62f02b948cf4eda02bd7a94b9bb9bc9ff8ed6e4d133c3305630",
+      "goal_status": "complete",
+      "modified": true,
+      "mutation_started": true,
+      "phase": "finished",
+      "source_subcommand": "verify",
+      "blockers": [],
+      "counts": {
+        "affected_thread_count": 1,
+        "artifact_count": 1,
+        "blocked_group_count": 0,
+        "finding_count": 1,
+        "issue_group_count": 1,
+        "legacy_residual_line_count": 0,
+        "legacy_residual_unique_thread_count": 0,
+        "root_action_count": 1
+      },
+      "action_statuses": [
+        {
+          "action_id": "record:v1:c2da9be6d51903ea3b10303d8c2c341a896a3b491abff23ae192329ba1ae37d4",
+          "status": "verified"
+        }
+      ],
+      "exact_goal_satisfied": true,
+      "full_scope_satisfied": true,
+      "full_scope_scan_complete": true,
+      "completed_at": "2099-01-01T00:00:00+00:00",
+      "receipt_expires_at": "2099-01-08T00:00:00+00:00",
+      "receipt_sha256": "7bdf7fdfa4f615b7d361967bb53f4798ac348c5ada7fb5123ddff8b360239d4b"
+    }
   }
 }

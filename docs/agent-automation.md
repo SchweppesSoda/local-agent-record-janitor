@@ -109,6 +109,23 @@ strictly increasing, durable writes are flushed before mutation, and symlinks,
 junctions, reparse points, non-regular leaves, and reused operation IDs fail
 closed. A lock left after a crash is not deleted or bypassed.
 
+The parent `operations/.mutation.lock` is a permanent OS lock file shared by
+cooperating processes. Root locks are acquired in a fixed physical-root order,
+before per-operation `apply.lock`; they cover admission, durable checkpoints,
+writers, verification facts and terminal publication. Result/receipt readers
+also hold the root lock when finishing compaction or expiring a receipt, so
+status cannot delete a newer journal that reuses an expired operation ID.
+`mutation_root_locked` means the root is busy; retry status after the active
+operation finishes. Neither lock file is automatically replaced or removed
+to recover from an unknown mutation.
+
+Before dispatch, all trusted legacy and child journals under that root are
+checked for overlapping frozen IDs and lexical artifact paths. A new operation
+ID or plan path cannot evade `store_mutation_outcome_unknown`. Missing state,
+malformed evidence or an unproved action footprint blocks the affected root.
+A remaining old `apply.lock` stays unknown even beside a complete receipt;
+the new OS mutex cannot prove an older writer has stopped.
+
 When the result is known—`complete`, `blocked`, or
 `completed_with_residuals`—the detailed plan, events, state, and result are
 replaced by one compact, body-free receipt:
@@ -128,6 +145,18 @@ that one receipt.
 An `unknown` result keeps the detailed evidence because it is still needed to
 verify the outcome. It is not compacted until verification reaches a known
 terminal state.
+Unknown journals have no TTL. Conclusive verification of a known partial result
+allows a new plan for the actual residuals. A child blocked before any mutation
+can resume once its blocker is resolved, preserving its original authorization.
+
+The shared gate also protects direct CLI/GUI and service entry points against
+existing journaled unknown outcomes. Those direct calls do not acquire a new
+durable operation journal. Cross-process timeout recovery applies to the
+journaled operation and legacy agent surfaces, within their trusted local
+roots; different roots, unproven file bridges and older non-cooperating writers
+are outside that guarantee. After mutation may have begun, a lock-exit or
+publication failure returns one `unknown` JSON result and preserves any
+already established modification and mutation-started facts.
 
 ## Temporary rollback copies
 

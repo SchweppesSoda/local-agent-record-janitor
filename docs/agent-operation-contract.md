@@ -36,8 +36,12 @@ project-wide selection does not authorize this exception. See
    as authoritative. Do not decide from human message text.
 6. If any mutation result is `unknown`, never repeat it. Run
    `operation status`, then `operation verify`. A repeated apply is
-   intentionally prevented from sending a second deletion.
-7. After a verified operation completes, create a fresh plan. Newly discovered
+   intentionally prevented from sending a second deletion. A new operation ID
+   or plan path cannot bypass an overlapping unknown legacy/child journal
+   within the same trusted physical store root.
+7. After verification reaches a known result, create a fresh plan for any
+   approved residuals. A proven blocked operation that has not attempted a
+   mutation may resume after its blocker is resolved. Newly discovered
    actions are never absorbed into an old authorization. Continue only while
    the user's authorized client/project scope still covers the new operation.
 
@@ -110,6 +114,22 @@ An `unknown` result retains the detailed recovery evidence. A known terminal
 result is compacted to a body-free `receipt.json`; the receipt expires after at
 most seven days and must never be treated as a backup. See
 [agent-automation.md](agent-automation.md) for the JSON and verification contract.
+
+The permanent `operations/.mutation.lock` serializes cooperating processes for
+one trusted local root, from journal admission through mutation and result
+publication. Verification and receipt cleanup use the same root lock. Never
+delete or replace it. This root lock does not prove that an older writer holding
+`apply.lock` has exited; that operation remains unknown even with a terminal
+receipt. Unknown journals have no expiry. Missing or untrusted journal scope
+blocks the whole affected root. Exact frozen IDs and artifact paths allow
+independent targets and stores to proceed when their scopes do not overlap.
+
+Legacy direct CLI/GUI and service writers share this admission gate, so they
+cannot bypass an existing journal's unknown outcome. They do not create a new
+operation journal themselves; durable recovery of a new direct-call timeout is
+not provided by this gate. Use the journaled operation surface for that
+guarantee. There is no global lock or replay guarantee across different native
+roots, unproven bridges, or older versions that do not use the root mutex.
 
 Shared SQLite/JSON mutations use temporary rollback copies only. Exact frontend
 reference and relation-edge actions require a closed owning client, a supported

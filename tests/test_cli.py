@@ -563,11 +563,11 @@ class CandidateActionSelectionTests(unittest.TestCase):
         )
 
 
-def _display_plan() -> SimpleNamespace:
+def _display_plan(home: Path | None = None) -> SimpleNamespace:
     storage = SimpleNamespace(
         storage_id="storage-one",
         label="Codex 默认数据目录",
-        path="C:/Codex",
+        path=str(home) if home is not None else "C:/Codex",
     )
     observation = SimpleNamespace(
         observation_id="observation-one",
@@ -1072,6 +1072,11 @@ class _EnterMutatingServer:
 
 
 class MainFlowTests(unittest.TestCase):
+    def _execution_plan(self) -> SimpleNamespace:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return _display_plan(Path(temporary.name))
+
     def test_purge_requires_yes_and_clients_closed_before_scanning(self) -> None:
         for argv in (("purge",), ("purge", "--yes")):
             with self.subTest(argv=argv), patch(
@@ -1559,7 +1564,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(len(payload["actions"]), 1)
 
     def test_json_yes_with_action_id_writes_only_execution_document(self) -> None:
-        plan = _display_plan()
+        plan = self._execution_plan()
         finding = Finding(
             platform="native",
             platform_session_id="session",
@@ -1701,7 +1706,7 @@ class MainFlowTests(unittest.TestCase):
     def test_failed_unrelated_storage_is_visible_but_healthy_action_executes(
         self,
     ) -> None:
-        plan = _display_plan()
+        plan = self._execution_plan()
         failed_storage = SimpleNamespace(
             storage_id="failed-storage",
             label="Cindy 专用数据目录",
@@ -1754,7 +1759,7 @@ class MainFlowTests(unittest.TestCase):
     def test_json_execution_keeps_unrelated_failed_storage_metadata(
         self,
     ) -> None:
-        plan = _display_plan()
+        plan = self._execution_plan()
         plan.plan_fingerprint = "revalidated-plan"
         plan.errors = ()
         plan.storages = (
@@ -1844,7 +1849,7 @@ class MainFlowTests(unittest.TestCase):
     def test_tty_selection_and_confirmation_execute_in_same_process(
         self,
     ) -> None:
-        plan = _display_plan()
+        plan = self._execution_plan()
         finding = Finding(
             platform="native",
             platform_session_id="session",

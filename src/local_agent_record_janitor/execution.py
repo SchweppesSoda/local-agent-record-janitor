@@ -297,6 +297,38 @@ def execute_prevalidated_actions(
     if restricted:
         raise ExecutionError("; ".join(reason for reasons in restricted.values() for reason in reasons),
                              kind=CLIENT_CAPABILITY_LIMIT, matches=tuple(restricted))
+    from .mutation_guard import mutation_guard, scopes_for_actions
+    from .operation_store import OperationStoreError
+    try:
+        with mutation_guard(scopes_for_actions(context.plan, actions)):
+            return _execute_prevalidated_actions_locked(
+                context, actions, timeout=timeout,
+                app_server_factory=app_server_factory, binary_resolver=binary_resolver,
+                client_inspector=client_inspector, action_state_callback=action_state_callback,
+                finding_mapper=finding_mapper, integrity_approval_builder=integrity_approval_builder,
+                desktop_fingerprint_resolver=desktop_fingerprint_resolver, cleaner=cleaner,
+                session_executor=session_executor, session_preflight_verified=session_preflight_verified,
+            )
+    except OperationStoreError as exc:
+        raise ExecutionError(str(exc), kind=getattr(exc, "kind", "mutation_root_untrusted")) from exc
+
+
+def _execute_prevalidated_actions_locked(
+    context: CleanupContext,
+    actions: Sequence[Any],
+    *,
+    timeout: float,
+    app_server_factory: AppServerFactory,
+    binary_resolver: BinaryResolver,
+    client_inspector: ClientInspector,
+    action_state_callback: ExecutionActionStateCallback | None,
+    finding_mapper: FindingMapper | None,
+    integrity_approval_builder: IntegrityApprovalBuilder | None,
+    desktop_fingerprint_resolver: DesktopFingerprintResolver | None,
+    cleaner: Cleaner | None,
+    session_executor: Any,
+    session_preflight_verified: bool,
+) -> ExecutionOutcome:
     mutation_kinds = {_enum_value(action.kind) for action in actions}
     if len(mutation_kinds) != 1:
         raise ExecutionError(

@@ -42,6 +42,7 @@ from .manual_delete import (
     execute_manual_delete,
 )
 from .path_identity import canonical_existing_path_key
+from .mutation_guard import guard_gui_execution
 from .rendering import safe_single_line
 
 
@@ -402,6 +403,7 @@ def build_gui_delete_plan(native_plan: ManualDeletePlan) -> GuiDeletePlan:
     )
 
 
+@guard_gui_execution
 def execute_gui_delete(
     plan: GuiDeletePlan,
     *,

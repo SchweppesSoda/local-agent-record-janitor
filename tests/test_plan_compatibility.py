@@ -38,14 +38,16 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
     def relocate(self, name: str) -> dict:
         # Only this fixture harness relocates paths/bindings. Production
         # readers must return the persisted document and its hash unchanged.
-        original = self.samples[name]
+        original = (self.samples["child_recovery"]["plan"] if name == "child_plan"
+                    else self.samples[name])
         self.assertEqual(plan_sha256(original), original["plan_sha256"])
         text = json.dumps(original)
         text = text.replace("$STORE_ROOT", self.home.as_posix())
         text = text.replace("$FIXTURE_ROOT", self.root.as_posix())
-        old_store_id = original.get("target", {}).get("storage_id")
-        if old_store_id:
-            text = text.replace(old_store_id, storage_id_for_path(self.home))
+        storages = [*original.get("storages", ()), original.get("target", {})]
+        for storage in storages:
+            if storage.get("storage_id"):
+                text = text.replace(storage["storage_id"], storage_id_for_path(self.home))
         result = json.loads(text)
         result["plan_sha256"] = plan_sha256(result)
         return result
@@ -143,6 +145,67 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
             self.assertEqual(result["goal_status"], "complete")
             self.assertEqual(result["plan_sha256"], receipt["plan_sha256"])
             self.assertTrue(result["compacted"])
+        self.assertEqual(store.receipt_path.read_bytes(), before)
+
+    def install_child(self, *, receipt: bool) -> tuple[dict, dict, OperationStore]:
+        top = self.relocate("operation_plan")
+        child = self.relocate("child_plan")
+        self.assertEqual(child["actions"], top["actions"])
+        self.assertEqual(child["target"]["storage_id"], top["storages"][0]["storage_id"])
+        self.assertEqual(top["child_batches"][0]["storage_id"], child["target"]["storage_id"])
+        Path(top["plan_path"]).write_text(json.dumps(top), encoding="utf-8")
+        store = OperationStore(self.home, child["operation_id"])
+        fixture = self.samples["child_recovery"]
+        if receipt:
+            value = {**fixture["receipt"], "plan_sha256": child["plan_sha256"]}
+            value["receipt_sha256"] = _receipt_sha256(value)
+            store.directory.mkdir(parents=True)
+            store.receipt_path.write_text(json.dumps(value), encoding="utf-8")
+        else:
+            store.accept_plan(child)
+            state = {**fixture["state"], "plan_sha256": child["plan_sha256"]}
+            events = [{**event, "plan_sha256": child["plan_sha256"]} for event in fixture["events"]]
+            store.state_path.write_text(json.dumps(state), encoding="utf-8")
+            store.events_path.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+        return top, child, store
+
+    def test_fixed_child_unknown_status_verify_and_apply_refusal_use_frozen_bindings(self) -> None:
+        top, child, store = self.install_child(receipt=False)
+        before = store.plan_path.read_bytes()
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        args = {"operation_id": top["operation_id"], "plan_path": Path(top["plan_path"])}
+        status = coordinator.status_operation(**args)
+        self.assertEqual(status["goal_status"], "unknown")
+        self.assertTrue(status["mutation_started"])
+        applied = coordinator.apply_operation(**args, scope=top["scope"], plan_sha256=top["plan_sha256"],
+            clients_closed=True, app_server_factory=lambda **_: self.fail("fixed child must not replay"))
+        self.assertEqual(applied["goal_status"], "unknown")
+        self.assertEqual(store.plan_path.read_bytes(), before)
+        self.assertEqual(store.read_plan()["plan_sha256"], child["plan_sha256"])
+        verified = coordinator.verify_operation(**args, adapters=(NativeIntegrityAdapter(codex_home=self.home),),
+            verify_timeout=0)
+        self.assertEqual(verified["goal_status"], "complete")
+        self.assertTrue(store.receipt_path.exists())
+        fresh = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        result = fresh.apply_operation(**args, scope=top["scope"], plan_sha256=top["plan_sha256"],
+            clients_closed=True, app_server_factory=lambda **_: self.fail("verified fixed child must not replay"))
+        self.assertEqual(result["goal_status"], "complete")
+
+    def test_fixed_child_receipt_reopens_in_new_coordinator_without_replaying(self) -> None:
+        top, _, store = self.install_child(receipt=True)
+        before = store.receipt_path.read_bytes()
+        args = {"operation_id": top["operation_id"], "plan_path": Path(top["plan_path"])}
+        for method in ("status_operation", "verify_operation", "apply_operation"):
+            with self.subTest(method=method):
+                coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+                extras = ({"scope": top["scope"], "plan_sha256": top["plan_sha256"], "clients_closed": True,
+                           "app_server_factory": lambda **_: self.fail("fixed receipt must not replay")}
+                          if method == "apply_operation" else
+                          {"adapters": (NativeIntegrityAdapter(codex_home=self.home),), "verify_timeout": 0}
+                          if method == "verify_operation" else {})
+                result = getattr(coordinator, method)(**args, **extras)
+                self.assertEqual(result["goal_status"], "complete")
+                self.assertTrue(result["mutation_started"])
         self.assertEqual(store.receipt_path.read_bytes(), before)
 
 

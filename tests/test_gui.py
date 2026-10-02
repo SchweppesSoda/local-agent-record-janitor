@@ -38,7 +38,10 @@ from tests.support import create_thread_index, write_rollout
 
 class GuiSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
-        home = Path("C:/CodexHome")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = home = Path(temporary.name) / "codex-home"
+        home.mkdir()
         reference = FrontendSessionRecord(
             platform="codex-desktop",
             platform_session_id="local:root-thread",
@@ -164,8 +167,8 @@ class GuiSnapshotTests(unittest.TestCase):
             platform_session_id="root-thread",
             thread_id="root-thread",
             reason="manual delete",
-            platform_db=Path("C:/CodexHome/state_5.sqlite"),
-            codex_home=Path("C:/CodexHome"),
+            platform_db=self.home / "state_5.sqlite",
+            codex_home=self.home,
         )
         native_report = CleanupReport(
             planned=[finding],

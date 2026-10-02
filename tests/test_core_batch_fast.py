@@ -33,6 +33,21 @@ from tests.support import create_thread_index, write_rollout
 
 class CoreBatchFastTests(unittest.TestCase):
     @staticmethod
+    def _checkpoint_document(operation_id: str, context: object) -> dict:
+        document = {
+            "operation_id": operation_id, "scope": {},
+            "storages": [{"storage_id": storage.storage_id, "path": str(storage.path)}
+                         for storage in context.plan.storages],
+            "actions": [{"action_id": action.action_id, "kind": action.kind,
+                         "target": {"storage_id": action.target.storage_id, "thread_id": action.target.thread_id},
+                         "impact": {"external_storage_root": str(action.impact.external_storage_root),
+                                    "affected_thread_ids": [action.target.thread_id]}}
+                        for action in context.plan.actions],
+        }
+        document["plan_sha256"] = plan_sha256(document)
+        return document
+
+    @staticmethod
     def _native_fixture(home: Path, count: int) -> tuple[tuple[str, ...], dict[str, tuple[Path, ...]]]:
         home.mkdir(parents=True, exist_ok=True)
         ids = tuple(f"native-{index:03d}" for index in range(count))
@@ -657,6 +672,7 @@ class CoreBatchFastTests(unittest.TestCase):
     def test_frontend_reference_batch_rejects_mixed_missing_cindy_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "renamed-cindy-profile"
+            root.mkdir()
             database = root / "frontend.sqlite"
             evidence = {
                 "platform": "cindy",
@@ -686,7 +702,7 @@ class CoreBatchFastTests(unittest.TestCase):
             context = SimpleNamespace(
                 plan=SimpleNamespace(
                     storages=(
-                        SimpleNamespace(storage_id="cindy-store", path=database),
+                        SimpleNamespace(storage_id="cindy-store", path=root),
                     ),
                 ),
             )
@@ -711,6 +727,9 @@ class CoreBatchFastTests(unittest.TestCase):
             cleanup.assert_not_called()
 
     def test_unknown_session_result_stops_remaining_requests(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        home = Path(temporary.name)
         actions = tuple(
             SimpleNamespace(
                 action_id=f"action-{index}",
@@ -730,7 +749,7 @@ class CoreBatchFastTests(unittest.TestCase):
                 return self
 
         context = SimpleNamespace(
-            plan=SimpleNamespace(),
+            plan=SimpleNamespace(storages=(SimpleNamespace(storage_id="pi-store", path=home),)),
             session_engine="pi",
             session_native_plan=NativePlan(),
             session_catalog_builder=lambda: None,
@@ -789,29 +808,6 @@ class CoreBatchFastTests(unittest.TestCase):
                 ),
             )
 
-            class FakeStore:
-                def __init__(self) -> None:
-                    self.state = {"next_event_sequence": 1}
-
-                def read_state(self) -> dict[str, object]:
-                    return dict(self.state)
-
-                def append_event(
-                    self,
-                    _event: object,
-                    *,
-                    state_updates: object = None,
-                ) -> None:
-                    if isinstance(state_updates, dict):
-                        self.state.update(state_updates)
-                    self.state["next_event_sequence"] = int(
-                        self.state["next_event_sequence"]
-                    ) + 1
-
-                @contextmanager
-                def mutation_lock(self):
-                    yield
-
             class FakeService:
                 def execute(self, _context: object, selected: object, **kwargs: object):
                     callback = kwargs["action_state_callback"]
@@ -828,11 +824,7 @@ class CoreBatchFastTests(unittest.TestCase):
             coordinator = OperationCoordinator(FakeService())
             live = SimpleNamespace(
                 operation_id="unknown-operation",
-                document={
-                    "operation_id": "unknown-operation",
-                    "plan_sha256": "a" * 64,
-                    "scope": {},
-                },
+                document=self._checkpoint_document("unknown-operation", context),
                 context=context,
                 candidates=(action,),
                 client="pi",
@@ -845,11 +837,7 @@ class CoreBatchFastTests(unittest.TestCase):
                 terminal_calls.append("scan")
                 return None, None
 
-            with patch.object(
-                coordinator,
-                "_open_batch_store",
-                return_value=(FakeStore(), {"next_event_sequence": 1}),
-            ), patch.object(coordinator, "_terminal_context", side_effect=terminal):
+            with patch.object(coordinator, "_terminal_context", side_effect=terminal):
                 result = coordinator._execute_live(
                     live,
                     timeout=1,
@@ -897,29 +885,6 @@ class CoreBatchFastTests(unittest.TestCase):
                 ),
             )
 
-            class FakeStore:
-                def __init__(self) -> None:
-                    self.state = {"next_event_sequence": 1}
-
-                def read_state(self) -> dict[str, object]:
-                    return dict(self.state)
-
-                def append_event(
-                    self,
-                    _event: object,
-                    *,
-                    state_updates: object = None,
-                ) -> None:
-                    if isinstance(state_updates, dict):
-                        self.state.update(state_updates)
-                    self.state["next_event_sequence"] = int(
-                        self.state["next_event_sequence"]
-                    ) + 1
-
-                @contextmanager
-                def mutation_lock(self):
-                    yield
-
             class FakeService:
                 def __init__(self) -> None:
                     self.calls: list[str] = []
@@ -946,20 +911,17 @@ class CoreBatchFastTests(unittest.TestCase):
 
             service = FakeService()
             coordinator = OperationCoordinator(service)
-            stores: list[FakeStore] = []
+            stores: list[OperationStore] = []
+            original_open = coordinator._open_batch_store
 
             def open_batch(*_args: object, **_kwargs: object):
-                store = FakeStore()
+                store, state = original_open(*_args, **_kwargs)
                 stores.append(store)
-                return store, store.state
+                return store, state
 
             live = SimpleNamespace(
                 operation_id="guard-operation",
-                document={
-                    "operation_id": "guard-operation",
-                    "plan_sha256": "a" * 64,
-                    "scope": {},
-                },
+                document=self._checkpoint_document("guard-operation", context),
                 context=context,
                 candidates=(native, next_batch),
                 client="native",
@@ -1026,29 +988,6 @@ class CoreBatchFastTests(unittest.TestCase):
                 ),
             )
 
-            class FakeStore:
-                def __init__(self) -> None:
-                    self.state = {"next_event_sequence": 1}
-
-                def read_state(self) -> dict[str, object]:
-                    return dict(self.state)
-
-                def append_event(
-                    self,
-                    _event: object,
-                    *,
-                    state_updates: object = None,
-                ) -> None:
-                    if isinstance(state_updates, dict):
-                        self.state.update(state_updates)
-                    self.state["next_event_sequence"] = (
-                        int(self.state["next_event_sequence"]) + 1
-                    )
-
-                @contextmanager
-                def mutation_lock(self):
-                    yield
-
             class KnownRollback(RuntimeError):
                 outcome_known_rolled_back = True
 
@@ -1071,20 +1010,17 @@ class CoreBatchFastTests(unittest.TestCase):
                     raise KnownRollback("frontend transaction rolled back")
 
             coordinator = OperationCoordinator(FakeService())
-            stores: list[FakeStore] = []
+            stores: list[OperationStore] = []
+            original_open = coordinator._open_batch_store
 
             def open_batch(*_args: object, **_kwargs: object):
-                store = FakeStore()
+                store, state = original_open(*_args, **_kwargs)
                 stores.append(store)
-                return store, store.state
+                return store, state
 
             live = SimpleNamespace(
                 operation_id="known-rollback-operation",
-                document={
-                    "operation_id": "known-rollback-operation",
-                    "plan_sha256": "a" * 64,
-                    "scope": {},
-                },
+                document=self._checkpoint_document("known-rollback-operation", context),
                 context=context,
                 candidates=(native, frontend),
                 client="native",
