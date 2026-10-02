@@ -5,9 +5,10 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from local_agent_record_janitor.adapters import AionUIAdapter, CindyAdapter
 from local_agent_record_janitor.cli import main
@@ -17,7 +18,7 @@ from local_agent_record_janitor.client_inventory import (
     build_client_engine_contexts,
     build_client_inventory,
 )
-from local_agent_record_janitor.inventory import FrontendSessionRecord
+from local_agent_record_janitor.inventory import FrontendSessionRecord, build_session_catalog
 from local_agent_record_janitor.record_identity import (
     EngineCapability,
     NATIVE_ROOT_UNVERIFIED,
@@ -29,6 +30,7 @@ from local_agent_record_janitor.record_identity import (
     capability_for,
     resolve_project_selector,
 )
+from tests.support import create_thread_index, write_rollout
 
 
 @dataclass
@@ -145,6 +147,172 @@ def _create_aionui_database(path: Path) -> None:
 
 
 class ClientInventoryTests(unittest.TestCase):
+    def _lineage_fixture(self, root, parents, *, references=("parent",)):
+        home = root / "codex-home"
+        rows = []
+        for record_id, parent in parents.items():
+            source = (
+                {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+                if parent else "app-server"
+            )
+            path = write_rollout(home, record_id, originator="cindy", source=source)
+            rows.append({"id": record_id, "rollout_path": str(path),
+                         "source": json.dumps(source)})
+        create_thread_index(home, rows)
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as db:
+            db.execute("ALTER TABLE threads ADD COLUMN title TEXT")
+            db.execute("UPDATE threads SET title='A record title'")
+            db.commit()
+        database = root / "cindy.db"
+        _create_cindy_database(database, [
+            (f"ui-{record_id}", record_id, "active", "codex")
+            for record_id in references
+        ])
+        return CindyAdapter(database=database, codex_home=home, cindy_root=root)
+
+    def test_cindy_children_keep_lineage_and_are_not_unreferenced_orphans(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._lineage_fixture(Path(temporary), {
+                "parent": None, "child": "parent", "grandchild": "child",
+            })
+            inventory = build_client_inventory((adapter,), client="cindy")
+            targets = {target.record_id: target for target in inventory.targets}
+            self.assertEqual(targets["parent"].descendant_thread_ids, ("child", "grandchild"))
+            for record_id, parent_id in (("child", "parent"), ("grandchild", "child")):
+                child = targets[record_id]
+                self.assertEqual(child.classification, RecordClassification.HEALTHY)
+                self.assertTrue(child.is_subagent)
+                self.assertEqual(child.parent_thread_ids, (parent_id,))
+                self.assertEqual(child.frontend_reference_ids, ())
+                self.assertEqual(child.to_dict()["lineage_status"], "known")
+                self.assertEqual(child.display_name, "A record title")
+            # Both CLI projections use the complete catalog before narrowing display.
+            for selection in (
+                ["--client", "cindy"],
+                ["--client", "cindy", "--record-id", "grandchild"],
+                ["--platform", "cindy"],
+            ):
+                output = StringIO()
+                status = main(["records", *selection, "--json"], adapters=(adapter,),
+                              stdout=output, stderr=StringIO())
+                self.assertEqual(status, 0, output.getvalue())
+                payload = json.loads(output.getvalue())
+                self.assertTrue(all(r["classification"] == "healthy" for r in payload["records"]))
+                if "--client" in selection:
+                    self.assertEqual(payload["classifications"]["orphan_native"], 0)
+                    child = next(r for r in payload["records"] if r["record_id"] == "grandchild")
+                    self.assertEqual(child["parent_thread_ids"], ["child"])
+                    self.assertTrue(child["is_subagent"])
+
+    def test_parent_placeholder_and_other_store_do_not_hide_missing_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._lineage_fixture(root / "one", {"child": "parent"})
+            second = self._lineage_fixture(root / "two", {"parent": None})
+            inventory = build_client_inventory((first, second), client="cindy")
+            child = next(target for target in inventory.targets if target.record_id == "child")
+            self.assertEqual(child.classification, RecordClassification.ORPHAN_NATIVE)
+            self.assertEqual(child.parent_thread_ids, ("parent",))
+            self.assertEqual(child.to_dict()["lineage_status"], "missing_parent")
+            placeholder = next(record for record in inventory.records
+                               if record.codex_home == first.codex_home and record.thread_id == "parent")
+            self.assertFalse(placeholder.artifact_present)
+
+    def test_non_lineage_metadata_conflict_does_not_break_parent_chain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._lineage_fixture(Path(temporary), {"parent": None, "child": "parent"})
+            with closing(sqlite3.connect(adapter.codex_home / "state_5.sqlite")) as db:
+                db.execute("UPDATE threads SET archived=1 WHERE id='parent'")
+                db.commit()
+            inventory = build_client_inventory((adapter,), client="cindy")
+            parent = next(r for r in inventory.records if r.thread_id == "parent")
+            self.assertTrue(parent.summary.metadata_conflicts)
+            self.assertTrue(all(t.classification == RecordClassification.HEALTHY
+                                for t in inventory.targets))
+
+    def test_injected_native_catalog_binds_frontend_references_in_the_same_store(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._lineage_fixture(root / "one", {"parent": None, "child": "parent"})
+            second = self._lineage_fixture(root / "two", {"parent": None}, references=())
+            inventory = build_client_inventory((first, second), client="cindy")
+            catalog = replace(inventory.catalog, records=tuple(
+                replace(record, frontend_sessions=()) for record in inventory.records
+            ))
+            contexts = build_client_engine_contexts(
+                (first, second), client="cindy", inventory=inventory,
+                native_catalogs={"codex": catalog},
+            )
+            parents = [t for c in contexts for t in c.targets if t.record_id == "parent"]
+            bound = next(t for t in parents if t.record_key.store.path == first.codex_home)
+            unbound = next(t for t in parents if t.record_key.store.path == second.codex_home)
+            self.assertEqual(bound.frontend_reference_ids, ("cindy:ui-parent",))
+            self.assertEqual(bound.classification, RecordClassification.HEALTHY)
+            self.assertEqual(unbound.frontend_reference_ids, ())
+            self.assertEqual(unbound.classification, RecordClassification.ORPHAN_NATIVE)
+
+    def test_index_only_and_rollout_only_parents_prove_child_relationship(self):
+        for parent_source in ("index", "rollout"):
+            with self.subTest(parent_source=parent_source), tempfile.TemporaryDirectory() as temporary:
+                adapter = self._lineage_fixture(
+                    Path(temporary), {"parent": None, "child": "parent"}, references=(),
+                )
+                catalog = build_session_catalog((adapter,))
+                parent = next(r for r in catalog.records if r.thread_id == "parent")
+                if parent_source == "index":
+                    for rollout in parent.rollouts:
+                        rollout.path.unlink()
+                else:
+                    with closing(sqlite3.connect(adapter.codex_home / "state_5.sqlite")) as db:
+                        db.execute("DELETE FROM threads WHERE id='parent'")
+                        db.commit()
+                inventory = build_client_inventory((adapter,), client="cindy")
+                targets = {t.record_id: t for t in inventory.targets}
+                self.assertEqual(targets["parent"].classification, RecordClassification.ORPHAN_NATIVE)
+                self.assertEqual(targets["child"].classification, RecordClassification.HEALTHY)
+                self.assertEqual(targets["child"].lineage_status, "known")
+
+    def test_incomplete_lineage_scan_does_not_prove_a_child_is_healthy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._lineage_fixture(Path(temporary), {"parent": None, "child": "parent"})
+            with patch("local_agent_record_janitor.inventory.read_native_lineage",
+                       side_effect=OSError("fixture incomplete graph")):
+                inventory = build_client_inventory((adapter,), client="cindy")
+            child = next(t for t in inventory.targets if t.record_id == "child")
+            self.assertEqual(child.classification, RecordClassification.BROKEN_RELATION)
+            self.assertEqual(child.lineage_status, "unknown")
+            self.assertFalse(child.to_dict()["cleanup_eligible"])
+
+    def test_lineage_conflicts_survive_engine_context_projection(self):
+        for parents in (
+            {"parent": "child", "child": "parent"},
+            {"parent": None, "child": "child"},
+        ):
+            with self.subTest(parents=parents), tempfile.TemporaryDirectory() as temporary:
+                adapter = self._lineage_fixture(Path(temporary), parents)
+                contexts = build_client_engine_contexts((adapter,), client="cindy")
+                child = next(t for c in contexts for t in c.targets if t.record_id == "child")
+                self.assertEqual(child.classification, RecordClassification.BROKEN_RELATION)
+                self.assertIn("lineage_conflict", child.blocker_codes)
+                self.assertTrue(child.blockers)
+                self.assertEqual(child.to_dict()["lineage_status"], "conflict")
+                self.assertFalse(child.to_dict()["cleanup_eligible"])
+
+    def test_child_with_unknown_parent_is_not_reported_as_a_confirmed_orphan(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            adapter = self._lineage_fixture(Path(temporary), {"child": None}, references=())
+            source = {"subagent": {"other": "guardian"}}
+            write_rollout(adapter.codex_home, "child", originator="cindy", source=source)
+            with closing(sqlite3.connect(adapter.codex_home / "state_5.sqlite")) as db:
+                db.execute("UPDATE threads SET source=?", (json.dumps(source),))
+                db.commit()
+            inventory = build_client_inventory((adapter,), client="cindy")
+            child = next(t for t in inventory.targets if t.record_id == "child")
+            self.assertTrue(child.is_subagent)
+            self.assertEqual(child.to_dict()["lineage_status"], "unknown")
+            self.assertEqual(child.classification, RecordClassification.BROKEN_RELATION)
+            self.assertFalse(child.to_dict()["cleanup_eligible"])
+
     def test_same_name_project_paths_are_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

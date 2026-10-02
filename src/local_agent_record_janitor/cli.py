@@ -51,6 +51,7 @@ from .discovery import (
     resolve_cindy_profiles,
 )
 from .models import Finding
+from .inventory import ManagedConversation, classify_managed_conversation
 from .path_identity import canonical_existing_path_key
 from .record_identity import RecordClassification
 from .rendering import safe_single_line
@@ -2372,6 +2373,8 @@ _ANOMALY_CLASSIFICATIONS = {
 
 
 def _record_classification(record: Any) -> str:
+    if isinstance(record, ManagedConversation):
+        return classify_managed_conversation(record).value
     explicit = _record_field(
         record,
         "classification",
@@ -2961,7 +2964,9 @@ def _build_native_client_contexts(
             for reference in tuple(raw_references or ())
         )
         refs = tuple(value for value in refs if value)
-        classification = classify_record_state(
+        classification = classify_managed_conversation(
+            record, project_present=project is not None,
+        ) if isinstance(record, ManagedConversation) else classify_record_state(
             native_present=native_present,
             frontend_present=bool(refs),
             project_present=project is not None,
@@ -3017,6 +3022,7 @@ def _build_native_client_contexts(
             is_subagent=bool(getattr(getattr(record, "summary", record), "is_subagent", False)),
             parent_thread_ids=tuple(getattr(getattr(record, "summary", record), "parent_thread_ids", ()) or ()),
             descendant_thread_ids=tuple(getattr(record, "descendant_thread_ids", ()) or ()),
+            lineage_status=getattr(record, "lineage_status", None),
         )
         targets.append(target)
     catalog_records = tuple(

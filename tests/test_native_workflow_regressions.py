@@ -6,16 +6,19 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from local_agent_record_janitor.adapters import NativeIntegrityAdapter
+from local_agent_record_janitor.agent_operations import action_binding
 from local_agent_record_janitor.cleanup_service import CleanupService
 from local_agent_record_janitor.cli import main
 from local_agent_record_janitor.codex_state import read_native_lineage, read_spawn_descendants
 from local_agent_record_janitor.inventory import build_session_catalog
+from local_agent_record_janitor.manual_delete import build_manual_delete_plan
 from local_agent_record_janitor.operation_coordinator import OperationCoordinator
 from local_agent_record_janitor.operation_store import plan_sha256, write_new_json
 from tests.support import create_thread_index
@@ -96,6 +99,50 @@ class NativeWorkflowRegressions(unittest.TestCase):
             db.execute("UPDATE threads SET source=? WHERE id='child'", (json.dumps({"subagent":{"thread_spawn":{"parent_thread_id":"root"}}}),))
             db.commit()
         self.assertEqual(read_spawn_descendants(self.home, ("root",))["root"], {"child"})
+
+    def test_healthy_child_classification_does_not_authorize_child_only_deletion(self):
+        self.fixture([("parent", "work", None), ("child", "work", "parent")])
+        output = StringIO()
+        status = main(["records", "--client", "native", "--codex-home", str(self.home),
+                       "--record-id", "child", "--json"], adapters=(self.adapter,),
+                      stdout=output, stderr=StringIO())
+        self.assertEqual(status, 0, output.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["records"][0]["classification"], "healthy")
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        plan = coordinator.plan_operation(client="native", record_ids=("child",),
+            adapters=(self.adapter,), plan_path=self.root / "child.json")
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual(plan["actions"][0]["classification"], "healthy")
+        calls = []
+        result = coordinator.apply_operation(operation_id=plan["operation_id"], clients_closed=True,
+            app_server_factory=self.server(calls), binary_resolver=lambda _: Path("codex"))
+        self.assertFalse(result.get("mutation_started", False), result)
+        self.assertEqual(calls, [])
+
+    def test_manual_plan_classification_preserves_binding_and_anomaly_priority(self):
+        self.fixture([("parent", "work", None), ("child", "work", "parent")])
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+        plan = coordinator.plan_operation(client="native", record_ids=("parent",),
+            adapters=(self.adapter,), plan_path=self.root / "parent.json")
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        native = next(a for a in plan["actions"] if a["kind"] == "delete_conversation")
+        self.assertEqual(native["classification"], "healthy")
+        self.assertEqual(native["impact"]["descendant_thread_ids"], ["child"])
+        manual_plan = build_manual_delete_plan(build_session_catalog((self.adapter,)))
+        manual = next(a for a in manual_plan.actions if a.thread_id == "child")
+        candidate = coordinator._manual_candidate(manual, "fixture-store")
+        context = SimpleNamespace(plan=SimpleNamespace(observations=()))
+        document = coordinator._action_document(context, candidate, manual_record=manual.root)
+        self.assertEqual(document["classification"], "healthy")
+        self.assertEqual(document["binding"], coordinator._metadata(action_binding(candidate)))
+        for finding_type, expected in (("duplicate_rollout", "orphan_native"),
+                                       ("orphaned_subagent_thread", "orphan_native"),
+                                       ("broken_spawn_edge", "broken_relation")):
+            with self.subTest(finding_type=finding_type):
+                context.plan.observations = (SimpleNamespace(observation_id="finding", finding_type=finding_type),)
+                anomaly = replace(candidate, observation_ids=("finding",))
+                document = coordinator._action_document(context, anomaly, manual_record=manual.root)
+                self.assertEqual(document["classification"], expected)
 
     def server(self, calls):
         fixture = self

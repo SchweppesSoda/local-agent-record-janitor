@@ -128,6 +128,7 @@ class OperationCoordinator:
                 codex_home=codex_home,
                 active_adapters=active_adapters,
                 action_contexts=action_contexts,
+                manual_actions=manual_actions,
             )
             write_new_json(Path(str(document["plan_path"])), document)
             self._live[operation] = _LiveOperation(
@@ -2509,6 +2510,7 @@ class OperationCoordinator:
         codex_home: Path | None,
         active_adapters: Sequence[Any],
         action_contexts: Mapping[str, Any] | None = None,
+        manual_actions: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         from .cleanup_service import partition_actions
 
@@ -2535,7 +2537,14 @@ class OperationCoordinator:
             }
             batch_doc.update(self._batch_scope_metadata(context, batch))
             batch_docs.append(batch_doc)
-        action_docs = [self._action_document(context, action) for action in candidates]
+        manual_actions = manual_actions or {}
+        action_docs = [
+            self._action_document(
+                context, action,
+                manual_record=getattr(manual_actions.get(action.action_id), "root", None),
+            )
+            for action in candidates
+        ]
         requested_engines = tuple(scope.get("engines", ()))
         observed_engines = tuple(dict.fromkeys(
             self._action_engine(context, action) for action in candidates
@@ -2640,13 +2649,15 @@ class OperationCoordinator:
         payload["plan_sha256"] = plan_sha256(payload)
         return payload
 
-    def _action_document(self, context: Any, action: Any) -> dict[str, Any]:
+    def _action_document(
+        self, context: Any, action: Any, *, manual_record: Any = None,
+    ) -> dict[str, Any]:
         raw = getattr(
             action, "to_dict", lambda: {"action_id": str(action.action_id)}
         )()
         result = self._metadata(raw)
         result["binding"] = self._metadata(action_binding(action))
-        result["classification"] = self._classification(context, action)
+        result["classification"] = self._classification(context, action, manual_record)
         return result
 
     def _batch_scope_metadata(
@@ -2679,7 +2690,9 @@ class OperationCoordinator:
         return metadata
 
     @staticmethod
-    def _classification(context: Any, action: Any) -> str:
+    def _classification(context: Any, action: Any, manual_record: Any = None) -> str:
+        from .inventory import ManagedConversation, classify_managed_conversation
+
         if str(
             getattr(
                 getattr(action, "kind", None),
@@ -2707,6 +2720,8 @@ class OperationCoordinator:
             return "broken_relation"
         if any("index" in value for value in types):
             return "stale_index"
+        if not wanted and isinstance(manual_record, ManagedConversation):
+            return classify_managed_conversation(manual_record).value
         return "orphan_native"
 
     @staticmethod

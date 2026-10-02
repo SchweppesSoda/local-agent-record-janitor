@@ -81,6 +81,22 @@ corrupt_unreadable
 unknown_operation
 ```
 
+Codex child records do not need their own frontend reference to be `healthy`.
+The complete catalog resolves their parent chain within the same native store
+before project or record filtering. Each ancestor must have a native index row
+or a verifiable rollout; a frontend reference or graph-only placeholder is not
+proof that the parent exists. Unreferenced roots retain `orphan_native`, as do
+children whose immediate native parent is confirmed missing. Unknown or
+conflicting parent chains are `broken_relation`, not confirmed orphans.
+
+Record metadata includes `is_subagent`, `parent_thread_ids`,
+`descendant_thread_ids`, and `lineage_status` (`root`, `known`, `missing_parent`,
+`unknown`, or `conflict`). Parent references are not copied into a child's
+`frontend_reference_ids`. Normal manual-record plans use the same classification;
+explicit anomaly findings retain their anomaly classification. Classification
+is inventory metadata, not deletion authorization: exact scope, descendant
+closure, parent protection, and frozen-plan checks still apply.
+
 An unsupported AionUI backend is still inventoried and reported as
 `inventory_only`/`unsupported`; the operation is not marked deleted. An
 unreadable unrelated store is a warning, while an unreadable target or an

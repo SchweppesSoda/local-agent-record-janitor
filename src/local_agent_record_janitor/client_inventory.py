@@ -20,6 +20,7 @@ from .inventory import (
     ManagedConversation,
     SessionCatalog,
     build_session_catalog,
+    classify_managed_conversation,
 )
 from .record_identity import (
     EngineCapability,
@@ -62,6 +63,7 @@ class ClientTarget:
     is_subagent: bool = False
     parent_thread_ids: tuple[str, ...] = ()
     descendant_thread_ids: tuple[str, ...] = ()
+    lineage_status: str | None = None
 
     @property
     def record_id(self) -> str | None:
@@ -81,6 +83,11 @@ class ClientTarget:
         return tuple(dict.fromkeys(value for value in values if value))
 
     def to_dict(self) -> dict[str, Any]:
+        lineage_status = self.lineage_status or (
+            "conflict" if "lineage_conflict" in self.blocker_codes else
+            "known" if self.parent_thread_ids else
+            "unknown" if self.is_subagent else "root"
+        )
         return {
             "client": self.client,
             "engine": self.engine,
@@ -94,10 +101,11 @@ class ClientTarget:
             "is_subagent": self.is_subagent,
             "parent_thread_ids": list(self.parent_thread_ids),
             "descendant_thread_ids": list(self.descendant_thread_ids),
-            "lineage_status": "conflict" if "lineage_conflict" in self.blocker_codes else (
-                "known" if self.parent_thread_ids else "unknown" if self.is_subagent else "root"
+            "lineage_status": lineage_status,
+            "cleanup_eligible": (
+                bool(self.action_ids) and not self.blockers and not self.blocker_codes
+                and lineage_status not in {"unknown", "conflict"}
             ),
-            "cleanup_eligible": bool(self.action_ids) and not self.blockers and not self.blocker_codes,
             "frontend_reference_ids": list(self.frontend_reference_ids),
             "classification": self.classification.value,
             "capability": self.capability.to_dict(),
@@ -915,6 +923,16 @@ def _target_from_native_record(
     frontend_sessions: Sequence[FrontendSessionRecord],
     capability: EngineCapability,
 ) -> ClientTarget | None:
+    if engine == "codex" and isinstance(record, ManagedConversation):
+        references = _deduplicate_frontend_sessions((
+            *record.frontend_sessions,
+            *(session for session in frontend_sessions
+              if _session_engine(session) == engine
+              and session.thread_id == record.thread_id
+              and canonical_path(session.codex_home) == canonical_path(record.codex_home)),
+        ))
+        record = replace(record, frontend_sessions=references)
+        return _retarget_target(_target_from_record(client, record), capability)
     record_id = _native_record_id(record, engine)
     if record_id is None:
         return None
@@ -1185,8 +1203,14 @@ def _retarget_target(
         target,
         capability=capability,
         action_ids=tuple(dict.fromkeys(action_ids)),
-        blocker_codes=capability.blocker_codes,
-        blockers=capability.blockers,
+        blocker_codes=tuple(dict.fromkeys((
+            *(code for code in target.blocker_codes if code not in target.capability.blocker_codes),
+            *capability.blocker_codes,
+        ))),
+        blockers=(
+            *(blocker for blocker in target.blockers if blocker not in target.capability.blockers),
+            *capability.blockers,
+        ),
     )
 
 
@@ -1542,11 +1566,12 @@ def _target_from_record(client: str, record: ManagedConversation) -> ClientTarge
         f"{session.platform}:{session.platform_session_id}"
         for session in record.frontend_sessions
     )
-    classification = classify_record_state(
+    classification = classify_managed_conversation(
+        record, project_present=project is not None,
+    ) if engine == "codex" else classify_record_state(
         native_present=native_present,
         frontend_present=bool(record.frontend_sessions),
         project_present=project is not None,
-        relation_broken=False,
         index_stale=(
             record.legacy_indexed
             and not record.indexed
@@ -1579,8 +1604,17 @@ def _target_from_record(client: str, record: ManagedConversation) -> ClientTarge
             *((record.action_id,) if native_present else ()),
             *actions,
         ),
-        blocker_codes=capability.blocker_codes,
-        blockers=capability.blockers,
+        blocker_codes=tuple(dict.fromkeys((*record.blocker_codes, *capability.blocker_codes))),
+        blockers=(
+            *({"blocker_code": "record_blocked", "message": message} for message in record.blockers),
+            *capability.blockers,
+        ),
+        display_name=record.summary.display_name,
+        display_name_source=record.summary.display_name_source,
+        is_subagent=record.summary.is_subagent,
+        parent_thread_ids=record.summary.parent_thread_ids,
+        descendant_thread_ids=record.descendant_thread_ids,
+        lineage_status=record.lineage_status,
     )
 
 

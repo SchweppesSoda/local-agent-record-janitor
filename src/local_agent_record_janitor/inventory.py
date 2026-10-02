@@ -15,6 +15,7 @@ from .codex_state import parse_thread_source, read_native_lineage
 from .conversation_metadata import read_conversation_summaries
 from .models import ConversationSummary, RolloutRecord
 from .path_identity import canonical_existing_path_key
+from .record_identity import RecordClassification, classify_record_state
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -152,6 +153,9 @@ class ManagedConversation:
     # deliberately not used to waive a native-delete blocker.
     blocker_codes: tuple[str, ...] = ()
     codex_bin_hints: tuple[Path, ...] = ()
+    # Derived from the complete, storage-qualified catalog, before filtering.
+    # This is inventory evidence, not an authorization to delete a child.
+    lineage_status: str | None = None
 
     @property
     def action_id(self) -> str:
@@ -202,6 +206,7 @@ class ManagedConversation:
             "rollouts": [record.to_dict() for record in self.rollouts],
             "frontend_sessions": [record.to_dict() for record in self.frontend_sessions],
             "descendant_thread_ids": list(self.descendant_thread_ids),
+            "lineage_status": self.lineage_status,
             "thread_index": _json_value(dict(self.thread_index)) if self.thread_index else None,
             "indexed": self.indexed,
             "legacy_indexed": self.legacy_indexed,
@@ -601,7 +606,7 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
         sorted(all_records, key=lambda item: (_normalized_path(item.codex_home), item.thread_id))
     )
     return SessionCatalog(
-        records=records,
+        records=_resolve_catalog_lineage(records, errors),
         scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(
@@ -624,6 +629,88 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
                 ),
             )
         ),
+    )
+
+
+def _resolve_catalog_lineage(
+    records: Sequence[ManagedConversation],
+    errors: Sequence[InventoryFailure],
+) -> tuple[ManagedConversation, ...]:
+    """Prove parent chains from metadata already read by this catalog.
+
+    Graph-only/frontend-only parents are placeholders, not native records.
+    Resolve before project/record filtering so hidden ancestors still count.
+    """
+    by_key = {
+        (_normalized_path(record.codex_home), record.thread_id): record
+        for record in records
+    }
+    failed_homes = {_normalized_path(error.codex_home) for error in errors}
+    states: dict[tuple[str, str], str] = {}
+    for start in by_key:
+        current = start
+        path: list[tuple[str, str]] = []
+        visiting: set[tuple[str, str]] = set()
+        while current not in states:
+            record = by_key[current]
+            parents = record.summary.parent_thread_ids
+            if current in visiting:
+                states[current] = "conflict"
+            elif "lineage_conflict" in record.blocker_codes:
+                states[current] = "conflict"
+            elif not parents and not record.summary.is_subagent:
+                states[current] = "root"
+            elif current[0] in failed_homes or record.cascade_unknown or not parents:
+                states[current] = "unknown"
+            elif len(parents) != 1 or parents[0] == record.thread_id:
+                states[current] = "conflict"
+            else:
+                parent_key = (current[0], parents[0])
+                parent = by_key.get(parent_key)
+                if parent is None or not parent.artifact_present:
+                    states[current] = "missing_parent"
+                else:
+                    path.append(current)
+                    visiting.add(current)
+                    current = parent_key
+                    continue
+            break
+        state = states[current]
+        for key in reversed(path):
+            state = (
+                "known" if state in {"root", "known"}
+                else "conflict" if state == "conflict"
+                else "unknown"
+            )
+            states[key] = state
+    return tuple(
+        replace(record, lineage_status=states[(
+            _normalized_path(record.codex_home), record.thread_id
+        )])
+        for record in records
+    )
+
+
+def classify_managed_conversation(
+    record: ManagedConversation,
+    *,
+    project_present: bool = False,
+) -> RecordClassification:
+    """Classify native presence separately from a child's direct UI binding."""
+    lineage_status = record.lineage_status
+    if lineage_status is None and (
+        record.summary.is_subagent or record.summary.parent_thread_ids
+    ):
+        lineage_status = "unknown"
+    if record.artifact_present and lineage_status == "missing_parent":
+        return RecordClassification.ORPHAN_NATIVE
+    return classify_record_state(
+        native_present=record.artifact_present,
+        frontend_present=bool(record.frontend_sessions),
+        native_parent_present=lineage_status == "known",
+        project_present=project_present,
+        relation_broken=lineage_status in {"unknown", "conflict"},
+        index_stale=(record.legacy_indexed and not record.artifact_present),
     )
 
 

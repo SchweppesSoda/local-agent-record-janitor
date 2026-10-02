@@ -350,6 +350,7 @@ def classify_record_state(
     *,
     native_present: bool,
     frontend_present: bool,
+    native_parent_present: bool = False,
     project_present: bool = True,
     relation_broken: bool = False,
     index_stale: bool = False,
@@ -369,7 +370,7 @@ def classify_record_state(
         return RecordClassification.BROKEN_RELATION
     if index_stale:
         return RecordClassification.STALE_INDEX
-    if native_present and frontend_present:
+    if native_present and (frontend_present or native_parent_present):
         return RecordClassification.HEALTHY
     if native_present:
         return RecordClassification.ORPHAN_NATIVE
