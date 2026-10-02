@@ -1,6 +1,6 @@
 # Finding、Observation 与候选动作
 
-Finding 是 adapter 的兼容证据格式，描述一个不一致状态，不等同于“可以自动删除”。计划生成器会把同一保存位置和完整对话 ID 的 Finding 聚合成 Observation，再根据当前列表记录、全部内容文件、关联任务范围、活跃引用和扫描状态生成 CandidateAction。
+Finding 是 adapter 的兼容证据格式，描述一个不一致状态，不等同于“可以自动删除”。计划生成器会把同一保存位置和完整对话 ID 的 Finding 聚合成 Observation，再根据当前 store 已发现的列表记录、内容文件、关联任务范围、活跃引用和扫描状态生成 CandidateAction。授权只包含明确冻结的范围，不保证未发现的别名或其他 store 的副本已被覆盖。
 
 所有问题都会显示候选动作。当前可执行的是整条对话删除、精确前端引用清理、精确
 关系边清理、旧索引残留清理和 Desktop 宿主状态清理。`repair_index_path` 与
@@ -126,7 +126,7 @@ host、原生证据重新出现或快照漂移都会阻止修改。可执行动�
 | 前端已删除、Codex 对话仍存在 | `delete_conversation`、`remove_frontend_reference`、`keep` | 底层记录和前端引用是两个独立授权批次 |
 | 列表记录存在、内容文件不存在 | `delete_conversation`、`keep` | 删除通常为 `low` |
 | 内容文件存在、列表记录不存在 | `delete_conversation`、`keep` | 删除为 `high`，必须明确选择 |
-| 多份内容文件 | `delete_conversation`、`keep` | 不隔离；身份和全部副本范围可验证时可逐项选择 `high` 删除 |
+| 多份内容文件 | `delete_conversation`、`keep` | 不隔离；当前 store 已发现的副本身份和范围可验证时可逐项选择 `high` 删除，仅处理明确批准的范围 |
 | 列表路径错位 | `delete_conversation`、`keep` | 不修路径；身份和范围可验证时可逐项选择 `high` 删除 |
 | 无效关联记录 | `remove_broken_relation`、可选 `delete_conversation`、`keep` | 精确边可单独删除；存在子对话时也可另行批准整条删除 |
 | 旧聚合索引 | `repair_legacy_index`、`keep` | 文件级 `high` 风险动作；严格清点、客户端关闭、临时回滚和锁均满足时可执行 |

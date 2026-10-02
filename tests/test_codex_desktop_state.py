@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -16,8 +17,10 @@ from local_agent_record_janitor.codex_desktop_state import (
     DesktopStateError,
     _relevant_client_names,
     execute_desktop_state_cleanup,
+    inspect_client_ownership,
     read_desktop_state,
 )
+from local_agent_record_janitor.client_contracts import ClientContractError
 from local_agent_record_janitor.inventory import build_session_catalog
 from local_agent_record_janitor.models import Finding
 from local_agent_record_janitor.planning import ActionKind, RiskLevel, build_cleanup_plan
@@ -113,6 +116,78 @@ class CodexDesktopStateTests(unittest.TestCase):
                 "command_line": "codex.exe app-server",
             },
         )
+
+    @unittest.skipUnless(os.name == "nt", "Windows Cindy ownership attribution")
+    def test_owner_projection_target_child_unrelated_and_missing_metadata(self):
+        root = Path(self.temporary_directory.name) / "owner-evidence"
+        records = self._cindy_process_records(root)
+        owner = root / "CindyGlobal"
+        target = inspect_client_ownership(owner, owner_client="cindy", records=records)
+        self.assertTrue(target["probe_complete"])
+        self.assertTrue(target["coverage_complete"])
+        self.assertFalse(target["clients_closed"])
+        self.assertEqual({item["process_id"] for item in target["processes"]
+                          if item["relation"] == "target_or_unproven"}, {100, 101, 102})
+        self.assertNotIn("command_line", str(target))
+        separate = Path(self.temporary_directory.name) / "separate-profile"
+        separate.mkdir()
+        unrelated = inspect_client_ownership(separate, owner_client="cindy", records=records)
+        self.assertTrue(unrelated["clients_closed"])
+        self.assertTrue(all(item["relation"] == "separate_store" for item in unrelated["processes"]))
+        missing = [dict(item) for item in records]
+        missing[1]["executable_path"] = None
+        incomplete = inspect_client_ownership(separate, owner_client="cindy", records=missing)
+        self.assertFalse(incomplete["clients_closed"])
+        self.assertFalse(incomplete["coverage_complete"])
+
+    def test_owner_projection_empty_probe_does_not_prove_unsupported_writers_closed(self):
+        for owner, engines in (("orca", ("codex",)), ("herdr", ("codex",)),
+                              ("pi", ("pi",)), ("claude", ("claude",)),
+                              ("cindy", ("pi",)), ("cindy", ("claude",))):
+            with self.subTest(owner=owner, engines=engines):
+                observed = inspect_client_ownership(self.codex_home, owner_client=owner,
+                                                   engines=engines, records=())
+                self.assertTrue(observed["probe_complete"])
+                self.assertFalse(observed["coverage_complete"])
+                self.assertIsNone(observed["clients_closed"])
+        absent = inspect_client_ownership(None, owner_client="native", records=())
+        self.assertIsNone(absent["clients_closed"])
+        self.assertIn("owner_process_root_missing", absent["errors"])
+
+    def test_owner_projection_probe_failure_and_nonwindows_are_unknown(self):
+        with patch("local_agent_record_janitor.codex_desktop_state.os.name", "nt"), patch(
+                "local_agent_record_janitor.codex_desktop_state._running_related_process_records",
+                side_effect=DesktopStateError("Synthetic enumeration failure")), patch(
+                "local_agent_record_janitor.codex_desktop_state.is_local_absolute_locator", return_value=True):
+            failed = inspect_client_ownership(self.codex_home, owner_client="native")
+        self.assertFalse(failed["probe_complete"])
+        self.assertFalse(failed["coverage_complete"])
+        self.assertIsNone(failed["clients_closed"])
+        self.assertIn("Synthetic enumeration failure", str(failed["errors"]))
+        # A supplied snapshot tests this branch; it is not an OS integration probe.
+        with patch("local_agent_record_janitor.codex_desktop_state.os.name", "posix"), patch(
+                "local_agent_record_janitor.codex_desktop_state.is_local_absolute_locator", return_value=True):
+            other_platform = inspect_client_ownership(self.codex_home, owner_client="native", records=())
+        self.assertTrue(other_platform["probe_complete"])
+        self.assertFalse(other_platform["coverage_complete"])
+        self.assertIsNone(other_platform["clients_closed"])
+
+    def test_owner_projection_checks_location_before_path_and_syscalls(self):
+        class PoisonPath:
+            def __fspath__(self):
+                raise AssertionError("Nonlocal owner converted")
+
+        for location in ({"host": "remote"}, {"path_namespace": "wsl"}):
+            with self.subTest(location=location), self.assertRaises(ClientContractError):
+                inspect_client_ownership(PoisonPath(), **location)
+        foreign = "/remote/profile" if os.name == "nt" else "C:\\remote\\profile"
+        with patch("local_agent_record_janitor.codex_desktop_state.Path",
+                   side_effect=AssertionError("Opaque owner became Path")), patch(
+                "local_agent_record_janitor.codex_desktop_state._running_related_process_records",
+                side_effect=AssertionError("Opaque owner probed")):
+            opaque = inspect_client_ownership(foreign, owner_client="orca")
+        self.assertIsNone(opaque["clients_closed"])
+        self.assertIn("opaque_owner_process_root", opaque["errors"])
 
     def _official_codex_process_records(
         self,

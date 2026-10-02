@@ -1,6 +1,6 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1/P2a 已落地，P2b 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a/P2b 已落地，P3 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -128,14 +128,19 @@ mutation 已开始、unknown、partial 和终态回执。
 `targeted_guard.py`、`operation_coordinator.py`、`operation_store.py` 及协议测试。
 
 P2a 的同 root 协调与兼容恢复已落地，见
-[Adapter 协调契约](adapters.md#同-root-的-mutation-协调)。P2b 的文件别名和运行归属
-证据仍待实施；不能据 P2a 根路径归一宣称文件别名或共享 writer 已完整探测。
+[Adapter 协调契约](adapters.md#同-root-的-mutation-协调)。P2b 提供
+[文件别名与运行观察](adapters.md#文件别名与运行观察)，由现有 records/inspect-clients
+消费；这是 inventory-only metadata，旧 path/manifest v1 writer 和审批/hash 不变。
+不能据根路径归一、nlink 匹配或进程枚举成功宣称共享 writer/别名已完整探测。
 
-- 建立本地文件身份/别名证据：在支持的平台探测文件 ID、链接数、symlink 目标及
-  已发现路径；区分已知别名集合与已经证明完整的集合。链接数不一致、范围外目标、
-  断链或探测失败都不能被当作完整范围。不遍历全盘寻找未知副本。
-- 建立运行归属证据：client owner root 与 native root 分开；将 server/session、
-  引擎子进程、已知共享 writer 纳入相关目标检查。进程名或“窗口已关”不足以放行。
+- 建立本地文件身份/别名观察：仅探测选中清单已发现的路径，保留已知路径、文件 ID、
+  链接数、symlink 目标及错误。链接数匹配只描述该时点已知 hardlinks，不证明 symlink
+  或 copies 完整；范围外目标、断链或失败为 incomplete。不遍历全盘寻找未知副本，
+  不合并 logical stores，也不新增跨 store writer。
+- client owner root 与 native root 分开，运行证据区分 probe 与 coverage；当前
+  collector 仅覆盖 Windows Codex/ChatGPT/AionUI/Cindy 进程，未知 owner、Pi/Claude、
+  node/server 与非 Windows 保持 unknown。新增 adapter 的实际 server/session 和
+  writer 检查仍是 P5 独立门槛，不能据进程名或“窗口已关”放行。
 - 对影响授权的新证据执行下节的版本兼容规则；受影响的身份、引用、别名、关系和
   writer 检查在 apply 前重验证，中途漂移停止剩余动作。
 - 补齐同一受信本地物理 root 内的跨 operation unknown 占用门槛。复用该目标已有
@@ -155,7 +160,7 @@ P2a 的同 root 协调与兼容恢复已落地，见
 - 为后续 adapter 提供上述证据接口；此阶段不新增跨 store 文件删除或远端执行器。
 
 **完成条件：**临时目录中的链接、路径替换和进程模拟能证明范围外记录不受影响；
-无法证明别名或 writer 时有稳定 blocker；旧 unknown 操作仍可 status/verify，
+观察不完整时有明确 errors/unknown，不能扩大旧授权；旧 unknown 操作仍可 status/verify，
 任何恢复路径都不会重发 mutation。
 必须补真实双进程排他/崩溃用例，以及固定 child plan/state/receipt 的完整临时路径
 重绑定回归；同进程新 reader 的兼容测试不替代这些门槛。

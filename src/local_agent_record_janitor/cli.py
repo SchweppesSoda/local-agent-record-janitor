@@ -2573,7 +2573,7 @@ def _run_client_records(
         build_client_engine_contexts,
         build_client_inventory,
     )
-    from .record_identity import StoreKey
+    from .record_identity import StoreKey, canonical_path
 
     client = _normalize_client_name(getattr(args, "client", None))
     engines = tuple(getattr(args, "engine", ()) or ())
@@ -2844,21 +2844,42 @@ def _run_client_records(
     payload["snapshot_id"] = "inventory:v1:" + hashlib.sha256(
         json.dumps(rendered_targets, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+    from .client_inventory import collect_client_file_aliases
+    payload["file_aliases"] = collect_client_file_aliases(contexts, selected).to_dict()
     if getattr(args, "inspect_clients", False):
         from .codex_desktop_state import inspect_client_ownership
-        roots = set()
-        for adapter in active_adapters:
-            root = getattr(adapter, "owner_process_root", None)
-            if root is not None:
-                roots.add(Path(root))
-        if not roots and client in {"native", "pi", "claude"}:
-            roots = {Path(target.record_key.store.path) for target in selected if target.record_key is not None}
         payload["client_ownership"] = []
-        for root in sorted(roots, key=str):
+        descriptors = inventory.descriptors
+        if has_scope:
+            selected_stores = {target.record_key.store.value for target in selected if target.record_key is not None}
+            selected_sources = {reference.source for target in selected for reference in target.references}
+            selected_bindings = {binding for target in selected for binding in target.frontend_binding_keys}
+            selected_legacy_ids = {reference_id for target in selected if not target.frontend_binding_keys
+                                   for reference_id in target.frontend_reference_ids}
+            selected_sources.update(session.database for session in inventory.frontend_sessions
+                if _frontend_binding_key(session) in selected_bindings
+                or f"{session.platform}:{session.platform_session_id}" in selected_legacy_ids)
+            selected_sources.update(row["database"] for target in selected
+                                    for row in target.project_row_evidence if row.get("database"))
+            from .path_identity import is_local_absolute_locator
+            source_keys = {canonical_path(source) for source in selected_sources
+                           if is_local_absolute_locator(os.fspath(source))}
+            descriptors = tuple(descriptor for descriptor in descriptors
+                if source_keys.intersection(canonical_path(source) for source in descriptor.sources)
+                or any(store.value in selected_stores for store in descriptor.native_stores))
+        owners = {(descriptor.client, descriptor.owner_process_root,
+                   tuple(engine for engine in descriptor.inventory_engines
+                         if not engines or engine in engines)) for descriptor in descriptors}
+        if not owners:
+            # A native store is not evidence of an owning process root.
+            owners.add((client, None, tuple(context.engine for context in contexts)))
+        for owner_client, root, owner_engines in sorted(owners, key=lambda row: (row[0], str(row[1]), row[2])):
             try:
-                payload["client_ownership"].append(inspect_client_ownership(root, owner_client=client))
+                payload["client_ownership"].append(inspect_client_ownership(root, owner_client=owner_client,
+                                                                           engines=owner_engines))
             except Exception as exc:
-                payload["client_ownership"].append({"owner_process_root": str(root), "clients_closed": None, "error": str(exc)})
+                payload["client_ownership"].append({"owner_process_root": str(root) if root is not None else None,
+                    "clients_closed": None, "probe_complete": False, "coverage_complete": False, "error": str(exc)})
     if args.json:
         _write_json(payload, stdout)
         return EXIT_OK if not relevant_errors else EXIT_ERROR

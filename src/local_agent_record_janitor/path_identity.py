@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+
+def is_local_absolute_locator(value: str) -> bool:
+    """Reject remote and foreign-OS locators before constructing a Path."""
+    if not value or "\0" in value or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+        return False
+    if os.name == "nt":
+        # Python 3.12 isabs also accepts /home and \home on Windows.
+        # Require a drive identity, including the local extended form.
+        return bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\\?\\[A-Za-z]:\\)", value))
+    return value.startswith("/") and not value.startswith("//")
 
 
 def canonical_existing_path_key(path: str | os.PathLike[str]) -> str:
@@ -46,4 +58,4 @@ def canonical_existing_path_key(path: str | os.PathLike[str]) -> str:
     return raw
 
 
-__all__ = ["canonical_existing_path_key"]
+__all__ = ["canonical_existing_path_key", "is_local_absolute_locator"]

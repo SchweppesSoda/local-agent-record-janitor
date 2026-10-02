@@ -21,6 +21,8 @@ Cindy/AionUI 中已经失效的 frontend reference；前端映射不是另一份
 
 此外，`records --platform pi|claude` 可只读列出 Pi Agent/Claude Code 的本地 JSONL 会话，并区分 standalone 与 Cindy profile storage。`delete --platform pi` 只删除精确批准的单个 Pi JSONL；`delete --platform claude` 只删除批准 manifest 中的该 session transcript 副本和 session 专属辅助目录。两者均不保留、输出或上传消息正文。
 
+Pi/Claude 的 `complete` 只保证冻结路径、manifest 和批准引用的目标已满足；不保证未发现的文件别名、范围外副本或其他 store 的记录消失。
+
 项目目前处于 **Alpha**。`scan` 和 `records` 始终只读。已实现并验证的删除路径包括
 healthy/native 记录及其已冻结的 frontend reference closure，以及 Cindy 下 Pi/Claude
 的精确 session；AionUI 的 orphan project/conversations row 仅在已探测的支持 schema、
@@ -299,6 +301,15 @@ Desktop 宿主目录以及 frontend reference。人类输出受 `--limit` 限制
 Codex thread ID 的 Cindy `status=deleted` 前端记录也会显示，并可由高层 operation
 按精确会话行删除；其他未映射且无法证明支持 schema 的前端记录只盘点。已知 Cindy profile 即使只剩独立
 `codex-home`、前端数据库已经移除，也仍会作为 native store 纳入默认清单。
+
+`records --client CLIENT --json` 另外输出独立的 `file_aliases`：仅探测本次选中清单
+已发现的路径，展示文件 ID、链接数、已知路径和探测错误。匹配链接数只描述观察时点
+已知的 hardlink 目录项，不能证明 symlink 或副本已全部发现，也不合并逻辑 store。
+该投影不参与既有 `snapshot_id` 或删除授权。`--inspect-clients` 使用客户端明确声明的
+owner process root；它与 native root 分开。`probe_complete` 表示探测成功，
+`coverage_complete` 另行说明限定进程范围的覆盖；当前仅检查 Windows 下 Codex、
+ChatGPT、AionUI、Cindy 四类进程。Orca/Herdr、Pi/Claude 运行时、任意 node/server 和
+非 Windows 运行归属未被完整覆盖，不能由空结果推断 `clients_closed=true`。
 
 Pi session 使用独立清单，不会伪装成 Codex native store。只查看 Pi：
 

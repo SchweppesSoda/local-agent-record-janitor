@@ -188,6 +188,14 @@ Automation branches on structured fields, never translated prose:
 Authorization uses `cleanup_blocker_codes`, not human text. Missing, unknown,
 or malformed codes fail closed.
 
+`complete` applies to the frozen paths, rows, manifest members and approved
+references. Existing Pi/Claude v1 writers do not prove that undiscovered aliases,
+external copies or records in another logical store are absent. The independent
+`records --client ...` file-alias and process-owner projections are observations;
+they do not change the inventory snapshot ID, plan hash or writer authorization.
+Successful process enumeration is not complete runtime coverage: an unsupported
+owner, engine or platform remains unknown even when no named process is found.
+
 If `goal_status=unknown`, never retry apply. Run status and verify. If verify
 reports residuals, inspect them and create a fresh plan; never edit an old plan
 or widen its action list.

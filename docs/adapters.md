@@ -67,6 +67,29 @@ family 在实际 writer 分派前按精确 metadata source 或 native store 再�
 引用按冻结的真实 backend 证据检查全部受影响引擎，不使用 Codex 默认值放宽 Pi/Claude
 限制。明确选择只读目标返回 blocked，独立可写 profile 保留原计划行为。
 
+### 文件别名与运行观察
+
+`file_alias_evidence.py` 的 `probe_file_aliases()` 接受已发现的本机路径与明确 roots，
+提供 `FileAliasSnapshot`/`FileAliasEvidence`：观察时间、词法/解析路径、readlink、
+device/file ID、nlink、已知路径与错误。host/namespace 在构造 `Path` 前检查；UNC、
+foreign-OS、范围外及断链 locator 保持不透明或 incomplete。只允许范围内的 leaf
+symlink，目录链接和身份变化不能视为完整观察；不读取内容或另行发现副本。
+
+`collect_client_file_aliases()` 仅提取选中 native 清单项的 rollout、Pi JSONL 或 Claude
+manifest 文件。`records --client ...` 将结果作为独立 `file_aliases` 输出，不加入旧
+target、snapshot_id 或 v1 approval/hash。相同 file ID 只关联观察证据，不合并不同
+`StoreKey`。普通/extended/8.3 spelling 不重复算目录项；nlink 匹配仅描述观察时点的
+已知 hardlink 名称，`alias_coverage_complete` 始终为 false，不证明所有 symlink/copy
+已发现。若以后用这些新证据改变 writer 授权，必须按计划兼容规则另行版本演进。
+
+`inspect_client_ownership()` 和 `--inspect-clients` 使用 descriptor 的真实 owner root，
+不从 native root 补造归属。`probe_complete` 表示枚举/探测成功，`coverage_complete`
+仅在支持的本机 Windows owner、Codex engine 和具备必要 metadata 的已注册进程范围
+内成立；仍不证明任意其他 writer 已停止。collector 当前只枚举 Codex/ChatGPT/AionUI/
+Cindy 四类 exe，复用 Cindy 的真实进程树/profile 证据。未知 owner、Pi/Claude runtime、
+非 Windows 或失败返回 unknown；明确的相关运行进程仍可返回 false。输出不含 command
+line。该观察不替代现有关闭 ack，也不修改既有 writer 的关闭检查。
+
 ### 同 root 的 mutation 协调
 
 `mutation_guard.py` 在同一受信本地物理 root 的既有 `operations` 下读取可信的

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -10,7 +12,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from local_agent_record_janitor.adapters import AionUIAdapter, CindyAdapter
+from local_agent_record_janitor.adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter
 from local_agent_record_janitor.cli import main
 from local_agent_record_janitor.cleanup_service import CleanupService
 from local_agent_record_janitor.operation_coordinator import OperationCoordinator
@@ -21,6 +23,8 @@ from local_agent_record_janitor.client_inventory import (
     ClientTarget,
     build_client_engine_contexts,
     build_client_inventory,
+    build_native_client_inventory,
+    collect_client_file_aliases,
 )
 from local_agent_record_janitor.inventory import FrontendSessionRecord, build_session_catalog
 from local_agent_record_janitor.record_identity import (
@@ -337,6 +341,65 @@ class ClientInventoryTests(unittest.TestCase):
                     plan = coordinator.plan_operation(client=engine, record_ids=(sid,), plan_path=root / "plan.json")
                 self.assertEqual(plan["actions"][0]["classification"], "healthy")
 
+    def test_records_alias_projection_is_scoped_and_excluded_from_snapshot_and_approval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = _write_pi_session(root, "selected-pi")
+            _write_pi_session(root, "other-pi")
+            catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
+            inventory, contexts = build_native_client_inventory(client="pi", engine="pi", catalog=catalog)
+            frozen_targets = [target.to_dict() for target in inventory.targets]
+            approval = [record.approval_payload() for record in catalog.records]
+            results = []
+            for _ in range(2):
+                output = StringIO()
+                with patch("local_agent_record_janitor.cli._build_pi_catalog", return_value=catalog), patch(
+                        "local_agent_record_janitor.codex_desktop_state._running_related_process_records",
+                        side_effect=AssertionError("No declared owner may be probed")):
+                    status = main(["records", "--client", "pi", "--record-id", "selected-pi",
+                                   "--inspect-clients", "--json"], adapters=(), stdout=output, stderr=StringIO(),
+                                  pi_catalog_builder=lambda **_: catalog)
+                self.assertEqual(status, 0, output.getvalue())
+                results.append(json.loads(output.getvalue()))
+            aliases = results[0]["file_aliases"]
+            self.assertEqual([entry["lexical_path"] for entry in aliases["entries"]], [str(first)])
+            self.assertTrue(aliases["probe_complete"], aliases)
+            self.assertFalse(aliases["alias_coverage_complete"])
+            self.assertEqual(results[0]["snapshot_id"], results[1]["snapshot_id"])
+            expected = "inventory:v1:" + hashlib.sha256(json.dumps(
+                results[0]["records"], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            self.assertEqual(results[0]["snapshot_id"], expected)
+            self.assertNotIn("file_aliases", str(frozen_targets))
+            self.assertEqual([target.to_dict() for target in inventory.targets], frozen_targets)
+            self.assertEqual([record.approval_payload() for record in catalog.records], approval)
+            owner = results[0]["client_ownership"][0]
+            self.assertIsNone(owner["owner_process_root"])
+            self.assertIsNone(owner["clients_closed"])
+            self.assertFalse(owner["coverage_complete"])
+
+    def test_observed_hardlinks_do_not_merge_logical_native_stores(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sid = "11111111-1111-4111-8111-111111111111"
+            homes = (root / "one", root / "two")
+            files = [write_rollout(home, sid, originator="codex_cli_rs", source="cli") for home in homes]
+            files[1].unlink()
+            os.link(files[0], files[1])
+            for home, file in zip(homes, files):
+                create_thread_index(home, [{"id": sid, "rollout_path": str(file), "source": "cli"}])
+            adapters = tuple(NativeIntegrityAdapter(codex_home=home) for home in homes)
+            catalog = build_session_catalog(adapters)
+            inventory, contexts = build_native_client_inventory(client="native", engine="codex", catalog=catalog,
+                                                                adapters=adapters)
+            aliases = collect_client_file_aliases(contexts, inventory.targets)
+            self.assertEqual(len(inventory.targets), 2)
+            self.assertEqual(len({target.record_key.store.value for target in inventory.targets}), 2)
+            self.assertEqual(aliases.entries[0].file_id, aliases.entries[1].file_id)
+            self.assertTrue(all(entry.hardlink_count_matches for entry in aliases.entries), aliases.to_dict())
+            selected = collect_client_file_aliases(contexts, inventory.targets[:1])
+            self.assertEqual(len(selected.entries), 1)
+            self.assertFalse(selected.entries[0].hardlink_count_matches)
+
     def test_unknown_cindy_engines_are_visible_and_never_have_delete_actions(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -380,7 +443,7 @@ class ClientInventoryTests(unittest.TestCase):
                 status = main(["records", "--client", "cindy", "--engine", "pi", "--inspect-clients", "--json"],
                               adapters=(adapter,), stdout=output, stderr=StringIO())
             self.assertEqual(status, 0, output.getvalue())
-            inspect.assert_called_once_with(root, owner_client="cindy")
+            inspect.assert_called_once_with(root, owner_client="cindy", engines=("pi",))
             self.assertFalse(json.loads(output.getvalue())["client_ownership"][0]["clients_closed"])
 
     def _lineage_fixture(self, root, parents, *, references=("parent",)):
@@ -777,6 +840,15 @@ class ClientInventoryTests(unittest.TestCase):
             self.assertEqual(context_targets[0].action_ids, target.action_ids)
             self.assertTrue(context_targets[0].capability.frontend_project_delete)
             self.assertEqual(len(inventory.to_dict()["project_items"]), 2)
+            output = StringIO()
+            with patch("local_agent_record_janitor.codex_desktop_state.inspect_client_ownership",
+                       return_value={"clients_closed": None}) as inspect:
+                status = main(["records", "--client", "aionui", "--project", "project-only",
+                               "--inspect-clients", "--json"], adapters=(adapter,),
+                              stdout=output, stderr=StringIO())
+            self.assertEqual(status, 0, output.getvalue())
+            inspect.assert_called_once_with(adapter.describe_client().owner_process_root,
+                                           owner_client="aionui", engines=("codex",))
 
     def test_aionui_project_item_without_supported_schema_is_inventory_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

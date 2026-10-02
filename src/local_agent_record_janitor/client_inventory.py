@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -21,6 +22,7 @@ from .client_contracts import (
     reference_from_session, restrict_capability,
 )
 from .display_metadata import display_title
+from .file_alias_evidence import FileAliasSnapshot, probe_file_aliases
 from .inventory import (
     FrontendSessionRecord,
     InventoryFailure,
@@ -310,6 +312,49 @@ class ClientEngineContext:
             "native_record_count": len(self.native_records),
             "capability": self.capability.to_dict(),
         }
+
+
+def collect_client_file_aliases(
+    contexts: Sequence[ClientEngineContext], targets: Sequence[ClientTarget],
+) -> FileAliasSnapshot:
+    """Observe only catalog files belonging to selected qualified targets.
+
+    This separate projection is excluded from target identities, inventory
+    snapshot hashes and the existing path/manifest approval payloads.
+    """
+    root_keys: dict[Path, str] = {}
+
+    def root_key(root: Path) -> str:
+        if root not in root_keys:
+            root_keys[root] = canonical_path(root)
+        return root_keys[root]
+
+    def path_key(path: Path | None) -> str | None:
+        return os.path.normcase(os.path.abspath(path)) if path is not None else None
+
+    selected = {(target.engine, root_key(target.record_key.store.path),
+                 target.record_key.record_id, path_key(target.record_key.path))
+                for target in targets if target.record_key is not None}
+    roots: list[Path] = []
+    paths: list[Path] = []
+    for context in contexts:
+        for record in context.native_records:
+            root = _native_record_root(record, context.engine)
+            if root is None:
+                continue
+            key = (context.engine, root_key(root), _native_record_id(record, context.engine),
+                   path_key(_native_record_path(record, context.engine)))
+            if key not in selected:
+                continue
+            roots.append(root)
+            if context.engine == "codex":
+                paths.extend(rollout.path for rollout in getattr(record, "rollouts", ()))
+            elif context.engine == "pi":
+                paths.append(record.path)
+            elif context.engine == "claude":
+                paths.extend(getattr(record, "transcript_paths", ()))
+                paths.extend(entry.path for entry in getattr(record, "manifest", ()) if entry.node_type == "file")
+    return probe_file_aliases(paths, roots=roots)
 
 
 def build_client_engine_contexts(

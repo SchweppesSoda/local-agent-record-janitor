@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .codex_state import find_thread_rollouts, read_thread_index
-from .path_identity import canonical_existing_path_key
+from .client_contracts import require_local_location
+from .path_identity import canonical_existing_path_key, is_local_absolute_locator
 from .sqlite_utils import connect_readonly, table_exists
 
 
@@ -555,16 +556,88 @@ def _relevant_client_names(owner_process_root: Path, records: Iterable[Mapping[s
         if _integer_or_minus_one(item.get("process_id")) in relevant}, key=str.casefold))
 
 
-def inspect_client_ownership(owner_process_root: Path, *, owner_client: str | None = None,
-                             records: Iterable[Mapping[str, Any]] | None = None) -> dict[str, Any]:
-    """Read-only process attribution with no command lines or environment secrets."""
-    items = tuple(records) if records is not None else (_running_related_process_records() if os.name == "nt" else ())
-    relevant = set(_relevant_process_ids(owner_process_root, items, owner_client=owner_client))
+def inspect_client_ownership(
+    owner_process_root: Path | str | None, *, owner_client: str | None = None,
+    records: Iterable[Mapping[str, Any]] | None = None,
+    engines: Iterable[str] = ("codex",), host: str = "local", path_namespace: str = "local",
+) -> dict[str, Any]:
+    """Observe supported Windows client processes without changing write guards.
+
+    Enumeration success is separate from owner/engine coverage. Empty output
+    cannot prove an unsupported owner, Pi/Claude runtime or non-Windows client
+    closed. This projection never exposes command lines or acts as an ack.
+    """
+    require_local_location(host, path_namespace)
+    raw_root = os.fspath(owner_process_root) if owner_process_root is not None else None
+    owner = str(owner_client or "").strip().casefold()
+    requested = tuple(dict.fromkeys(str(engine).strip().casefold() for engine in engines))
+    process_names = ("codex.exe", "chatgpt.exe", "aionui.exe", "cindy.exe")
+    owner_supported = owner in {"native", "codex", "chatgpt", "chatgpt-desktop", "aionui", "cindy"}
+    errors: list[str] = []
+    root = None
+    if raw_root is None:
+        errors.append("owner_process_root_missing")
+    elif not is_local_absolute_locator(raw_root):
+        errors.append("opaque_owner_process_root")
+    else:
+        root = owner_process_root if isinstance(owner_process_root, Path) else Path(raw_root)
+        try:
+            value = root.lstat()
+            if (not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
+                    or getattr(value, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+                raise ValueError("unproven_owner_directory")
+        except (OSError, ValueError) as exc:
+            errors.append(f"owner_root_probe_failed:{exc}")
+            root = None
+    probe_complete = False
+    items: tuple[Mapping[str, Any], ...] = ()
+    if root is not None:
+        try:
+            if records is not None:
+                items = tuple(records)
+                if any(not isinstance(item, Mapping) for item in items):
+                    items = ()
+                    raise ValueError("invalid_process_snapshot")
+                probe_complete = True
+            elif os.name == "nt":
+                items = _running_related_process_records()
+                probe_complete = True
+            else:
+                errors.append("process_probe_unsupported_platform")
+        except (DesktopStateError, OSError, ValueError, TypeError) as exc:
+            errors.append(f"process_probe_failed:{exc}")
+    relevant: set[int] = set()
+    if root is not None and probe_complete:
+        try:
+            relevant = set(_relevant_process_ids(root, items, owner_client=owner_client))
+        except (OSError, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+            errors.append(f"process_attribution_failed:{exc}")
+            probe_complete = False
+    metadata_complete = all(
+        _integer_or_minus_one(item.get("process_id")) >= 0
+        and _integer_or_minus_one(item.get("parent_process_id")) >= 0
+        and item.get("executable_path") and item.get("command_line") for item in items)
+    coverage_complete = bool(
+        probe_complete and os.name == "nt" and owner_supported and requested
+        and all(engine == "codex" for engine in requested)
+        and metadata_complete
+        and all(str(item.get("name") or "").casefold() in process_names for item in items)
+    )
     return {
         "owner_client": owner_client,
-        "owner_process_root": str(owner_process_root),
-        "check_mode": "process_attribution" if os.name == "nt" or records is not None else "explicit_acknowledgement_required",
-        "clients_closed": not relevant if os.name == "nt" or records is not None else None,
+        "owner_process_root": raw_root,
+        "check_mode": "process_attribution" if os.name == "nt" else "explicit_acknowledgement_required",
+        "probe_source": ("supplied_process_snapshot" if records is not None else
+                         "windows_named_processes" if os.name == "nt" else "unsupported_platform"),
+        "probe_complete": probe_complete,
+        "coverage_complete": coverage_complete,
+        "coverage": {"owner_supported": owner_supported, "engines": list(requested),
+                     "process_metadata_complete": metadata_complete,
+                     "process_names": list(process_names), "scope": "named_windows_client_processes",
+                     "other_runtime_writers": "not_proven"},
+        "clients_closed": (not relevant if coverage_complete else
+                           False if relevant and owner_supported and os.name == "nt" and probe_complete else None),
+        "errors": errors,
         "processes": [{"process_id": item.get("process_id"), "parent_process_id": item.get("parent_process_id"),
             "name": item.get("name"), "executable_path": item.get("executable_path"),
             "relation": "target_or_unproven" if _integer_or_minus_one(item.get("process_id")) in relevant else "separate_store"}
