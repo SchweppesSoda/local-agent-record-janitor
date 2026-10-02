@@ -1004,6 +1004,29 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
+        from .client_capability_guards import restrict_cleanup_context
+
+        result = self._build_context_sources(client, adapters, engines=engines,
+            include_action_contexts=include_action_contexts, codex_home=codex_home,
+            explicit_frontend_ids=explicit_frontend_ids)
+        selected = result[1]
+        context = restrict_cleanup_context(result[0], selected, self.service.typed_actions)
+        if include_action_contexts:
+            bindings = {action_id: restrict_cleanup_context(bound, selected, self.service.typed_actions)
+                        for action_id, bound in result[5].items()}
+            return (context, *result[1:5], bindings)
+        return (context, *result[1:])
+
+    def _build_context_sources(
+        self,
+        client: str,
+        adapters: tuple[Any, ...] | None,
+        *,
+        engines: Sequence[str] = (),
+        include_action_contexts: bool = False,
+        codex_home: Path | None = None,
+        explicit_frontend_ids: Sequence[str] = (),
+    ) -> tuple[Any, ...]:
         if client in {"pi", "claude"}:
             args = self._default_catalog_args(client, codex_home=codex_home)
             if client == "pi":
@@ -1078,7 +1101,8 @@ class OperationCoordinator:
             # Audit only the selected client's physical stores. Orphan source
             # parents and residual edges require the native integrity evidence
             # that the frontend scanner cannot supply.
-            homes = {Path(adapter.codex_home): adapter for adapter in selected}
+            homes = {adapter.codex_home: adapter for adapter in selected
+                     if isinstance(getattr(adapter, "codex_home", None), Path)}
             scan_adapters = (*selected, *(
                 NativeIntegrityAdapter(
                     codex_home=home,
@@ -1169,13 +1193,12 @@ class OperationCoordinator:
         for engine_context in engine_contexts:
             engine = normalize_engine(engine_context.engine)
             catalog = engine_context.native_catalog
-            capability = engine_context.capability
             if engine not in {"pi", "claude"}:
                 continue
-            # AionUI's generic codex_home is not a Pi/Claude proof.  Its
-            # ClientEngineContext consequently has native_delete=False and
-            # cannot enter this branch.
-            if catalog is None or not capability.native_delete:
+            # A proven catalog can expose unavailable candidates as well as
+            # writable ones. Exact readonly selections must report blocked,
+            # rather than disappear into an empty operation.
+            if catalog is None:
                 continue
             target_action_ids = {
                 str(action_id)
@@ -1203,7 +1226,16 @@ class OperationCoordinator:
                 catalog,
                 catalog_builder=catalog_builder,
                 target_root=None,
+                active_adapters=adapters,
             )
+            # Merge the actual constrained candidate plan, not a full native
+            # catalog whose rows could regain another profile's writer.
+            native_plan = replace(native_context.plan, actions=tuple(
+                action if str(action.action_id) in target_action_ids else replace(
+                    action, available=False, unavailable_reason=action.unavailable_reason
+                    or "client_capability_limit: Client inventory target has no verified native writer")
+                for action in native_context.plan.actions))
+            native_context = replace(native_context, plan=native_plan, actions=self.service.typed_actions(native_plan))
             native_actions = tuple(
                 action
                 for action in getattr(native_context, "actions", ())
@@ -2141,7 +2173,8 @@ class OperationCoordinator:
 
     @staticmethod
     def _adapter_matches(adapter: Any, client: str) -> bool:
-        name = str(getattr(adapter, "name", "")).casefold().replace("_", "-")
+        from .client_contracts import describe_adapter
+        name = describe_adapter(adapter).client
         if client == "native":
             return name in {"native", "codex-native", "codex-desktop"}
         return name == client
@@ -2616,6 +2649,8 @@ class OperationCoordinator:
                         or "verified native session writer is registered"
                     ),
                 )
+            from .client_capability_guards import ClientCapabilityLimits
+            capability = ClientCapabilityLimits.from_adapters(active_adapters).restrict_summary(capability)
             capabilities[normalized_engine] = capability.to_dict()
         payload: dict[str, Any] = {
             "schema_version": "larj.operation-plan.v1",

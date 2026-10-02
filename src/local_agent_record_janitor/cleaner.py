@@ -360,7 +360,19 @@ def scan_adapters(
 
     findings: list[Finding] = []
     errors: list[ScanFailure] = []
-    scanned_adapters = list(adapters)
+    from .client_capability_guards import ClientCapabilityLimits, restrict_finding
+    from .client_contracts import describe_adapter
+
+    scanned_adapters = []
+    descriptors = []
+    for adapter in adapters:
+        try:
+            descriptors.append(describe_adapter(adapter))
+            scanned_adapters.append(adapter)
+        except Exception as exc:
+            errors.append(ScanFailure(platform=str(getattr(adapter, "name", type(adapter).__name__)),
+                                      message=str(exc), error_type=type(exc).__name__))
+    limits = ClientCapabilityLimits(tuple(descriptors))
     binary_hints_by_home: dict[str, set[str]] = defaultdict(set)
     for adapter in scanned_adapters:
         raw_codex_home = getattr(adapter, "codex_home", None)
@@ -442,7 +454,7 @@ def scan_adapters(
             details["codex_bin_hint_candidates"] = sorted(candidates)
         findings_with_store_hints.append(replace(finding, details=details))
     return ScanReport(
-        findings=deduplicate_findings(findings_with_store_hints),
+        findings=[restrict_finding(finding, limits) for finding in deduplicate_findings(findings_with_store_hints)],
         errors=errors,
     )
 

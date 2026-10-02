@@ -31,7 +31,9 @@ from tests.support import create_thread_index, write_rollout
 
 
 class StaticFrontendAdapter:
-    name = "static-frontend"
+    # This fixture inventories a native Codex root and returns synthetic
+    # frontend evidence; it is not a separately registered client writer.
+    name = "native"
 
     def __init__(
         self,

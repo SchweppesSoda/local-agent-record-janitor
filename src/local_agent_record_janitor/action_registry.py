@@ -132,4 +132,19 @@ def action_capability(kind: object) -> ActionCapability:
     )
 
 
-__all__ = ["ACTION_REGISTRY", "ActionCapability", "action_capability"]
+def capability_field_for_action(kind: object) -> str | None:
+    """The client/profile ceiling required by an existing mutation family."""
+    family = action_capability(kind).mutation_family
+    if family in {"delete_conversation", "delete_pi_session", "delete_claude_session",
+                  "repair_legacy_index", "remove_desktop_state", "remove_broken_relation"}:
+        return "native_delete"
+    if family == "remove_frontend_reference":
+        return "frontend_reference_delete"
+    if family == "delete_frontend_session":
+        return "frontend_session_delete"
+    if family in {"delete_project_item", "delete_native_project"}:
+        return "frontend_project_delete"
+    return None
+
+
+__all__ = ["ACTION_REGISTRY", "ActionCapability", "action_capability", "capability_field_for_action"]

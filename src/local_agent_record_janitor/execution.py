@@ -290,6 +290,13 @@ def execute_prevalidated_actions(
     """Execute an already-authorized batch without another full scan."""
 
     actions = tuple(selected_actions)
+    from .client_capability_guards import ClientCapabilityLimits, CLIENT_CAPABILITY_LIMIT
+    limits = ClientCapabilityLimits.from_adapters(getattr(context, "active_adapters", ()))
+    restricted = {str(action.action_id): limits.action_reasons(context.plan, action) for action in actions}
+    restricted = {action_id: reasons for action_id, reasons in restricted.items() if reasons}
+    if restricted:
+        raise ExecutionError("; ".join(reason for reasons in restricted.values() for reason in reasons),
+                             kind=CLIENT_CAPABILITY_LIMIT, matches=tuple(restricted))
     mutation_kinds = {_enum_value(action.kind) for action in actions}
     if len(mutation_kinds) != 1:
         raise ExecutionError(

@@ -529,13 +529,27 @@ def append_native_inventory(inventory: Any, adapters: Sequence[Any]) -> Any:
     projects = projects_for_adapters(adapters)
     if not projects:
         return inventory
-    targets = tuple(project_target(p) for p in projects)
+    from .client_capability_guards import ClientCapabilityLimits, CLIENT_CAPABILITY_LIMIT
+    from .client_inventory import _retarget_target
+
+    limits = ClientCapabilityLimits.from_adapters(adapters)
+    targets = []
+    for project in projects:
+        target = project_target(project)
+        reasons = limits.reasons("codex", "frontend_project_delete", native_root=project.home)
+        if reasons:
+            target = _retarget_target(target, replace(target.capability, frontend_project_delete=False,
+                reason="; ".join(reasons), blockers=(*target.capability.blockers,
+                    {"blocker_code": CLIENT_CAPABILITY_LIMIT, "scope": "project", "message": "; ".join(reasons)})))
+        targets.append(target)
+    targets = tuple(targets)
     keys = {p.stable_id: p for p in inventory.projects}
     for target in targets:
         keys[target.project_key.stable_id] = target.project_key
     capabilities = dict(inventory.capabilities)
     from .record_identity import capability_for
     capabilities["codex"] = replace(capabilities.get("codex", capability_for("native", "codex")),
-                                     frontend_project_delete=any(not p.blockers for p in projects))
+                                     frontend_project_delete=any(t.capability.frontend_project_delete for t in targets))
+    capabilities["codex"] = limits.restrict_summary(capabilities["codex"])
     return replace(inventory, projects=tuple(keys.values()), targets=(*inventory.targets, *targets),
                    project_items=(*inventory.project_items, *projects), capabilities=capabilities)

@@ -4,10 +4,12 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from local_agent_record_janitor.adapters import AionUIAdapter
 from local_agent_record_janitor.cleanup_service import CleanupService
 from local_agent_record_janitor.operation_coordinator import OperationCoordinator
+from local_agent_record_janitor.record_identity import EngineCapability
 
 
 class ProjectOperationIntegrationTests(unittest.TestCase):
@@ -46,6 +48,20 @@ class ProjectOperationIntegrationTests(unittest.TestCase):
                 codex_home=codex_home,
                 codex_bin_hint=root / "codex",
             )
+            class ReadonlyAionUI(AionUIAdapter):
+                def capability_limit_for(self, engine):
+                    return EngineCapability("aionui", engine, reason="Synthetic read-only project profile")
+
+            readonly = ReadonlyAionUI(database=database, codex_home=codex_home, codex_bin_hint=root / "codex")
+            writer = Mock(side_effect=AssertionError("readonly project writer must not be called"))
+            with patch("local_agent_record_janitor.execution.execute_aionui_project_cleanup", writer):
+                blocked = OperationCoordinator(CleanupService()).run_operation(client="aionui", all_projects=True,
+                    adapters=(readonly,), plan_path=root / "readonly-plan.json", clients_closed=True)
+            self.assertEqual(blocked["goal_status"], "blocked")
+            self.assertTrue(blocked["blockers"])
+            writer.assert_not_called()
+            with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0], 10)
             plan_path = root / "operation-plan.json"
             result = OperationCoordinator(CleanupService()).run_operation(
                 client="aionui",

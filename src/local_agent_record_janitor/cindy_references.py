@@ -28,6 +28,11 @@ from .sqlite_identity import (
 _BACKENDS = {"cc": "claude", "codex": "codex", "pi": "pi"}
 
 
+def backend_for_agent_kind(kind: str) -> str:
+    """Use Cindy's verified names, preserving unsupported raw values."""
+    return _BACKENDS.get(kind, f"unsupported:{kind}")
+
+
 @dataclass(frozen=True)
 class CindyNativeReference:
     database: Path
@@ -215,7 +220,7 @@ def build_cindy_reference_catalog(
                 raise CindyReferenceError("sessions.id is duplicated")
             sessions[session_id] = row
             kind = _agent_kind(row["agent_kind"], "sessions.agent_kind")
-            backend = _BACKENDS.get(kind, f"unsupported:{kind}")
+            backend = backend_for_agent_kind(kind)
             references.append(
                 _reference(
                     database,
@@ -251,7 +256,7 @@ def build_cindy_reference_catalog(
             native_id = _optional_native_id(
                 payload.get("fromSdkSessionId"), "agent_switch.fromSdkSessionId"
             )
-            backend = _BACKENDS.get(kind, f"unsupported:{kind}")
+            backend = backend_for_agent_kind(kind)
             if native_id is None:
                 continue
             references.append(
@@ -453,4 +458,5 @@ __all__ = [
     "CindyReferenceError",
     "CindyReferenceFailure",
     "build_cindy_reference_catalog",
+    "backend_for_agent_kind",
 ]

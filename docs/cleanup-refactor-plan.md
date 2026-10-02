@@ -1,7 +1,7 @@
 # 多客户端记录清理施工方案
 
-状态：待实施。本文承接已完成的 0.2.0 清理核心重构，规划现有客户端契约收口和
-Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
+状态：P0/P1 已落地，P2 及后续阶段待实施。本文承接已完成的 0.2.0 清理核心重构，
+规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
 
@@ -108,9 +108,19 @@ mutation 已开始、unknown、partial 和终态回执。
    Codex 专属假设与重复分支；不同时重写 writer。
 4. CLI/Agent/GUI 只消费公共结果；用架构测试限制新依赖方向，避免品牌判断重新进入
    通用类型或另起一套清单逻辑。只有实际重复的 adapter 构建逻辑才抽成静态注册表。
+5. adapter/profile 能力是可向下收紧的明确上限；扫描、manual delete、服务执行、
+   operation 合并与计划能力汇总均遵守它。原生、前端引用、session、project 及既有
+   index/desktop/relation mutation family 在 writer 分派前再次检查。限制按精确来源
+   和受影响 store 匹配，独立 profile 不相互降级；无法定位来源的限制保守作用于本次
+   操作。仅有已知 engine 名称不能恢复 writer，明确选择只读目标应返回 blocked。
+6. 在构造本机 `Path`、`StoreKey`、`ProjectKey` 或前端记录前验证 host/path namespace；
+   当前 descriptor 只接受 local。未知 native store 与远端引用保留不透明 locator，
+   不以默认 home 占位，也不触发本机 catalog。
 
 **完成条件：**P0 用例全部保持语义一致；未知引擎不会进入任何 native writer；
 未受影响的旧计划、JSON 输出字段和精确选择仍兼容；新增证据字段缺失时表示未知。
+当前类型化入口及只读边界见 [Adapter 贡献指南](adapters.md#类型化清单入口)。新增引用
+和关系仅作清单投影，不改变旧身份、approval payload 或已冻结 plan hash。
 
 ### P2：补齐本地文件别名、运行归属与计划兼容
 
@@ -124,11 +134,22 @@ mutation 已开始、unknown、partial 和终态回执。
   引擎子进程、已知共享 writer 纳入相关目标检查。进程名或“窗口已关”不足以放行。
 - 对影响授权的新证据执行下节的版本兼容规则；受影响的身份、引用、别名、关系和
   writer 检查在 apply 前重验证，中途漂移停止剩余动作。
+- 补齐同一受信本地物理 root 内的跨 operation unknown 占用门槛。复用该目标已有
+  `.local-agent-record-janitor/operations`，从可信的 legacy/child journal 推导已开始但
+  结果未知的受影响批次；更换 operation ID 或 plan path 不能绕过。证据不足时阻止
+  该 root，不扫描其他 operation home 或全盘，不承诺跨 root 桥接的全局防重发。
+- root 级 OS 跨进程互斥覆盖兄弟占用检查、持久化 mutation_started、writer 与结果
+  发布；verify 的读取和终态发布使用同一互斥。锁序为 root → per-operation → writer，
+  多 root 固定排序。锁失败不降级，unknown 无 TTL、不 compact；崩溃后通过
+  [既有 status/verify 契约](agent-operation-contract.md)收口，不自动删除旧 apply.lock
+  或重发 mutation。已知 blocked 且未尝试的操作可恢复，已知 partial 残留可重新计划。
 - 为后续 adapter 提供上述证据接口；此阶段不新增跨 store 文件删除或远端执行器。
 
 **完成条件：**临时目录中的链接、路径替换和进程模拟能证明范围外记录不受影响；
 无法证明别名或 writer 时有稳定 blocker；旧 unknown 操作仍可 status/verify，
 任何恢复路径都不会重发 mutation。
+必须补真实双进程排他/崩溃用例，以及固定 child plan/state/receipt 的完整临时路径
+重绑定回归；同进程新 reader 的兼容测试不替代这些门槛。
 
 ### P3：Orca 本机只读接入
 

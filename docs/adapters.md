@@ -60,6 +60,11 @@ blocker 继续收紧每个目标。engine context 的 capability 是汇总，不
 限制。新引用和关系字段是清单展示投影，既有身份、approval payload 和冻结计划 hash
 格式继续由原写入契约负责；这些投影本身不扩大写入范围。
 
+能力上限贯穿旧 scan/purge、manual delete、服务执行和 operation。现有 mutation
+family 在实际 writer 分派前按精确 metadata source 或 native store 再检查；前端
+引用按冻结的真实 backend 证据检查全部受影响引擎，不使用 Codex 默认值放宽 Pi/Claude
+限制。明确选择只读目标返回 blocked，独立可写 profile 保留原计划行为。
+
 ### 身份、错误与能力
 
 - 原生身份至少包含 engine、规范化 store 和完整 native ID；Pi 还包含精确 JSONL 路径。

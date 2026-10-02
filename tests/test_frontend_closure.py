@@ -100,6 +100,15 @@ class FrontendClosureTests(unittest.TestCase):
             def list_sessions(self) -> list[FrontendSessionRecord]:
                 return aionui.list_sessions()
 
+            def describe_client(self):
+                from local_agent_record_janitor.client_contracts import ClientDescriptor
+                from local_agent_record_janitor.record_identity import StoreKey, capability_for
+                # The native adapter owns its native database. Forwarding
+                # exact AionUI references does not make it their writer.
+                return ClientDescriptor("native", sources=(self.codex_home / "state_5.sqlite",),
+                    native_stores=(StoreKey("codex", self.codex_home, kind="codex_home"),),
+                    inventory_engines=("codex",), capability_limits=(capability_for("native", "codex"),))
+
         self_home = self.home
         return database, rollout, NativeWithAionUI(), calls
 

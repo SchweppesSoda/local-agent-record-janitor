@@ -51,6 +51,13 @@ class NativeIntegrityAdapter(FrontendAdapter):
 
     name = "native"
 
+    def capability_limit_for(self, engine: str):
+        from dataclasses import replace
+        capability = super().capability_limit_for(engine)
+        # The native project writer is already implemented and separately
+        # requires its exact versioned desktop-state evidence.
+        return replace(capability, frontend_project_delete=engine == "codex")
+
     def __init__(
         self,
         *,

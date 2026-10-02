@@ -338,6 +338,8 @@ def build_client_engine_contexts(
     requested = _normalize_engines(engines)
     engine_names = requested or tuple(dict.fromkeys((
         *inventory.engines,
+        *(engine for descriptor in inventory.descriptors for engine in descriptor.inventory_engines),
+        *(store.backend for descriptor in inventory.descriptors for store in descriptor.native_stores),
         *(normalize_engine(engine) for adapter in adapter_list
           if _adapter_client(adapter) == selected_client
           for engine in getattr(adapter, "inventory_engines", ())),
@@ -411,7 +413,11 @@ def build_client_engine_contexts(
         explicit_capability = any(key in declared for key in (f"{selected_client}:{normalized_engine}", normalized_engine))
         targets = tuple(restrict_client_target(target, inventory,
             profile_capabilities=() if explicit_capability else profile_capabilities) for target in targets)
-        capability = aggregate_capabilities(tuple(target.capability for target in targets)) if targets else capability
+        if targets:
+            capability = aggregate_capabilities(tuple(target.capability for target in targets))
+        else:
+            from .client_capability_guards import ClientCapabilityLimits
+            capability = ClientCapabilityLimits(inventory.descriptors).restrict_summary(capability)
         contexts.append(
             ClientEngineContext(
                 inventory=inventory,
@@ -805,7 +811,11 @@ def build_native_client_inventory(
         references=tuple({r.binding_key: r for r in native_references}.values()),
     )
     inventory = replace(inventory, targets=tuple(restrict_client_target(t, inventory) for t in inventory.targets))
-    capability = aggregate_capabilities(tuple(t.capability for t in inventory.targets)) if inventory.targets else capability
+    if inventory.targets:
+        capability = aggregate_capabilities(tuple(t.capability for t in inventory.targets))
+    else:
+        from .client_capability_guards import ClientCapabilityLimits
+        capability = ClientCapabilityLimits(inventory.descriptors).restrict_summary(capability)
     inventory = replace(inventory, capabilities={engine: capability})
     context = ClientEngineContext(
         inventory=inventory,
@@ -1370,6 +1380,9 @@ class _SnapshotAdapter:
 
     def list_sessions(self) -> list[FrontendSessionRecord]:
         return list(self.rows)
+
+    def describe_client(self) -> ClientDescriptor:
+        return describe_adapter(self.source)
 
 
 def _bind_native_targets(

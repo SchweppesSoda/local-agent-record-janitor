@@ -270,7 +270,12 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     the affected home so no incomplete snapshot can produce a delete action.
     """
 
+    from .client_capability_guards import ClientCapabilityLimits, CLIENT_CAPABILITY_LIMIT
+
     adapter_list = list(adapters)
+    # Validate execution location before interpreting any legacy home/session
+    # path. The same maxima remain authoritative in the manual catalog.
+    limits = ClientCapabilityLimits.from_adapters(adapter_list)
     home_paths: dict[str, Path] = {}
     bin_hints: dict[str, set[Path]] = defaultdict(set)
     frontend_by_home: dict[str, list[FrontendSessionRecord]] = defaultdict(list)
@@ -605,8 +610,15 @@ def build_session_catalog(adapters: Iterable[object]) -> SessionCatalog:
     records = tuple(
         sorted(all_records, key=lambda item: (_normalized_path(item.codex_home), item.thread_id))
     )
+    restricted_records = []
+    for record in _resolve_catalog_lineage(records, errors):
+        reasons = limits.reasons("codex", "native_delete", native_root=record.codex_home,
+                                sources=tuple(session.database for session in record.frontend_sessions))
+        restricted_records.append(replace(record, deletable=False,
+            blockers=tuple(dict.fromkeys((*record.blockers, *reasons))),
+            blocker_codes=tuple(dict.fromkeys((*record.blocker_codes, CLIENT_CAPABILITY_LIMIT)))) if reasons else record)
     return SessionCatalog(
-        records=_resolve_catalog_lineage(records, errors),
+        records=tuple(restricted_records),
         scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(

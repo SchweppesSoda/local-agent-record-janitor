@@ -559,6 +559,11 @@ def execute_manual_delete(
     if not callable(catalog_builder):
         raise ManualDeletePlanError("catalog_builder must be callable")
 
+    from .client_capability_guards import CLIENT_CAPABILITY_LIMIT
+    if any(CLIENT_CAPABILITY_LIMIT in getattr(record, "blocker_codes", ())
+           for action in plan.actions for record in action.affected_records):
+        raise ManualDeletePlanError("Client capability limit prevents native deletion")
+
     if preflight_verified:
         refreshed = plan
     else:

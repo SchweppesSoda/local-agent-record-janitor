@@ -62,6 +62,16 @@ class _CompositeAdapter:
     def native_catalog_for(self, engine: str) -> object:
         return self.catalogs[engine]
 
+    def describe_client(self):
+        from local_agent_record_janitor.client_contracts import ClientDescriptor
+        from local_agent_record_janitor.record_identity import StoreKey, capability_for
+        stores = tuple(StoreKey(engine, catalog.session_root if engine == "pi" else catalog.config_dir,
+                                kind="session_root" if engine == "pi" else "config_dir")
+                       for engine, catalog in self.catalogs.items())
+        return ClientDescriptor(self.client, sources=(self.database,), native_stores=stores,
+            inventory_engines=tuple(self.catalogs),
+            capability_limits=tuple(capability_for(self.client, engine) for engine in self.catalogs))
+
     def registered_capability(self, engine: str) -> EngineCapability:
         return EngineCapability(
             "cindy",

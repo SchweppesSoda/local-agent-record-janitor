@@ -283,6 +283,27 @@ class NativeProjectCleanupTests(unittest.TestCase):
         self.assertEqual(len(inventory.project_items), 2)
         self.assertTrue(any(t.record_id == self.project_id for t in inventory.targets))
 
+    def test_readonly_native_project_remains_visible_with_a_capability_blocker(self):
+        from local_agent_record_janitor.client_inventory import build_client_inventory, build_native_client_inventory
+        from local_agent_record_janitor.inventory import build_session_catalog
+        from local_agent_record_janitor.record_identity import EngineCapability
+
+        class ReadonlyNative(NativeIntegrityAdapter):
+            def capability_limit_for(self, engine):
+                return EngineCapability("native", engine, reason="Synthetic read-only native store")
+
+        adapter = ReadonlyNative(codex_home=self.home)
+        direct = build_client_inventory((adapter,), client="native")
+        public, _ = build_native_client_inventory(client="native", engine="codex",
+            catalog=build_session_catalog((adapter,)), adapters=(adapter,))
+        for inventory in (direct, public):
+            target = next(t for t in inventory.targets if t.record_id == self.project_id)
+            self.assertFalse(target.capability.frontend_project_delete)
+            self.assertFalse(target.action_ids)
+            self.assertIn("client_capability_limit", target.blocker_codes)
+            self.assertFalse(target.to_dict()["cleanup_eligible"])
+            self.assertFalse(inventory.capabilities["codex"].native_delete)
+
     def test_backup_only_registration_is_discovered(self):
         (self.home / STATE_FILES[0]).write_text("{}")
         result = self.run_cleanup()

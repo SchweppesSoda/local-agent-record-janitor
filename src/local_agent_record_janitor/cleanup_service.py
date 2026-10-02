@@ -365,7 +365,8 @@ class CleanupService:
         )
 
     def plan(self, snapshot: StoreSnapshot) -> CleanupPlan:
-        return self._planner(snapshot.report)
+        from .client_capability_guards import ClientCapabilityLimits
+        return ClientCapabilityLimits.from_adapters(snapshot.active_adapters).restrict_plan(self._planner(snapshot.report))
 
     def typed_actions(self, plan: CleanupPlan) -> tuple[Action, ...]:
         observations = {
@@ -471,12 +472,15 @@ class CleanupService:
         *,
         catalog_builder: Callable[[], Any],
         target_root: Path | None = None,
+        active_adapters: Iterable[FrontendAdapter] = (),
     ) -> CleanupContext:
         """Adapt one Pi/Claude inventory to the shared immutable plan model."""
 
         from .session_cleanup import build_session_cleanup_context
 
-        return build_session_cleanup_context(
+        from .client_capability_guards import restrict_cleanup_context
+
+        context = build_session_cleanup_context(
             engine,
             catalog,
             catalog_builder=catalog_builder,
@@ -484,6 +488,7 @@ class CleanupService:
             captured_at=self._clock(),
             typed_action_builder=self.typed_actions,
         )
+        return restrict_cleanup_context(context, active_adapters, self.typed_actions)
 
     def prepare_sessions(
         self,
@@ -554,8 +559,13 @@ def filter_supplied_adapters(
     return [
         adapter
         for adapter in supplied
-        if str(getattr(adapter, "name", "")).lower() in selected
+        if _adapter_client_for_selection(adapter) in selected
     ]
+
+
+def _adapter_client_for_selection(adapter: object) -> str:
+    from .client_contracts import describe_adapter
+    return describe_adapter(adapter).client
 
 
 def filter_candidate_platforms(

@@ -33,6 +33,35 @@ class _LimitedCindy(CindyAdapter):
 
 
 class ExistingContractGapTests(unittest.TestCase):
+    def test_descriptor_engines_discover_native_records_without_frontend_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_pi_session(root, "native-only")
+            catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
+            descriptor = ClientDescriptor("cindy", sources=(root / "metadata.json",),
+                native_stores=(StoreKey("pi", catalog.session_root, kind="session_root"),),
+                inventory_engines=("pi",), capability_limits=(EngineCapability("cindy", "pi"),))
+
+            class Reader:
+                def describe_client(self):
+                    return descriptor
+
+                def snapshot_references(self, *, refresh=False):
+                    return ReferenceSnapshot(descriptor)
+
+                def native_catalog_for(self, engine):
+                    self.calls.append(engine)
+                    return catalog
+
+            reader = Reader()
+            reader.calls = []
+            contexts = build_client_engine_contexts((reader,), client="cindy")
+            self.assertEqual(reader.calls, ["pi"])
+            self.assertEqual(len(contexts), 1)
+            self.assertEqual(contexts[0].targets[0].record_id, "native-only")
+            self.assertEqual(contexts[0].targets[0].classification, RecordClassification.ORPHAN_NATIVE)
+            self.assertFalse(contexts[0].targets[0].action_ids)
+
     def test_incomplete_native_binding_does_not_restrict_an_independent_frontend_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
