@@ -88,7 +88,7 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
 Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；所有 Orca 写入和
 完整终验能力仍关闭。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
-native root 和 live metadata 尚未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
+并可显式查询本机 live metadata；native root 和全部 writer 归属仍未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
 
 ## 为什么需要它
@@ -310,8 +310,9 @@ Codex thread ID 的 Cindy `status=deleted` 前端记录也会显示，并可由�
 该投影不参与既有 `snapshot_id` 或删除授权。`--inspect-clients` 使用客户端明确声明的
 owner process root；它与 native root 分开。`probe_complete` 表示探测成功，
 `coverage_complete` 另行说明限定进程范围的覆盖；当前仅检查 Windows 下 Codex、
-ChatGPT、AionUI、Cindy 四类进程。Orca/Herdr、Pi/Claude 运行时、任意 node/server 和
-非 Windows 运行归属未被完整覆盖，不能由空结果推断 `clients_closed=true`。
+ChatGPT、AionUI、Cindy 四类进程。明确选择 Herdr 时改用下述 metadata API 观察；
+Orca/Herdr 的全部 writer、Pi/Claude 运行时、任意 node/server 和非 Windows 进程归属
+未被完整覆盖，不能由空结果推断 `clients_closed=true`。
 
 盘点 Orca 可使用默认或 `ORCA_USER_DATA_PATH` 指向的 userData，也可显式指定一个或多个
 本机 profile：
@@ -334,7 +335,7 @@ storages。旧 v1 不补字段或重算 hash；需要新保护来源的未执行
 home，以及没有 metadata 关联的 runtime home，不在全局发现保证内。SQLite 使用只读
 SQL，但 WAL 读锁可能创建或更新侧文件；这不是文件系统零写保证，工具不清理这些文件。
 
-Herdr 只盘点持久化 `session.json` 及已识别的 `session-snapshots`/`session-backups`：
+Herdr 默认盘点持久化 `session.json` 及已识别的 `session-snapshots`/`session-backups`：
 
 ```powershell
 local-agent-record-janitor records --client herdr --herdr-root 'D:\HerdrConfig' --json
@@ -343,8 +344,20 @@ local-agent-record-janitor records --client herdr --herdr-root 'D:\HerdrConfig' 
 `--herdr-root` 可重复；省略时按 Herdr 的配置路径规则发现 release/dev 默认目录。
 当前布局为空仍保留恢复文件中的引用；同 ID 在不同 session、pane 或来源分别展示。
 持久化 ID、Pi 路径和 cwd 不证明 native home，不与同 ID 的原生记录自动关联。
-live server/pane/agent metadata 尚未探测，清单保留有效引用，同时因
-`live_metadata_not_probed` 返回退出码 `1` 和 `goal_status=blocked`，不表示零记录。
+不加 `--inspect-clients` 时不连接 server，并保留 `live_metadata_not_probed`。
+可显式附带已知本机 session 的在线 metadata：
+
+```powershell
+local-agent-record-janitor records --client herdr --herdr-root 'D:\HerdrConfig' --inspect-clients --json
+```
+
+查询仅发送 `ping` 和 `session.snapshot`，不启动、attach 或恢复 Herdr。live 引用与
+current/restore 来源分别展示；公共 pane ID 不等于持久化 pane ID。`client_ownership`
+复用同次盘点缓存，`reference_values_match` 只比较 session 级观察值，不证明同代实例。
+响应端点可使 `clients_closed=false`，不可达或失败保持 unknown；全部 writer 的
+`coverage_complete` 始终 false。清单保留有效引用，同时因未完成运行覆盖返回退出码
+`1` 和 `goal_status=blocked`，不表示零记录。API 请求可能触发 server 自身日志或已有事件处理，
+不承诺产品文件系统零写。
 损坏或未知版本来源也保留独立错误。`delete plan/run` 选择 Herdr 返回只读 capability
 blocker；无授权动作的 blocked 计划经 apply/status/verify 仍保持 blocked。
 来源、命名和隐私边界见 [Herdr 接入说明](docs/adapters.md#herdr已接入持久化只读引用)。

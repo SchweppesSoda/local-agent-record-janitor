@@ -65,20 +65,34 @@ def valid_recovery_name(name: str) -> bool:
     return bool(match and int(match[1]) <= 2**128 - 1)
 
 
-def default_herdr_roots(*, appdata: Path | None = None, environ: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+def raw_herdr_join(base: str, child: str) -> str:
+    """Mirror PathBuf.join without rewriting the base's endpoint spelling."""
+    endings = ("/", "\\") if os.name == "nt" else ("/",)
+    return base + ("" if base.endswith(endings) else os.sep) + child
+
+
+def default_herdr_locators(*, appdata: Path | None = None, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
     env = os.environ if environ is None else environ
     # Herdr uses environment presence, including XDG on Windows/macOS. An
     # empty or relative value is not a proved local root; never scan cwd.
     if "XDG_CONFIG_HOME" in env:
-        base = local_herdr_path(env["XDG_CONFIG_HOME"])
+        base = env["XDG_CONFIG_HOME"]
     elif os.name == "nt" and appdata is not None:
-        base = local_herdr_path(appdata)
+        base = os.fspath(appdata)
     elif os.name == "nt" and "APPDATA" in env:
-        base = local_herdr_path(env["APPDATA"])
+        base = env["APPDATA"]
     elif os.name == "nt" and "USERPROFILE" in env:
-        base = local_herdr_path(env["USERPROFILE"]) / "AppData" / "Roaming"
+        base = raw_herdr_join(raw_herdr_join(env["USERPROFILE"], "AppData"), "Roaming")
     elif "HOME" in env:
-        base = local_herdr_path(env["HOME"]) / ".config"
+        # The upstream Windows HOME fallback joins this single child, whose
+        # internal slash is part of the named-pipe namespace.
+        local_herdr_path(env["HOME"])
+        return tuple(raw_herdr_join(env["HOME"], ".config/" + name) for name in ("herdr", "herdr-dev"))
     else:
-        base = local_herdr_path(tempfile.gettempdir())
-    return tuple(base / name for name in ("herdr", "herdr-dev"))
+        base = tempfile.gettempdir()
+    local_herdr_path(base)
+    return tuple(raw_herdr_join(base, name) for name in ("herdr", "herdr-dev"))
+
+
+def default_herdr_roots(*, appdata: Path | None = None, environ: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    return tuple(local_herdr_path(raw) for raw in default_herdr_locators(appdata=appdata, environ=environ))

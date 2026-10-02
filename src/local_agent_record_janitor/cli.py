@@ -501,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_arguments(records)
     _add_operation_scope_arguments(records)
-    records.add_argument("--inspect-clients", action="store_true", help="附带只读进程归属证据；区分目标客户端与其他存储的进程")
+    records.add_argument("--inspect-clients", action="store_true", help="附带只读运行证据；Herdr 查询已知本机 session 的 metadata API，其他客户端检查进程归属")
 
     delete = subparsers.add_parser(
         "delete",
@@ -1008,7 +1008,7 @@ def _add_common_arguments(
     parser.add_argument("--orca-root", action="append", default=[], metavar="PATH",
                         help="Orca userData 根目录（可重复；仅本机 metadata 盘点与保护）")
     parser.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
-                        help="Herdr config 根目录（可重复；只读持久化引用，不探测 live server）")
+                        help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
     if not codex_only:
         parser.add_argument(
             "--pi-agent-dir",
@@ -2957,7 +2957,29 @@ def _run_client_records(
         if not owners:
             # A native store is not evidence of an owning process root.
             owners.add((client, None, tuple(context.engine for context in contexts)))
+        used_runtime_hooks = set()
         for owner_client, root, owner_engines in sorted(owners, key=lambda row: (row[0], str(row[1]), row[2])):
+            hooked = False
+            for adapter in active_adapters:
+                hook = getattr(adapter, "inspect_runtime", None)
+                if not callable(hook):
+                    continue
+                descriptor = describe_adapter(adapter)
+                if descriptor not in descriptors or descriptor.client != owner_client or descriptor.owner_process_root != root:
+                    continue
+                hooked = True
+                if id(adapter) in used_runtime_hooks:
+                    continue
+                used_runtime_hooks.add(id(adapter))
+                try:
+                    payload["client_ownership"].append(hook())
+                except Exception:
+                    payload["client_ownership"].append({"owner_client": owner_client,
+                        "owner_process_root": str(root) if root is not None else None,
+                        "clients_closed": None, "probe_complete": False, "coverage_complete": False,
+                        "errors": ["runtime_projection_unavailable"]})
+            if hooked:
+                continue
             try:
                 payload["client_ownership"].append(inspect_client_ownership(root, owner_client=owner_client,
                                                                            engines=owner_engines))

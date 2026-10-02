@@ -86,12 +86,21 @@ ambiguous child journals remain `unknown` before any such gate; their native
 status/verify diagnosis remains available without resending mutation. A new
 adapter's `verify=false` does not revoke that legacy read-only diagnosis.
 
-Herdr is persisted-only and inventory-only. `records --client herdr
+Herdr is inventory-only. By default, `records --client herdr
 [--herdr-root PATH ...]` reads snapshot schema3 current and recognized recovery
 files across default/named sessions. Explicit roots replace default candidate
 profiles. Rootless IDs and Pi paths do not prove native ownership or join a
-native catalog; project cwd is not a native root. Even valid persisted sources
-retain `live_metadata_not_probed`: records returns exit code `1` and
+native catalog; project cwd is not a native root. Without `--inspect-clients`,
+valid persisted sources retain `live_metadata_not_probed`. Explicit Herdr
+inspection sends only `ping` and `session.snapshot` to known local endpoints,
+using protocol22 with per-endpoint and profile deadlines/response limits.
+Live references remain separate from persisted current/restore; public pane
+IDs do not identify persisted panes. `client_ownership` uses that same cached
+snapshot and stays outside `snapshot_id`. `reference_values_match` describes
+observed session values, not an atomic generation or pane identity mapping.
+Responsive endpoints give `clients_closed=false`; failure or absence remains
+unknown, and full writer coverage is never complete. `runtime_writer_coverage_unknown`
+remains even after successful metadata queries. Records returns exit code `1` and
 `goal_status=blocked` while exposing the available references. Source errors
 remain scoped to the selected profile/source. Herdr does not add Orca
 `guard_sources`; all native/frontend/remote mutation and its own verify
@@ -186,7 +195,9 @@ inventory/protection evidence, not deletion candidates.
 Select the official native `CODEX_HOME` explicitly when the caller itself runs
 inside Cindy. `records --inspect-clients` adds read-only process ownership
 evidence (PID, parent PID, executable and store relation); process names alone
-do not identify which store is open. Apply and verify restore the frozen native
+do not identify which store is open. Herdr's explicit inspection instead uses
+the metadata API described above; a native command does not enable Herdr live
+queries merely because default discovery found a Herdr profile. Apply and verify restore the frozen native
 store when a plan is supplied and reject a conflicting explicit home.
 
 Record output contains the Desktop catalog's UI display title when available,

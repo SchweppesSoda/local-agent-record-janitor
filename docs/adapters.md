@@ -35,7 +35,7 @@
 | native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
 | Orca / Codex | 只读 journal 引用与已证明 homes 的原生清单 | 全部写入及 Orca 自身 verify 关闭；未知来源保持 incomplete |
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
-| Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore 引用 | rootless；live metadata 未探测，全部写入及自身 verify 关闭 |
+| Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore；显式 live metadata | rootless；全部 writer 归属未知，全部写入及自身 verify 关闭 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -115,6 +115,9 @@ target、snapshot_id 或 v1 approval/hash。相同 file ID 只关联观察证据
 Cindy 四类 exe，复用 Cindy 的真实进程树/profile 证据。未知 owner、Pi/Claude runtime、
 非 Windows 或失败返回 unknown；明确的相关运行进程仍可返回 false。输出不含 command
 line。该观察不替代现有关闭 ack，也不修改既有 writer 的关闭检查。
+
+Herdr 的显式检查复用 adapter 同次缓存的 metadata API 观察，见下文；不使用上述
+四类进程的空枚举证明 Herdr 关闭。运行投影在 `snapshot_id` 之外输出，不改变旧审批。
 
 ### 同 root 的 mutation 协调
 
@@ -240,7 +243,7 @@ Orca 产品实机 writer、完整运行归属或跨平台发布兼容性验收�
 使用系统临时目录。显式路径就是 config root，不再追加产品名；相对、foreign-OS、UNC
 或远端 locator 不作为本机 root。`HERDR_CONFIG_PATH`、`HERDR_HOME`、`XDG_STATE_HOME`
 不提供 session root。只枚举 root 和 `sessions/<name>` 下的已知来源，保留 session 名
-精确拼写；不通过 socket 查询或启动 server。依据：
+精确拼写；发现本身不连接或启动 server。依据：
 [配置路径](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/config/io.rs)、
 [session 路径与名称](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/session.rs)。
 
@@ -262,14 +265,50 @@ native stores 或调用默认 native catalog；同 ID 的无关原生记录不�
 reader 读到，但不输出或执行，也不由 argv 补造 native ID。`agent_resume`/`launch_argv`
 等独立恢复语义未实现时明确报告覆盖不足。
 
-live metadata、detached server、pane/agent 进程和 socket 归属均未探测，每个已知 profile
-始终保留 `live_metadata_not_probed`。即使持久化格式均合法，`records` 仍返回退出码 `1`
-和 `goal_status=blocked` 并展示已读引用；这不是完整扫描或完整终验。current 生命周期
-保持 unknown，restore 保持 restorable；detach、pane 关闭或空进程枚举不证明
-`clients_closed`。所有 native/frontend/remote 写入及 Herdr 自身 verify 关闭；选择
+普通盘点保留 `live_metadata_not_probed`，不查询端点。只有明确选择 Herdr 的
+`records --inspect-clients` 才读取各已知 default/named session 的 `herdr.sock` metadata API。
+每次连接只发送一个 JSON 行请求：先 `ping`，再另连 `session.snapshot`，`params={}`；
+只接受 protocol22 和一致的 version，验证 public ID、交叉关联、layout 与 pane/tab 计数。
+已知 `0.9.3` 及合法后缀仅提供兼容观察，不证明二进制 SHA；其他 base version 即使
+shape 可读，也保留引用并报告 `live_version_unverified`。依据：
+[wire protocol](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/protocol/wire.rs)、
+[session snapshot](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/app/api/session.rs)。
+
+Unix 使用本机同用户 socket；Windows 使用有界 overlapped named-pipe I/O，检查 marker
+与 pipe peer PID，超时取消并收口 handle。路径 namespace 在本机 I/O 前校验，父链和
+endpoint/marker 在查询前后核对；变化报告 incomplete，不延用该 live snapshot。
+极端取消未确认时报告 incomplete 并暂停后续 probe，最多保留一份必要 OVERLAPPED
+存储，待后续 probe 确认完成后释放；不留下后台 reader 线程或子进程。
+pipe 名按固定 interprocess 2.4.2 原样拼接 `\\.\pipe\` 与 socket locator，保留已知显式/
+默认路径的原始斜杠拼写。canonical 相同不证明所有 pipe 别名相同，不搜索任意别名；
+`HERDR_SOCKET_PATH` override 尚不支持，明确报告覆盖不足。每 endpoint 的两请求共享
+350 ms deadline，每 profile 共用 2 s、8 MiB 响应预算；pong 最多 16 KiB、snapshot 最多
+2 MiB，预算耗尽的 session 保持 unprobed。依据：
+[IPC identity](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/ipc.rs)、
+[Windows namespace](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/platform/windows.rs)。
+
+live 来源记录独立 CURRENT/LIVE binding，持久化 current 保持 unknown、restore 保持
+restorable；两者不按同数值 pane ID 合并，live 的 public ID 会重映射。pane 和 agent 的
+同一 public identity 引用不重复计数，冲突值分别保留并报告错误。`reference_values_match`
+仅比较同 profile/session 的 current 与 live 引用值及数量，不证明 pane 对应、同代实例
+或原子一致。失联、版本变化、覆盖缺口或差异不会清空持久化/恢复引用。
+
+`client_ownership` 从同次 adapter 缓存输出，不发第二轮查询。`probe_complete` 仅表示
+metadata 查询完整，`coverage_complete` 始终 false，scope 明确为 profile/session。
+响应端点使 `clients_closed=false`；未响应或证据失败保持 unknown，永不由缺 socket
+推断 true。Pong 的 `detached_server_daemon` 是能力，`agent_status` 是 Herdr 观察，均不
+证明 attached/detached 实况、OS 进程停止或 native 归属。清单始终保留
+`runtime_writer_coverage_unknown`（未探测时为 `live_metadata_not_probed`），返回退出码 `1`
+和 `goal_status=blocked` 并展示已读引用；这不是完整扫描或完整终验。API 不发送
+mutation 命令，不启动/attach/restore，也不查询 `agent.get`、终端正文或进程命令行。
+JSON 中的 private 字段可能被读取，但不投影或执行；server 自身可能写请求日志或处理
+已有 title 事件，不能承诺产品内存/文件系统零副作用。
+
+所有 native/frontend/remote 写入及 Herdr 自身 verify 关闭；选择
 Herdr 的 delete plan/run 结构化 blocked，无授权动作的 apply/status/verify 保留该结果。
 rootless Herdr 不进入 Orca `guard_sources`，也不改变旧 v1 hash 或只读恢复契约。
-当前验证限于合成临时来源，完整 live/runtime 与跨平台实机验收仍待实施。
+当前验证限于合成临时来源和 Windows 临时 named pipe；全部 runtime writer 归属及
+macOS/Linux 实机或 CI 验收仍未完成。
 
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。

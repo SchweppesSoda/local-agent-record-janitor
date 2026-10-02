@@ -1,7 +1,7 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 的持久化只读切片已交付，
-live/runtime 部分待实施，P5 写入能力仍关闭，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 已交付持久化引用与显式本机
+live metadata 两个只读切片，全部 writer 归属仍未知；P5 写入能力仍关闭，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -12,7 +12,8 @@ plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读�
 旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca 的有界发现与 journal
 reader 已接入同一公共清单和保护链；含新保护来源的顶层计划采用条件 v2 冻结 locator，
 旧 v1 不补字段或重 hash。Herdr schema3 的 current/restore reader 已接入公共清单，
-所有引用保持 rootless，live metadata 未探测时保留 incomplete。当前不承诺发现任意
+所有引用保持 rootless；明确选择 Herdr 的 records 可显式探测 protocol22 metadata，
+运行投影复用同次缓存，未完成 writer 覆盖仍保留 incomplete。当前不承诺发现任意
 自定义或未证明关联的存储。
 
 ## 目标与已完成基线
@@ -205,9 +206,14 @@ managed home 的 helper。WSL/SSH/其他引擎仅报告可证明的线索或不�
 **已交付切片：**固定上游 snapshot schema3 的 current/restore 引用、默认/显式
 profile 发现与公共 CLI 接线，见 [Herdr 接入边界](adapters.md#herdr已接入持久化只读引用)。
 当前布局为空不丢恢复引用，同 ID 跨 session/source 不合并；未知 root/backend、坏来源
-与未实现的 argv 恢复语义保持错误。全部写入及自身 verify 关闭。live metadata、detached
-server、运行归属和 live/persisted 冲突验证未实施，始终 `live_metadata_not_probed`，
-因此原 P4 完成条件尚未全部满足；有效引用可展示，但 records 不宣告闭合盘点。
+与未实现的 argv 恢复语义保持错误。显式 `--inspect-clients` 通过真实本机 transport
+查询 protocol22 ping/session.snapshot，保留独立 live 引用与 session 级观察值差异；
+deadline、响应预算、父链/endpoint 身份变化、版本变化和 partial coverage 均保守处理。
+普通盘点不连接，运行投影消费同次缓存，不按公共 pane ID 推断持久化 pane。
+全部写入及自身 verify 关闭。响应 server 不证明 attached/detached 实况、全部 agent/
+后台 writer 归属或原子实例一致，运行覆盖始终 unknown；因此原 P4 完成条件尚未全部
+满足，有效引用可展示，但 records 不宣告闭合盘点。当前实测为 Windows 合成临时
+named pipe，macOS/Linux 及产品实机验收未完成。
 
 **依赖：**P1、P2；研究可与 P3 并行，代码按单写者顺序提交。
 **改动范围：**新增 Herdr adapter/引用提取器、运行归属探测和临时样本测试。
@@ -229,6 +235,23 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 ### P5：逐组合开放精确删除
 
 **当前状态：**未实施；Orca、Herdr writer 均保持关闭，不因只读切片交付获得写入授权。
+
+目前没有可仅凭现有证据开放的新产品删除组合。Orca 最近的候选范围仅为本机 Windows、
+journal4/record2、单 managed account home、无 current/history/restore 引用且无 bridge 的
+native-only 目标。现有 alias 只是观察，未进入审批；未来须冻结并重检普通 rollout 的
+link count 和已知 alias，对未知 bridge/恢复范围、新链接或路径漂移拒绝执行。无 bridge
+检查须覆盖将修改的 rollout、index、SQLite family 与实际 storage 配置，不能忽略 DB
+hardlink 或范围外 `sqlite_home`；accountHome marker 本身不证明 API 副作用限于该 root。
+仍缺全部真实 writer 已停或等价排他证据，以及实际 Codex binary/API 在该 home 的作用
+范围证据；released lease 可有 `deathEvidence=null`，不代表进程已死，后台 bridge 仍能
+link/heal。依据：[lease schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)、
+[close predicate](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/structured-agent-session-close.ts)、
+[bridge/storage](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/codex/codex-account-session-bridge.ts)。
+
+Herdr 的 Codex/Claude ID 缺 native root；Pi path 也缺配置/sessionRoot 关联、独立后台
+writer 停止与恢复 argv 的完整覆盖。在线 metadata 只能补充观察，不能由 cwd、dirname、
+同 ID 默认 root、pane close 或 detach 开放删除。这些是后续实施门槛，当前不新增
+审批 schema 或预检接口，全部新 writer 继续关闭。
 
 **依赖：**相应 adapter 的 P3 或 P4 完成。Orca、Herdr 分别推进，一个组合未达标不
 阻止另一组合保持只读或交付。不得按产品名一次打开所有引擎和所有 schema。

@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter
-from .herdr_discovery import default_herdr_roots, local_herdr_path
+from .herdr_discovery import default_herdr_locators, local_herdr_path
 from .orca_discovery import default_orca_root, local_orca_path, reverse_account_profile
 from .record_identity import canonical_path
 from .cleanup_service import selected_platforms
@@ -48,20 +48,22 @@ def discover_orca_guards(args: Any) -> tuple[OrcaAdapter, ...]:
 
 
 def discover_herdr_adapters(args: Any) -> tuple[HerdrAdapter, ...]:
-    """Persisted default/dev or explicit config roots, without socket probes."""
+    """Bounded profiles; socket queries require selected Herdr + inspection."""
     requested = tuple(getattr(args, "herdr_root", ()) or ())
     selected = str(getattr(args, "client", "")) == "herdr" or "herdr" in (getattr(args, "platform", ()) or ())
-    roots = [local_herdr_path(root) for root in requested]
+    roots = [os.fspath(root) for root in requested]
+    for root in roots:
+        local_herdr_path(root)
     if not requested:
         try:
-            defaults = default_herdr_roots(appdata=getattr(args, "appdata", None))
+            defaults = default_herdr_locators(appdata=getattr(args, "appdata", None))
         except ValueError:
             # A rootless product with no proven native association cannot
             # globally disable an unrelated client's native store.
             return (HerdrAdapter(profile_root=None, discovery_error="herdr_environment_root_unproven"),) if selected else ()
         for root in defaults:
             try:
-                root.lstat()
+                local_herdr_path(root).lstat()
             except FileNotFoundError:
                 continue
             except OSError:
@@ -70,8 +72,11 @@ def discover_herdr_adapters(args: Any) -> tuple[HerdrAdapter, ...]:
                 roots.append(root)
         if selected and not roots:
             roots.append(defaults[0])
-    unique = {canonical_path(root): root for root in roots}
-    return tuple(HerdrAdapter(profile_root=root) for root in unique.values())
+    # The same filesystem root may have distinct named-pipe spellings. Keep
+    # each explicitly known spelling for the opt-in observation.
+    unique = dict.fromkeys(roots)
+    inspect_live = selected and bool(getattr(args, "inspect_clients", False))
+    return tuple(HerdrAdapter(profile_root=root, inspect_live=inspect_live) for root in unique)
 
 
 def create_default_adapters(args: Any) -> list[object]:

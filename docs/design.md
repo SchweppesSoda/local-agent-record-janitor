@@ -120,8 +120,11 @@ Orca 的本机 journal schema4 / record schema2 接入仅提供清单和保护�
 
 Herdr 的持久化 snapshot schema3 只提供 current/restore 引用。来源不含 native root，
 因此不自动加入原生 catalog、父子关系或 mutation 范围；同 ID 不用于跨 store 绑定。
-live metadata 尚未探测，即使持久化来源合法，records 仍保留 incomplete/blocked 及有效
-引用。全部 Herdr 写入与自身 verify 关闭；无授权动作的只读计划保持 blocked，旧 native
+明确选择 Herdr 的 records 可用 `--inspect-clients` 附加有界本机 protocol22 metadata，
+与持久化 current/restore 独立保留；公共 pane ID 不充当持久化 identity，不据相同引用
+值证明同代实例或全部 writer 已停止。API 和运行投影复用同次缓存，后者不参与旧审批。
+即使端点响应，完整 writer 归属仍未知，records 保留 incomplete/blocked 及有效引用。
+全部 Herdr 写入与自身 verify 关闭；无授权动作的只读计划保持 blocked，旧 native
 operation 仍可按冻结证据执行只读恢复。
 
 ### Codex thread
