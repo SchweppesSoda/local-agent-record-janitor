@@ -49,6 +49,21 @@ class FileAliasEvidenceTests(unittest.TestCase):
         self.assertTrue(all(len(entry.known_paths) == 1 for entry in result.entries))
         self.assertTrue(all(entry.hardlink_count_matches for entry in result.entries))
 
+    def test_case_distinct_directories_keep_separate_identity_and_lexical_scope(self):
+        first, second = self.root / "Store", self.root / "store"
+        first.mkdir()
+        second.mkdir(exist_ok=True)
+        if os.path.samefile(first, second):
+            self.skipTest("Temporary filesystem treats case-distinct directory names as aliases")
+        files = (first / "known.txt", second / "known.txt")
+        for file in files:
+            file.write_bytes(b"metadata fixture")
+        result = probe_file_aliases(files, roots=(first, second))
+        self.assertTrue(all(entry.probe_complete for entry in result.entries), result.to_dict())
+        self.assertNotEqual(result.entries[0].file_id, result.entries[1].file_id)
+        excluded = probe_file_aliases((files[1],), roots=(first,))
+        self.assertEqual(excluded.entries[0].errors, ("outside_known_roots",))
+
     @unittest.skipUnless(os.name == "nt", "Windows extended-path spelling only")
     def test_extended_spelling_does_not_count_as_a_second_hardlink(self):
         unlisted = self.root / "unlisted.jsonl"
@@ -85,12 +100,15 @@ class FileAliasEvidenceTests(unittest.TestCase):
                     raise AssertionError("Unapproved target must not be probed")
                 return actual_lstat(path, *args, **kwargs)
 
-            with patch.object(Path, "lstat", bounded_lstat):
-                result = probe_file_aliases((broken, escape), roots=(self.root,))
-            self.assertTrue(all(not entry.probe_complete for entry in result.entries))
-            self.assertTrue(all(entry.readlink for entry in result.entries))
-            self.assertIn("outside_known_roots", str(result.entries[1].errors))
-            self.assertTrue(all(entry.file_id is None for entry in result.entries))
+            for omit_missing in (False, True):
+                with patch.object(Path, "lstat", bounded_lstat):
+                    result = probe_file_aliases((broken, escape), roots=(self.root,),
+                                                omit_initially_missing=omit_missing)
+                self.assertEqual(len(result.entries), 2)
+                self.assertTrue(all(not entry.probe_complete for entry in result.entries))
+                self.assertTrue(all(entry.readlink for entry in result.entries))
+                self.assertIn("outside_known_roots", str(result.entries[1].errors))
+                self.assertTrue(all(entry.file_id is None for entry in result.entries))
 
     def test_probe_failure_and_changed_parent_keep_unknown_identity(self):
         actual_lstat = Path.lstat
@@ -113,6 +131,54 @@ class FileAliasEvidenceTests(unittest.TestCase):
             failed = probe_file_aliases((self.file,), roots=(self.root,))
         self.assertFalse(failed.to_dict()["probe_complete"])
         self.assertIn("root_probe_failed", str(failed.errors))
+
+    def test_optional_absence_does_not_hide_parent_failure_or_observed_file_loss(self):
+        missing = self.root / "optional-wal"
+        result = probe_file_aliases((missing,), roots=(self.root,), omit_initially_missing=True)
+        self.assertEqual(result.entries, ())
+        self.assertTrue(result.to_dict()["probe_complete"])
+        actual_lstat = Path.lstat
+        missing_seen = False
+
+        def failed_parent(path, *args, **kwargs):
+            nonlocal missing_seen
+            if path == missing:
+                missing_seen = True
+            elif path == self.root and missing_seen:
+                raise FileNotFoundError("Temporary parent disappeared")
+            return actual_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", failed_parent):
+            changed = probe_file_aliases((missing,), roots=(self.root,), omit_initially_missing=True)
+        self.assertEqual(len(changed.entries), 1)
+        self.assertFalse(changed.entries[0].probe_complete)
+        self.assertIn("parent disappeared", str(changed.entries[0].errors))
+        calls = 0
+
+        def observed_file_loss(path, *args, **kwargs):
+            nonlocal calls
+            if path == self.file:
+                calls += 1
+                if calls > 1:
+                    raise FileNotFoundError("Previously observed file disappeared")
+            return actual_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", observed_file_loss):
+            lost = probe_file_aliases((self.file,), roots=(self.root,), omit_initially_missing=True)
+        self.assertEqual(len(lost.entries), 1)
+        self.assertFalse(lost.entries[0].probe_complete)
+        self.assertIn("observed file disappeared", str(lost.entries[0].errors))
+        failed = probe_file_aliases((missing,), roots=(self.root / "absent",), omit_initially_missing=True)
+        self.assertFalse(failed.to_dict()["probe_complete"])
+        self.assertTrue(failed.errors)
+
+    def test_optional_dangling_symlink_remains_an_error(self):
+        link = self.root / "optional-link"
+        self._link(self.root / "missing", link)
+        result = probe_file_aliases((link,), roots=(self.root,), omit_initially_missing=True)
+        self.assertEqual(len(result.entries), 1)
+        self.assertFalse(result.entries[0].probe_complete)
+        self.assertTrue(result.entries[0].readlink)
 
     @unittest.skipUnless(os.name == "nt", "Windows Junction identity drift")
     def test_directory_moved_behind_junction_between_two_known_roots_is_incomplete(self):

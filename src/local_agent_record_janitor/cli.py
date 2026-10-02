@@ -2928,8 +2928,9 @@ def _run_client_records(
     payload["snapshot_id"] = "inventory:v1:" + hashlib.sha256(
         json.dumps(rendered_targets, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
-    from .client_inventory import collect_client_file_aliases
+    from .client_inventory import collect_client_file_aliases, collect_shared_store_file_aliases
     payload["file_aliases"] = collect_client_file_aliases(contexts, selected).to_dict()
+    payload["shared_store_file_aliases"] = collect_shared_store_file_aliases(contexts, selected)
     if getattr(args, "inspect_clients", False):
         from .codex_desktop_state import inspect_client_ownership
         payload["client_ownership"] = []

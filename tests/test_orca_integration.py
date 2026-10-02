@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -109,6 +110,74 @@ class OrcaIntegrationTests(unittest.TestCase):
                 "--clients-closed", "--json"])
             self.assertEqual(result["goal_status"], "blocked", result)
             self.assertFalse(result.get("mutation_started", False))
+        self.writer.assert_not_called()
+
+    def test_real_records_shared_metadata_aliases_respect_qualified_store_selection(self):
+        profile = self.root / "shared-metadata"
+        homes = create_profile(profile)
+        for home in homes:
+            rows = [{"id": native_id, "rollout_path": str(write_rollout(home, native_id,
+                     originator="codex_cli_rs", source="cli")), "source": "cli"}
+                    for native_id in (CURRENT_ID, HISTORY_ID)]
+            create_thread_index(home, rows)
+            (home / "session_index.jsonl").write_text("".join(json.dumps({"id": row["id"],
+                "thread_name": "Metadata alias fixture", "updated_at": "2026-07-31T00:00:00Z"}) + "\n"
+                for row in rows), encoding="utf-8")
+        for name in ("state_5.sqlite", "session_index.jsonl"):
+            (homes[1] / name).unlink()
+            os.link(homes[0] / name, homes[1] / name)
+        args = ["records", "--client", "orca", "--orca-root", str(profile), "--json"]
+        from local_agent_record_janitor.client_inventory import probe_file_aliases
+        supplied = []
+
+        def metadata_only_probe(paths, **kwargs):
+            if not kwargs.get("omit_initially_missing"):
+                return probe_file_aliases(paths, **kwargs)
+            supplied.append(tuple(paths))
+            with patch.object(Path, "open", side_effect=AssertionError("Shared metadata content read")), patch(
+                    "sqlite3.connect", side_effect=AssertionError("Shared metadata SQLite opened")):
+                return probe_file_aliases(supplied[-1], **kwargs)
+
+        with patch("local_agent_record_janitor.client_inventory.probe_file_aliases", metadata_only_probe):
+            code, all_stores = self.invoke(args)
+        self.assertEqual(code, 0, all_stores)
+        self.assertEqual(len(supplied), 1)
+        self.assertEqual(len(supplied[0]), 10)  # Once per store despite two records in each.
+        self.assertEqual(all_stores["count"], 4)
+        shared = all_stores["shared_store_file_aliases"]
+        self.assertEqual({item["store"]["path"] for item in shared["stores"]}, {str(home) for home in homes})
+        self.assertTrue(shared["probe_complete"], shared)
+        for role in ("database", "index"):
+            entries = [entry for store in shared["stores"] for entry in store["entries"] if entry["role"] == role]
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[0]["file_id"], entries[1]["file_id"])
+            self.assertTrue(all(entry["hardlink_count_matches"] for entry in entries))
+        selector = all_stores["records"][0]["record_key"]["value"]
+        code, selected = self.invoke(args[:-1] + ["--record-id", selector, "--json"])
+        self.assertEqual(code, 0, selected)
+        self.assertEqual(selected["count"], 1)
+        self.assertEqual(len(selected["shared_store_file_aliases"]["stores"]), 1)
+        self.assertTrue(all(not entry["hardlink_count_matches"]
+                            for entry in selected["shared_store_file_aliases"]["stores"][0]["entries"]))
+        old_records, old_snapshot = all_stores["records"], all_stores["snapshot_id"]
+        old_files = all_stores["file_aliases"]["entries"]
+        for name in ("state_5.sqlite", "session_index.jsonl"):
+            data = (homes[0] / name).read_bytes()
+            (homes[1] / name).unlink()
+            (homes[1] / name).write_bytes(data)
+        code, copied = self.invoke(args)
+        self.assertEqual(code, 0, copied)
+        self.assertEqual(copied["records"], old_records)
+        self.assertEqual(copied["snapshot_id"], old_snapshot)
+        self.assertEqual(copied["file_aliases"]["entries"], old_files)
+        expected = "inventory:v1:" + hashlib.sha256(json.dumps(
+            old_records, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        self.assertEqual(old_snapshot, expected)
+        for role in ("database", "index"):
+            entries = [entry for store in copied["shared_store_file_aliases"]["stores"]
+                       for entry in store["entries"] if entry["role"] == role]
+            self.assertNotEqual(entries[0]["file_id"], entries[1]["file_id"])
+            self.assertTrue(all(len(entry["known_paths"]) == 1 for entry in entries))
         self.writer.assert_not_called()
 
     def test_native_account_reverse_marker_protects_all_public_paths_and_other_store_is_independent(self):

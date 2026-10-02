@@ -357,6 +357,60 @@ def collect_client_file_aliases(
     return probe_file_aliases(paths, roots=roots)
 
 
+def collect_shared_store_file_aliases(
+    contexts: Sequence[ClientEngineContext], targets: Sequence[ClientTarget],
+) -> dict[str, Any]:
+    """Observe fixed Codex metadata files shared by selected catalog records.
+
+    A frontend locator alone is insufficient. Match a selected qualified key
+    to an actual native catalog record before probing its store. Shared files
+    are display evidence, never additional record or approval artifacts.
+    """
+    def path_key(path: Path | None) -> str | None:
+        return os.path.normpath(os.path.abspath(path)) if path is not None else None
+
+    selected = {(path_key(target.record_key.store.path), target.record_key.record_id,
+                 path_key(target.record_key.path)): target.record_key.store
+                for target in targets if target.engine == "codex" and target.record_key is not None
+                and target.record_key.store.backend == "codex"}
+    stores: dict[tuple[str, str, str], StoreKey] = {}
+    for context in contexts:
+        if context.engine != "codex":
+            continue
+        for record in context.native_records:
+            root = _native_record_root(record, "codex")
+            if root is None:
+                continue
+            store = selected.get((path_key(root), _native_record_id(record, "codex"),
+                                  path_key(_native_record_path(record, "codex"))))
+            if store is not None:
+                stores.setdefault((store.backend, store.kind, path_key(store.path)), store)
+
+    family = (("state_5.sqlite", "database"), ("state_5.sqlite-wal", "wal"),
+              ("state_5.sqlite-shm", "shm"), ("state_5.sqlite-journal", "rollback_journal"),
+              ("session_index.jsonl", "index"))
+    paths = [store.path / name for store in stores.values() for name, _ in family]
+    snapshot = probe_file_aliases(paths, roots=(store.path for store in stores.values()),
+                                  omit_initially_missing=True)
+    entries = {path_key(Path(entry.lexical_path)): entry for entry in snapshot.entries}
+    projected = []
+    for store in stores.values():
+        observed = [{"role": role, **entries[path_key(store.path / name)].to_dict()}
+                    for name, role in family if path_key(store.path / name) in entries]
+        projected.append({
+            # Retain the qualified catalog's lexical store locator without
+            # resolving a failed or replaced root again for display metadata.
+            "store": {"backend": store.backend, "kind": store.kind, "path": str(store.path)},
+            "scope": "shared_native_store", "known_file_family": [name for name, _ in family],
+            "entries": observed, "probe_complete": all(entry["probe_complete"] for entry in observed),
+        })
+    return {"observed_at": snapshot.observed_at, "stores": projected,
+            "errors": list(snapshot.errors), "probe_complete": snapshot.to_dict()["probe_complete"],
+            "coverage": "selected_codex_store_metadata_paths", "alias_coverage_complete": False,
+            "hardlink_scope": "observed_link_count_at_probe_time", "symlink_and_copy_coverage": "not_proven",
+            "sqlite_home_and_api_storage_coverage": "not_probed"}
+
+
 def build_client_engine_contexts(
     adapters: Iterable[object],
     *,

@@ -108,6 +108,23 @@ target、snapshot_id 或 v1 approval/hash。相同 file ID 只关联观察证据
 已知 hardlink 名称，`alias_coverage_complete` 始终为 false，不证明所有 symlink/copy
 已发现。若以后用这些新证据改变 writer 授权，必须按计划兼容规则另行版本演进。
 
+`collect_shared_store_file_aliases()` 为选中目标与 `contexts.native_records` 精确匹配
+的 Codex store 提供独立 `shared_store_file_aliases`。每个逻辑 store 只观察固定的
+`state_5.sqlite`、`state_5.sqlite-wal/-shm/-journal` 和 `session_index.jsonl`，一次
+聚合探测关联已选路径中的硬链接证据；输出保留 store 的 backend/kind/词法路径、
+`shared_native_store` 范围与 database/wal/shm/rollback_journal/index 角色。
+共享文件不成为记录的专属 artifact，不改变 record count、groups、能力、旧
+`file_aliases` 字段或 snapshot/plan hash。仅前端引用、rootless/未知引擎或没有匹配
+native catalog 的目标不会据 locator 探测原生存储。
+
+探测前验证普通 root/父链；`omit_initially_missing=True` 仅在初次 leaf lstat 缺失且
+父链重检成功时省略可选文件。断链、已有文件后续消失、权限失败、非普通文件、
+目录链接和身份变化仍是 incomplete。目录缓存、访问集合和范围比较使用严格词法
+字符串，避免 Windows 大小写敏感目录被 `Path` 相等规则合并；物理别名仍须实际文件
+证据。该投影不读内容、不枚举其他文件或读取配置，`alias_coverage_complete=false`、
+`sqlite_home_and_api_storage_coverage=not_probed`；观察成功不证明外部 SQLite home、
+副本或实际 API 修改范围完整。
+
 `inspect_client_ownership()` 和 `--inspect-clients` 使用 descriptor 的真实 owner root，
 不从 native root 补造归属。`probe_complete` 表示枚举/探测成功，`coverage_complete`
 仅在支持的本机 Windows owner、Codex engine 和具备必要 metadata 的已注册进程范围

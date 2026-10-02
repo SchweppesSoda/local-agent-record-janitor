@@ -52,6 +52,7 @@ class HerdrIntegrationTests(unittest.TestCase):
         self.assertEqual(len(default["targets"]), 14)
         code, explicit = self.invoke(["records", "--client", "herdr", "--herdr-root", str(self.profile), "--json"])
         self.assertEqual(len(explicit["targets"]), 7)
+        self.assertEqual(explicit["shared_store_file_aliases"]["stores"], [])
         sources = {reference["source"] for target in explicit["targets"] for reference in target["references"]}
         self.assertTrue(all(Path(source).is_relative_to(self.profile) for source in sources))
         code, multiple = self.invoke(["records", "--client", "herdr", "--herdr-root", str(self.profile),

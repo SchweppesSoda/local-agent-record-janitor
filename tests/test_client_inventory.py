@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
@@ -25,6 +27,7 @@ from local_agent_record_janitor.client_inventory import (
     build_client_inventory,
     build_native_client_inventory,
     collect_client_file_aliases,
+    collect_shared_store_file_aliases,
 )
 from local_agent_record_janitor.inventory import FrontendSessionRecord, build_session_catalog
 from local_agent_record_janitor.record_identity import (
@@ -399,6 +402,132 @@ class ClientInventoryTests(unittest.TestCase):
             selected = collect_client_file_aliases(contexts, inventory.targets[:1])
             self.assertEqual(len(selected.entries), 1)
             self.assertFalse(selected.entries[0].hardlink_count_matches)
+
+    def test_shared_metadata_aliases_keep_store_scope_without_reading_contents_or_changing_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            sid = "11111111-1111-4111-8111-111111111111"
+            homes = (root / "one", root / "two")
+            adapters = []
+            for home in homes:
+                rollout = write_rollout(home, sid, originator="codex_cli_rs", source="cli")
+                create_thread_index(home, [{"id": sid, "rollout_path": str(rollout), "source": "cli"}])
+                (home / "session_index.jsonl").write_text(json.dumps({"id": sid,
+                    "private": "METADATA_CONTENT_NOT_READ"}) + "\n", encoding="utf-8")
+                adapters.append(NativeIntegrityAdapter(codex_home=home))
+            database = homes[0] / "state_5.sqlite"
+            other_database = homes[1] / database.name
+            other_database.unlink()
+            os.link(database, other_database)
+            catalog = build_session_catalog(adapters)
+            inventory, contexts = build_native_client_inventory(client="native", engine="codex", catalog=catalog,
+                                                                adapters=adapters)
+            for home in homes:
+                for suffix in ("-wal", "-shm", "-journal"):
+                    (home / ("state_5.sqlite" + suffix)).write_bytes(b"METADATA_CONTENT_NOT_READ")
+            targets_before = [target.to_dict() for target in inventory.targets]
+            from local_agent_record_janitor.client_inventory import probe_file_aliases
+            with patch.object(Path, "open", side_effect=AssertionError("Shared metadata content read")), patch(
+                    "local_agent_record_janitor.client_inventory.probe_file_aliases", wraps=probe_file_aliases) as probe:
+                all_stores = collect_shared_store_file_aliases(contexts, inventory.targets)
+            self.assertEqual(probe.call_count, 1)
+            supplied = probe.call_args.args[0]
+            self.assertEqual(len(supplied), 10)
+            self.assertEqual(len(set(map(str, supplied))), 10)
+            self.assertEqual(len(all_stores["stores"]), 2)
+            self.assertTrue(all(len(store["entries"]) == 5 for store in all_stores["stores"]))
+            self.assertTrue(all_stores["probe_complete"], all_stores)
+            self.assertFalse(all_stores["alias_coverage_complete"])
+            self.assertEqual(all_stores["sqlite_home_and_api_storage_coverage"], "not_probed")
+            database_entries = [entry for store in all_stores["stores"] for entry in store["entries"]
+                                if entry["role"] == "database"]
+            self.assertEqual(database_entries[0]["file_id"], database_entries[1]["file_id"])
+            self.assertTrue(all(entry["hardlink_count_matches"] for entry in database_entries))
+            one_store = collect_shared_store_file_aliases(contexts, inventory.targets[:1])
+            self.assertEqual(len(one_store["stores"]), 1)
+            self.assertFalse(next(entry for entry in one_store["stores"][0]["entries"]
+                                  if entry["role"] == "database")["hardlink_count_matches"])
+            self.assertEqual([target.to_dict() for target in inventory.targets], targets_before)
+            self.assertNotIn("METADATA_CONTENT_NOT_READ", str(all_stores))
+            cases = (
+                (tuple(replace(context, native_catalog=None) for context in contexts), inventory.targets),
+                (contexts, tuple(replace(target, engine="unsupported:future") for target in inventory.targets)),
+                (contexts, tuple(replace(target, record_key=None) for target in inventory.targets)),
+                (contexts, tuple(replace(target, record_key=replace(target.record_key, record_id="unmatched"))
+                                 for target in inventory.targets)),
+            )
+            for candidate_contexts, candidate_targets in cases:
+                with patch.object(Path, "lstat", side_effect=AssertionError("Unqualified frontend store probed")):
+                    empty = collect_shared_store_file_aliases(candidate_contexts, candidate_targets)
+                self.assertEqual(empty["stores"], [])
+
+    def test_shared_metadata_failures_are_observations_and_do_not_change_capabilities(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            home = root / "native"
+            sid = "11111111-1111-4111-8111-111111111111"
+            rollout = write_rollout(home, sid, originator="codex_cli_rs", source="cli")
+            create_thread_index(home, [{"id": sid, "rollout_path": str(rollout), "source": "cli"}])
+            adapters = (NativeIntegrityAdapter(codex_home=home),)
+            catalog = build_session_catalog(adapters)
+            inventory, contexts = build_native_client_inventory(client="native", engine="codex", catalog=catalog,
+                                                                adapters=adapters)
+            before = [target.to_dict() for target in inventory.targets]
+            denied = home / "state_5.sqlite-wal"
+            (home / "state_5.sqlite-journal").mkdir()
+            actual_lstat = Path.lstat
+
+            def denied_leaf(path, *args, **kwargs):
+                if path == denied:
+                    raise PermissionError("Temporary optional leaf unavailable")
+                return actual_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", denied_leaf):
+                observed = collect_shared_store_file_aliases(contexts, inventory.targets)
+            self.assertFalse(observed["probe_complete"])
+            by_role = {entry["role"]: entry for entry in observed["stores"][0]["entries"]}
+            self.assertIn("leaf unavailable", str(by_role["wal"]["errors"]))
+            self.assertIn("not_regular_file", str(by_role["rollback_journal"]["errors"]))
+            self.assertNotIn("shm", by_role)
+            self.assertNotIn("index", by_role)
+            self.assertEqual([target.to_dict() for target in inventory.targets], before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Junction root refusal")
+    def test_shared_metadata_directory_junction_does_not_probe_external_files(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        if powershell is None:
+            self.skipTest("No PowerShell for temporary Junction fixture")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            home = root / "native"
+            sid = "11111111-1111-4111-8111-111111111111"
+            rollout = write_rollout(home, sid, originator="codex_cli_rs", source="cli")
+            create_thread_index(home, [{"id": sid, "rollout_path": str(rollout), "source": "cli"}])
+            adapters = (NativeIntegrityAdapter(codex_home=home),)
+            catalog = build_session_catalog(adapters)
+            inventory, contexts = build_native_client_inventory(client="native", engine="codex", catalog=catalog,
+                                                                adapters=adapters)
+            outside = root / "outside"
+            home.rename(outside)
+            quoted_home, quoted_outside = (str(path).replace("'", "''") for path in (home, outside))
+            result = subprocess.run([powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                f"$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path '{quoted_home}' -Target '{quoted_outside}' | Out-Null"],
+                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            if result.returncode:
+                self.skipTest("Temporary Junction unavailable")
+            actual_lstat = Path.lstat
+
+            def bounded_lstat(path, *args, **kwargs):
+                if path.parent in (home, outside):
+                    raise AssertionError("Redirected metadata path was probed")
+                return actual_lstat(path, *args, **kwargs)
+
+            with patch.object(Path, "lstat", bounded_lstat), patch.object(
+                    Path, "open", side_effect=AssertionError("Redirected content read")):
+                observed = collect_shared_store_file_aliases(contexts, inventory.targets)
+            self.assertFalse(observed["probe_complete"])
+            self.assertIn("root_probe_failed", str(observed["errors"]))
+            self.assertEqual(len(observed["stores"]), 1)
 
     def test_unknown_cindy_engines_are_visible_and_never_have_delete_actions(self):
         with tempfile.TemporaryDirectory() as temporary:

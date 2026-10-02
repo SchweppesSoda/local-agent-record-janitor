@@ -64,7 +64,7 @@ def _is_link(value: os.stat_result) -> bool:
 
 
 def _within(path: Path, roots: frozenset[str]) -> bool:
-    text = os.path.normcase(os.fspath(path))
+    text = os.path.normpath(os.path.abspath(os.fspath(path)))
     while text not in roots:
         parent = os.path.dirname(text)
         if parent == text:
@@ -76,6 +76,7 @@ def _within(path: Path, roots: frozenset[str]) -> bool:
 def probe_file_aliases(
     paths: Iterable[str | os.PathLike[str]], *, roots: Iterable[str | os.PathLike[str]],
     host: str = "local", path_namespace: str = "local",
+    omit_initially_missing: bool = False,
 ) -> FileAliasSnapshot:
     """Inspect supplied files without discovery, contents or identity merging.
 
@@ -84,28 +85,37 @@ def probe_file_aliases(
     paths and uncertain metadata remain explicit incomplete observations.
     Matching nlink counts only bounds known hardlinks at this observation;
     it proves nothing about undiscovered symlinks, copies or logical stores.
+    Optional supplied leaves may be omitted only when their first lstat is
+    missing and the already validated parent chain still has its identity.
     """
     require_local_location(host, path_namespace)
     raw_roots = tuple(dict.fromkeys(os.fspath(root) for root in roots))
     raw_paths = tuple(dict.fromkeys(os.fspath(path) for path in paths))
-    directories: dict[Path, os.stat_result] = {}
+    # WindowsPath equality folds case even inside case-sensitive directories.
+    # Lexical scope keys must not merge distinct entries before a file probe.
+    def lexical_key(path: Path) -> str:
+        return os.path.normpath(os.path.abspath(os.fspath(path)))
+
+    directories: dict[str, os.stat_result] = {}
 
     def plain_directory(path: Path) -> None:
-        if path in directories:
+        key = lexical_key(path)
+        if key in directories:
             return
         if path.parent != path:
             plain_directory(path.parent)
         value = path.lstat()
         if _is_link(value) or not stat.S_ISDIR(value.st_mode):
             raise ValueError(f"unproven_directory:{path}")
-        directories[path] = value
+        directories[key] = value
 
     def recheck_directories(paths: Iterable[Path]) -> None:
-        checked: set[Path] = set()
+        checked: set[str] = set()
         for path in paths:
-            while path not in checked:
-                checked.add(path)
-                before = directories[path]
+            while lexical_key(path) not in checked:
+                key = lexical_key(path)
+                checked.add(key)
+                before = directories[key]
                 after = path.lstat()
                 if (_is_link(after) or not stat.S_ISDIR(after.st_mode)
                         or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
@@ -132,10 +142,10 @@ def probe_file_aliases(
             resolved_roots.append(resolved)
 
     path_keys: dict[str, str] = {}
-    approved_keys = frozenset(os.path.normcase(str(root)) for root in approved)
-    resolved_keys = frozenset(os.path.normcase(str(root)) for root in resolved_roots)
+    approved_keys = frozenset(lexical_key(root) for root in approved)
+    resolved_keys = frozenset(lexical_key(root) for root in resolved_roots)
 
-    def inspect(raw: str) -> FileAliasEvidence:
+    def inspect(raw: str) -> FileAliasEvidence | None:
         entry = FileAliasEvidence(raw)
         if not _local_absolute(raw):
             return replace(entry, errors=("opaque_locator",))
@@ -144,14 +154,21 @@ def probe_file_aliases(
         if not _within(path, approved_keys):
             return replace(entry, errors=("outside_known_roots",))
         current = path
-        seen: set[Path] = set()
+        seen: dict[str, Path] = {}
         try:
             while True:
-                if current in seen or len(seen) >= 40:
+                current_key = lexical_key(current)
+                if current_key in seen or len(seen) >= 40:
                     raise ValueError("symlink_cycle_or_limit")
-                seen.add(current)
+                seen[current_key] = current
                 plain_directory(current.parent)
-                value = current.lstat()
+                try:
+                    value = current.lstat()
+                except FileNotFoundError:
+                    if omit_initially_missing and current_key == lexical_key(path) and len(seen) == 1:
+                        recheck_directories((current.parent,))
+                        return None
+                    raise
                 if not _is_link(value):
                     if not stat.S_ISREG(value.st_mode):
                         raise ValueError("not_regular_file")
@@ -185,13 +202,13 @@ def probe_file_aliases(
             # Collapse only proven spellings of one directory entry (8.3
             # and extended-prefix aliases), never distinct hardlink names.
             path_keys[entry.lexical_path] = canonical_existing_path_key(resolved)
-            recheck_directories(candidate.parent for candidate in seen)
+            recheck_directories(candidate.parent for candidate in seen.values())
             return replace(entry, kind=entry.kind if entry.kind == "symlink" else "regular_file",
                            resolved_path=str(resolved), device_id=value.st_dev, file_id=value.st_ino, nlink=value.st_nlink)
         except (OSError, RuntimeError, ValueError) as exc:
             return replace(entry, errors=(f"file_probe_failed:{exc}",))
 
-    entries = tuple(inspect(raw) for raw in raw_paths)
+    entries = tuple(entry for raw in raw_paths if (entry := inspect(raw)) is not None)
     groups: dict[tuple[int, int], list[FileAliasEvidence]] = {}
     for entry in entries:
         if entry.probe_complete:

@@ -307,7 +307,12 @@ Codex thread ID 的 Cindy `status=deleted` 前端记录也会显示，并可由�
 `records --client CLIENT --json` 另外输出独立的 `file_aliases`：仅探测本次选中清单
 已发现的路径，展示文件 ID、链接数、已知路径和探测错误。匹配链接数只描述观察时点
 已知的 hardlink 目录项，不能证明 symlink 或副本已全部发现，也不合并逻辑 store。
-该投影不参与既有 `snapshot_id` 或删除授权。`--inspect-clients` 使用客户端明确声明的
+另有 `shared_store_file_aliases` 单列选中 Codex 原生清单实际匹配的存储：每个 store
+仅观察 `state_5.sqlite`、`-wal/-shm/-journal` 和 `session_index.jsonl`，保留共享存储
+范围与文件角色，不把共享文件算作某条记录的专属文件。初次探测缺失的可选文件省略，
+权限、非普通文件、目录链接或身份漂移保留不完整证据；不读取文件内容，也不探测
+范围外 `sqlite_home`、配置或完整 API 副作用。这两项投影不参与既有 `snapshot_id`
+或删除授权。`--inspect-clients` 使用客户端明确声明的
 owner process root；它与 native root 分开。`probe_complete` 表示探测成功，
 `coverage_complete` 另行说明限定进程范围的覆盖；当前仅检查 Windows 下 Codex、
 ChatGPT、AionUI、Cindy 四类进程。明确选择 Herdr 时改用下述 metadata API 观察；

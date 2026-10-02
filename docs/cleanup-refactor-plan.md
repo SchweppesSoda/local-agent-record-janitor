@@ -142,6 +142,9 @@ P2a 的同 root 协调与兼容恢复已落地，见
 [Adapter 协调契约](adapters.md#同-root-的-mutation-协调)。P2b 提供
 [文件别名与运行观察](adapters.md#文件别名与运行观察)，由现有 records/inspect-clients
 消费；这是 inventory-only metadata，旧 path/manifest v1 writer 和审批/hash 不变。
+Codex 已选原生 store 的 SQLite family/index 别名另由 `shared_store_file_aliases`
+展示，保留共享范围和文件角色；可选缺失不报错，失败保留 incomplete，不读取内容或
+探测范围外 `sqlite_home`/配置/API storage。记录专属 `file_aliases` 与授权范围不变。
 不能据根路径归一、nlink 匹配或进程枚举成功宣称共享 writer/别名已完整探测。
 
 - 建立本地文件身份/别名观察：仅探测选中清单已发现的路径，保留已知路径、文件 ID、
@@ -234,24 +237,35 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 
 ### P5：逐组合开放精确删除
 
-**当前状态：**未实施；Orca、Herdr writer 均保持关闭，不因只读切片交付获得写入授权。
+**当前状态：**写入能力未开放；Orca、Herdr writer 均保持关闭，不因只读切片交付获得写入授权。
 
-目前没有可仅凭现有证据开放的新产品删除组合。Orca 最近的候选范围仅为本机 Windows、
-journal4/record2、单 managed account home、无 current/history/restore 引用且无 bridge 的
-native-only 目标。现有 alias 只是观察，未进入审批；未来须冻结并重检普通 rollout 的
-link count 和已知 alias，对未知 bridge/恢复范围、新链接或路径漂移拒绝执行。无 bridge
-检查须覆盖将修改的 rollout、index、SQLite family 与实际 storage 配置，不能忽略 DB
-hardlink 或范围外 `sqlite_home`；accountHome marker 本身不证明 API 副作用限于该 root。
-仍缺全部真实 writer 已停或等价排他证据，以及实际 Codex binary/API 在该 home 的作用
-范围证据；released lease 可有 `deathEvidence=null`，不代表进程已死，后台 bridge 仍能
-link/heal。依据：[lease schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)、
+后续可继续本地开发限定组合的预检与验收，首先考虑 Orca/Codex/Windows、
+journal4/record2、单 managed account home、已知 current/history/restore 对精确目标
+无引用且无 bridge 的 native-only 目标。完成范围继续限于
+[冻结 paths/rows/approved references](agent-automation.md#result-contract)，不要求证明
+全盘未知副本或所有无关 writer 消失。按以下顺序补齐尚未实现的门槛：
+
+1. 冻结并在 apply/verify 重检目标 rollout、DB/index family 的已知 alias/nlink、
+   普通路径与 storage 配置边界；未知 bridge/恢复范围、新链接或漂移拒绝执行。
+   现有两项 alias 投影只是观察，尚未进入审批，DB hardlink 与范围外 `sqlite_home`
+   不能忽略；accountHome marker 本身不证明 API 副作用限于该 root。
+2. 沿真实 `--clients-closed` 确认补充目标范围的 Orca 主进程、lease owner 和子进程
+   保护；可先保守地阻止存在已知 Orca 主进程的情况。released lease 可有
+   `deathEvidence=null`，不能代替关闭确认，后台 bridge 仍可能 link/heal。
+3. 复用现有 native batch 与 unknown/status/verify 契约，以固定真实 Codex binary
+   在全隔离 TEMP home、cwd 和环境中验证 thread/delete、migration、index/DB 副作用。
+   隔离 HOME/USERPROFILE/APPDATA/LOCALAPPDATA/XDG/TMP/TEMP 及认证、代理、继承配置，
+   不能只设置 `CODEX_HOME`。这是隔离验收，不是对真实用户 profile 执行清理；
+   具体 OS/binary 缺失或必须使用真实 profile/login 时再报告外部限制。
+
+依据：[lease schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)、
 [close predicate](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/structured-agent-session-close.ts)、
 [bridge/storage](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/codex/codex-account-session-bridge.ts)。
 
 Herdr 的 Codex/Claude ID 缺 native root；Pi path 也缺配置/sessionRoot 关联、独立后台
 writer 停止与恢复 argv 的完整覆盖。在线 metadata 只能补充观察，不能由 cwd、dirname、
-同 ID 默认 root、pane close 或 detach 开放删除。这些是后续实施门槛，当前不新增
-审批 schema 或预检接口，全部新 writer 继续关闭。
+同 ID 默认 root、pane close 或 detach 开放删除。后续逐项补齐真实消费者需要的契约
+与隔离验收，在对应门槛通过前全部新 writer 继续关闭。
 
 **依赖：**相应 adapter 的 P3 或 P4 完成。Orca、Herdr 分别推进，一个组合未达标不
 阻止另一组合保持只读或交付。不得按产品名一次打开所有引擎和所有 schema。
