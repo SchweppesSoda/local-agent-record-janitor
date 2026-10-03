@@ -535,6 +535,9 @@ def execute_manual_delete(
     targeted_guards_only: bool = False,
     action_state_callback: Callable[[str, Any, Any | None], None] | None = None,
     targeted_guard: Callable[[ManualDeleteAction], None] | None = None,
+    defer_verification_until_close: bool = False,
+    post_start_validator: Callable[[], None] | None = None,
+    post_close_validator: Callable[[], None] | None = None,
 ) -> CleanupReport:
     """Revalidate and execute an explicitly approved manual deletion plan.
 
@@ -588,7 +591,8 @@ def execute_manual_delete(
     active = tuple({id(adapter): adapter for adapter in (*plan.active_adapters, *refreshed.active_adapters)}.values())
     limits = ClientCapabilityLimits.from_adapters(active)
     for action in refreshed.actions:
-        reasons = limits.reasons("codex", "native_delete", native_root=action.codex_home)
+        reasons = limits.reasons("codex", "native_delete", native_root=action.codex_home,
+                                target_ids=action.affected_thread_ids, execution=True)
         if reasons:
             raise ManualDeletePlanError("; ".join(reasons))
     reference_guard = TargetedReferenceGuard(active, {
@@ -725,6 +729,9 @@ def execute_manual_delete(
             approved_integrity_deletes or None
         ),
         pre_delete_validator=validate_frontend_snapshot,
+        defer_verification_until_close=defer_verification_until_close,
+        post_start_validator=post_start_validator,
+        post_close_validator=post_close_validator,
         **kwargs,
     )
 

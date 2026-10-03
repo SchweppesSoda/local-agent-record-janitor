@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -70,6 +70,8 @@ class CodexAppServer:
         command: Sequence[str] | None = None,
         timeout: float = 30.0,
         client_version: str = "0.1.0",
+        environment: Mapping[str, str] | None = None,
+        working_directory: Path | str | None = None,
     ) -> None:
         if command is None and codex_binary is None:
             raise ValueError("codex_binary or command is required")
@@ -88,6 +90,13 @@ class CodexAppServer:
             raise ValueError("command must not be empty")
         self.timeout = float(timeout)
         self.client_version = client_version
+        # An explicit mapping is the complete child environment. In
+        # particular, isolation callers must not inherit credentials or
+        # storage configuration from this process.
+        self.environment = dict(environment) if environment is not None else None
+        self.working_directory = (
+            Path(working_directory) if working_directory is not None else None
+        )
         self._process: subprocess.Popen[str] | None = None
         self._messages: queue.Queue[object] = queue.Queue()
         self._stderr: deque[str] = deque(maxlen=50)
@@ -108,11 +117,9 @@ class CodexAppServer:
     def start(self) -> None:
         if self._process is not None:
             return
-        environment = os.environ.copy()
+        environment = os.environ.copy() if self.environment is None else dict(self.environment)
         environment["CODEX_HOME"] = str(self.codex_home)
-        popen_options: dict[str, Any] = {}
-        if os.name == "nt":
-            popen_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        popen_options = self._popen_options()
         try:
             self._process = subprocess.Popen(
                 self.command,
@@ -124,6 +131,7 @@ class CodexAppServer:
                 errors="replace",
                 bufsize=1,
                 env=environment,
+                cwd=self.working_directory,
                 **popen_options,
             )
         except (OSError, ValueError) as exc:
@@ -177,6 +185,9 @@ class CodexAppServer:
         if not self._initialized:
             self.start()
         return self.request("thread/delete", {"threadId": thread_id})
+
+    def _popen_options(self) -> dict[str, Any]:
+        return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 
     def request(
         self,
@@ -301,13 +312,17 @@ class CodexAppServer:
                 if stripped:
                     self._messages.put(stripped)
         finally:
+            stream.close()
             self._messages.put(_EOF)
 
     def _read_stderr(self, stream: TextIO) -> None:
-        for line in stream:
-            stripped = line.rstrip()
-            if stripped:
-                self._stderr.append(stripped)
+        try:
+            for line in stream:
+                stripped = line.rstrip()
+                if stripped:
+                    self._stderr.append(stripped)
+        finally:
+            stream.close()
 
 
 __all__ = [

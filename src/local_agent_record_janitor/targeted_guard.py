@@ -156,7 +156,8 @@ class TargetedReferenceGuard:
                             f"a selected conversation or approved descendant retains a {reference.kind.value} "
                             f"{descriptor.client} reference: {native.record_id}")
             limit = descriptor.limit_for("codex")
-            if not limit.native_delete:
+            from .orca_authorization import permits
+            if not limit.native_delete and not (descriptor.client == "orca" and permits(home, affected, execution=True)):
                 raise TargetedGuardError(f"client_capability_limit: {descriptor.client}/codex native_delete is unavailable")
         except TargetedGuardError:
             raise

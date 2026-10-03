@@ -1156,7 +1156,7 @@ def _read_child_operation_plan(args: argparse.Namespace) -> Mapping[str, Any] | 
         return None
     if (
         isinstance(value, Mapping)
-        and value.get("schema_version") == _CHILD_OPERATION_PLAN_SCHEMA
+        and value.get("schema_version") in {_CHILD_OPERATION_PLAN_SCHEMA, "larj.child-operation-plan.v2"}
     ):
         return value
     return None

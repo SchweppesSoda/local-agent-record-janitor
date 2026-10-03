@@ -38,6 +38,26 @@ class OrcaHandle:
 
 
 @dataclass(frozen=True)
+class OrcaLease:
+    """Minimum lifecycle/owner metadata; no spawn token or launch options."""
+
+    claim_status: str
+    unreconciled: bool
+    runtime_kind: str
+    handoff_stage: str | None
+    owner_host: str | None
+    owner_pid: int | None
+    owner_start_time_ms: int | None
+    death_kind: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"claim_status": self.claim_status, "unreconciled": self.unreconciled,
+                "runtime_kind": self.runtime_kind, "handoff_stage": self.handoff_stage,
+                "owner_host": self.owner_host, "owner_pid": self.owner_pid,
+                "owner_start_time_ms": self.owner_start_time_ms, "death_kind": self.death_kind}
+
+
+@dataclass(frozen=True)
 class OrcaRecord:
     session_id: str
     provider: str
@@ -47,6 +67,7 @@ class OrcaRecord:
     home_locator: str
     handles: tuple[OrcaHandle, ...]
     unsupported_recovery: bool
+    lease: OrcaLease
 
 
 def _text(value: Any, maximum: int = 512) -> bool:
@@ -165,7 +186,12 @@ def parse_orca_record(row_id: Any, value: Any) -> OrcaRecord:
                 or any(key in value for key in ("rewind", "conversationCommand"))
                 or any("supersedesKey" in link for link in chain))
     return OrcaRecord(session_id, provider, location["executionHostId"], location["wslDistro"],
-                      home["variable"], home["path"], tuple(handles), recovery)
+                      home["variable"], home["path"], tuple(handles), recovery,
+                      OrcaLease(lease["claimStatus"], lease["unreconciled"], lease["runtimeKind"],
+                                lease["handoffStage"], owner["hostId"] if owner else None,
+                                owner["pid"] if owner else None,
+                                owner["processStartTimeMs"] if owner else None,
+                                death["kind"] if death else None))
 
 
 def read_orca_journal(path: Path, profile_root: Path) -> tuple[tuple[OrcaRecord, ...], tuple[SourceFailure, ...]]:

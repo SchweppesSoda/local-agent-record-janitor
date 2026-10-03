@@ -18,6 +18,7 @@ from .record_identity import canonical_path
 
 PLAN_V1 = "larj.operation-plan.v1"
 PLAN_V2 = "larj.operation-plan.v2"
+PLAN_V3 = "larj.operation-plan.v3"
 
 
 def guard_sources_for(adapters: Iterable[object]) -> list[dict[str, str]]:
@@ -42,7 +43,7 @@ def validate_guard_sources(document: Mapping[str, Any]) -> tuple[Path, ...]:
         if "guard_sources" in document:
             raise ValueError("guard_sources_require_operation_plan_v2")
         return ()
-    if document.get("schema_version") != PLAN_V2:
+    if document.get("schema_version") not in {PLAN_V2, PLAN_V3}:
         raise ValueError("operation_plan_schema_invalid")
     values = document.get("guard_sources")
     if not isinstance(values, list) or not values:
@@ -87,7 +88,11 @@ def current_guard_sources(adapters: Iterable[object] = (), *, client: str = "nat
 
     adapters = tuple(adapters)
     requested = tuple(orca_roots)
-    args = SimpleNamespace(client=client, platform=[client], codex_home=codex_home,
+    # A supplied explicit profile is the selection. Still observe an existing
+    # default protection profile, but do not invent a missing default as a
+    # second required selected profile.
+    discovery_client = "native" if any(describe_adapter(a).client == "orca" for a in adapters) else client
+    args = SimpleNamespace(client=discovery_client, platform=[discovery_client], codex_home=codex_home,
                            orca_root=(), appdata=appdata, codex_bin=None)
     discovered = discover_orca_guards(args)
     if requested:
@@ -119,7 +124,7 @@ def refresh_guard_sources(adapters: Iterable[object]) -> tuple[object, ...]:
 
 def required_source_errors(document: Mapping[str, Any], adapters: Iterable[object]) -> tuple[str, ...]:
     """Frozen/current required metadata cannot fail into an empty guard set."""
-    if document.get("schema_version") != PLAN_V2:
+    if document.get("schema_version") not in {PLAN_V2, PLAN_V3}:
         return ()
     roots = {canonical_path(root) for root in validate_guard_sources(document)}
     known = [(describe_adapter(adapter), adapter) for adapter in adapters]

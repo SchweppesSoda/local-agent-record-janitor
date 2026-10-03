@@ -625,7 +625,8 @@ def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterabl
     restricted_records = []
     for record in _resolve_catalog_lineage(records, errors):
         reasons = limits.reasons("codex", "native_delete", native_root=record.codex_home,
-                                sources=tuple(session.database for session in record.frontend_sessions))
+                                sources=tuple(session.database for session in record.frontend_sessions),
+                                target_ids=(record.thread_id,))
         restricted_records.append(replace(record, deletable=False,
             blockers=tuple(dict.fromkeys((*record.blockers, *reasons))),
             blocker_codes=tuple(dict.fromkeys((*record.blocker_codes, CLIENT_CAPABILITY_LIMIT)))) if reasons else record)

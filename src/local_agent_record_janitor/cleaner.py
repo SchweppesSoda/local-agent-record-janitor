@@ -634,6 +634,9 @@ def clean_findings(
     approved_integrity_deletes: ApprovedIntegrityDeletes | None = None,
     pre_delete_validator: PreDeleteValidator | None = None,
     action_state_callback: ActionStateCallback | None = None,
+    defer_verification_until_close: bool = False,
+    post_start_validator: Callable[[], None] | None = None,
+    post_close_validator: Callable[[], None] | None = None,
 ) -> CleanupReport:
     """Delete findings through Codex app-server and verify every target.
 
@@ -698,6 +701,9 @@ def clean_findings(
             approved_integrity_deletes=approved_integrity_deletes,
             pre_delete_validator=pre_delete_validator,
             action_state_callback=action_state_callback,
+            defer_verification_until_close=defer_verification_until_close,
+            post_start_validator=post_start_validator,
+            post_close_validator=post_close_validator,
             selected_binary_hints=binary_hints_by_home.get(
                 home_key,
                 (),
@@ -850,12 +856,18 @@ def _clean_group(
     pre_delete_validator: PreDeleteValidator | None,
     action_state_callback: ActionStateCallback | None,
     selected_binary_hints: Sequence[Path],
+    defer_verification_until_close: bool,
+    post_start_validator: Callable[[], None] | None,
+    post_close_validator: Callable[[], None] | None,
 ) -> None:
     codex_home = findings[0].codex_home
     from .client_capability_guards import ClientCapabilityLimits
     from .operation_guard_sources import current_guard_sources, refresh_guard_sources
     guards = refresh_guard_sources(current_guard_sources(codex_home=codex_home))
-    reasons = ClientCapabilityLimits.from_adapters(guards).reasons("codex", "native_delete", native_root=codex_home)
+    authorized_ids = {value for finding in findings for value in
+        (finding.thread_id, *(approved_descendants or {}).get(finding_key(finding), ()))}
+    reasons = ClientCapabilityLimits.from_adapters(guards).reasons("codex", "native_delete", native_root=codex_home,
+                                                               target_ids=tuple(authorized_ids), execution=True)
     if reasons:
         report.results.extend(CleanupResult(finding=finding, status="not_deleted", error="; ".join(reasons))
                               for finding in findings)
@@ -1169,6 +1181,8 @@ def _clean_group(
         )
         return
 
+    group_result_start = len(report.results)
+    deferred = []
     try:
         context = app_server_factory(
             codex_home=codex_home,
@@ -1176,6 +1190,8 @@ def _clean_group(
             timeout=timeout,
         )
         with context as server:
+            if post_start_validator is not None:
+                post_start_validator()
             # Build native rollout/source identity once for the whole batch.
             # Individual actions below re-read only their approved paths and
             # targeted database rows.
@@ -1434,13 +1450,35 @@ def _clean_group(
                     ),
                 )
                 report.results.append(cleanup_result)
-                if action_state_callback is not None:
+                if defer_verification_until_close:
+                    deferred.append((finding, verification_finding, cleanup_result))
+                    if cleanup_result.status == "unknown":
+                        report.results.extend(CleanupResult(finding=pending, status="unknown",
+                            error="A prior native mutation is unknown; no further request was sent",
+                            impacted_thread_ids=tuple(sorted({pending.thread_id, *pending_descendants})))
+                            for pending, pending_descendants, _ in captured_scopes[capture_index + 1:])
+                        break
+                elif action_state_callback is not None:
                     action_state_callback(
                         "verified",
                         finding,
                         cleanup_result,
                     )
+        if post_close_validator is not None:
+            post_close_validator()
+        if defer_verification_until_close:
+            # The process tree and shared startup boundary must be closed
+            # before a successful row/path observation becomes durable.
+            for finding, verification_finding, cleanup_result in deferred:
+                verification = _verify_with_retries(verification_finding, verifier=verifier,
+                    attempts=verification_attempts, interval=verification_interval)
+                if verification.status != cleanup_result.status:
+                    raise ValueError("Orca deletion verification changed after runtime close")
+                if action_state_callback is not None:
+                    action_state_callback("verified", finding, cleanup_result)
     except Exception as exc:
+        if defer_verification_until_close:
+            del report.results[group_result_start:]
         attempted = {finding_key(item.finding) for item in report.results}
         error = str(exc) or repr(exc)
         report.results.extend(

@@ -33,7 +33,7 @@
 | AionUI / Codex | 精确 ACP 引用及支持 schema 的孤立 project 行 | 原生写入仍须独立证明归属和 writer；未知 schema 只读 |
 | AionUI / Pi、Claude | 精确 ACP 引用 | 原生 root 未证明，不提供 native writer |
 | native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
-| Orca / Codex | 只读 journal 引用与已证明 homes 的原生清单 | 全部写入及 Orca 自身 verify 关闭；未知来源保持 incomplete |
+| Orca / Codex | journal 引用与已证明 homes 的原生清单；限定 Windows 原生删除 | 静态能力关闭，精确 v3 operation 逐目标资格见下文；未知来源保持 incomplete |
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
 | Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore；显式 live metadata | rootless；全部 writer 归属未知，全部写入及自身 verify 关闭 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
@@ -218,7 +218,8 @@ catalog。未知或失败引用保留 opaque locator 与来源错误，不补默
 catalog pass。Orca 清单不读取 Codex Desktop 私有 sqlite/global-state；不同逻辑 store
 不会因同 ID 或 hardlink 合并。文件别名仅为观察证据，尚无完整桥接图。本机合法
 `CLAUDE_CONFIG_DIR` selector 仅用于精确 root 的只读保护，不遍历该 root 或声称 Orca
-已支持 Claude 原生清单。全部 Orca native/frontend/remote 写入和自身 verify 能力关闭。
+已支持 Claude 原生清单。静态 Orca 能力仍关闭；只有下述高层 operation 精确组合可获得
+原生删除资格，frontend/remote 写入不开放。
 
 已知但未实现的恢复来源只检查 presence 并报告 incomplete：退休的
 `agent-sessions/agent-sessions.json[.bak]`、root/profile 下 `orca-data.json[.bak.1..5]`、
@@ -243,8 +244,52 @@ run 轮次并集保留 frozen/current/显式来源。旧 v1 不补字段或重�
 
 默认/env/显式路径和可信 marker 之外的 custom、搬移、dev/E2E、去 marker 账号、未证明
 runtime、WSL/远端及桥接副本不具备全局发现保证。持久化 lease 或进程名字缺失不能证明
-writer 已停；新 adapter 保持 inventory-only。当前验证使用合成临时 schema/文件，尚无
-Orca 产品实机 writer、完整运行归属或跨平台发布兼容性验收。
+writer 已停。当前运行观察不提供全盘 writer 证明，macOS/Linux 和 Orca 产品实机运行
+归属尚未验收。
+
+### Orca：精确原生删除的限定组合
+
+首个已验收组合限 Windows、本机 journal4/record2、一个明确 managed account home、
+显式选择的 Codex 原生记录及其必须后代。目标闭包不能保留已知 current/history/restore
+引用或 bridge；runtime home、跨账号批次、Claude/Pi、frontend 字段和远端写入继续阻挡。
+调用 `delete plan --client orca --record-id ID --engine codex` 时，协调器逐目标冻结并核查
+资格；品牌、目录名和 marker 不独立授予写权限。
+
+固定 API 为真实 `codex-cli 0.160.0` Windows 原生 exe，SHA-256 为
+`7d4588265a55adb1403f85d2e058b11dc971459842de84876c86ff02fb7771f2`。
+要求 `state_5.sqlite` 的 SQLx 58 项及四个辅助 DB 各 2 项 migration/schema 与登记元数据
+一致，backfill 为已完成单行，rollout migration 两表为空；缺 state DB、空 DB、旧/未知
+schema 均不授予 writer，缺辅助 DB 仅允许固定运行时创建。所有共享 DB/index、已知
+rollout 必须 plain、nlink=1；已知别名、managed marker、父目录和配置来源纳入冻结。
+
+首版仅验收 home 无 `config.toml`、`auth.json`、`credentials.json`，初始无
+`installation_id`、`skills`、`tmp`、`.tmp`、`thread-writer-locks` 的组合。Windows 固定
+system config/requirements 必须不存在，祖先目录身份可证明；不读取这些系统文件。
+已有凭据或 startup artifacts 不通过本切片，不能从空 TEMP 验收推断其安全。允许的
+新建副作用仅包括已登记的辅助 SQLite family、bundled system skills、installation ID、
+精确 arg0 shim/锁和 thread coordination lock；未知叶、链接或目录替换阻挡。
+
+专用运行时使用完整 allowlist 环境与全新 TEMP cwd，不继承 storage override、认证、
+Git 配置/credential helper；采用固定 strict-config 覆盖并禁用 plugins/remote plugin/
+apps/hooks/skill 搜索依赖安装等启动同步。早期默认启动曾实际尝试 GitHub `ls-remote`；
+最终禁同步策略不能用 loopback proxy 拒绝本身代替验收。Windows Job 在 native spawn
+前建立，parent 为唯一 Job handle owner；父进程崩溃会回收整个子树。
+
+关闭资格使用真实 Toolhelp PID/父 PID/image name/birth metadata，拒绝已知 Orca 主进程、
+目标相关 lease owner 及其已知子链，保留探测错误；不采集全局 argv。无关 Codex/
+ChatGPT 实例不扩大这个目标保护范围，显式 `--clients-closed` 仍必需。只读冷恢复要求
+原机器与 Windows 登录 session、原 named Job 不存在，直接核查冻结目标残留，不重启
+binary。协议版本与 unknown 占用见 [operation 协议](operation-cli.md)。
+
+固定 binary 隔离验收入口仅创建合成 TEMP stores，无真实 profile、凭据或聊天正文：
+
+```powershell
+$env:PYTHONPATH = 'src'
+python -m tests.orca_binary_acceptance --binary 'C:\absolute\pinned\codex.exe'
+```
+
+入口先进入完整隔离环境的新 Python worker，再执行公共 v3 plan/cold apply/status/verify；
+结果保留在输出的 TEMP 路径。它只接受登记 SHA 和限定资格，不是 live cleanup 命令。
 
 ### Herdr：已接入持久化只读引用
 

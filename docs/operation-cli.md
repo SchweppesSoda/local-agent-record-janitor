@@ -60,11 +60,12 @@ not infer a changed plan or resend an ambiguous native request. If a mutation
 is `unknown`, stop and use `operation status` followed by `operation verify`;
 never invoke `delete apply` again for that operation.
 
-Orca is inventory-only. `records --client orca [--orca-root PATH ...]` reads the
-supported local journal and proven native homes. Selecting Orca for delete
-returns structured `blocked`/capability-unavailable evidence, including when
-the plan has no executable actions. Status and verify preserve that blocked
-result; an empty unauthorized action set is not successful cleanup.
+`records --client orca [--orca-root PATH ...]` reads the supported local journal
+and proven native homes. Orca's static capabilities remain closed. The high-level
+operation coordinator may qualify an explicitly selected native Codex target
+through the [fixed Windows combination](adapters.md#orca精确原生删除的限定组合).
+Other combinations return structured blockers. A plan without authorized actions
+remains blocked; an empty executable catalog never proves deletion.
 
 Plans that discover Orca protection profiles use `larj.operation-plan.v2`.
 The required `guard_sources` list contains each canonical local profile root,
@@ -79,12 +80,39 @@ matching approved store; unscoped coverage failure of a required profile blocks
 dispatch. Only bounded product metadata is refreshed, without another native
 planner pass.
 
+Qualified Orca native deletion uses `larj.operation-plan.v3`. Its target safety
+evidence freezes one managed account home, each complete native cascade, ordinary
+rollout/SQLite/index identities and link counts, required sources, configuration
+absence, and the fixed binary/invocation policy. Apply rechecks current references
+and target-scoped Windows process metadata and still requires a real
+`--clients-closed` acknowledgement. Plan-time running observations may become
+closed before apply. Only the exact approved action/home/IDs/paths receive an
+internal execution ticket; direct/manual/GUI/legacy calls cannot mint it.
+
+The corresponding `larj.child-operation-plan.v2` records root-wide coordination
+for app-server startup. Before any startup, the durable mutation marker includes
+the original named Job and machine/Windows session identity. The root mutex stays
+held through Job teardown and post-close verification. A startup/close failure
+keeps the whole batch unknown, even if an earlier request returned success. An
+unknown child blocks another target in that same home, since startup touches shared
+SQLite families; it does not enlarge the approved deletion closure.
+
+Read-only recovery never starts a binary and does not require today's write
+capability or invocation-policy hash to match. It checks the frozen storage and
+sources, the original Job's absence on the same machine and Windows session, and
+the original native IDs/rollouts/rows/edges/sidebar index directly. A terminal
+child receipt retains that original runtime evidence. An existing Job, missing
+runtime proof, bad source, linked survivor or incomplete read keeps the outcome
+unknown. Software upgrades cannot add evidence or change the original plan hash.
+
 Existing v1 plans keep their original fields, bytes and hash. If an unattempted
 v1 operation now requires these new protection locators, apply returns
 `missing_guard_source_evidence` and requires a new top-level plan. Started or
 ambiguous child journals remain `unknown` before any such gate; their native
 status/verify diagnosis remains available without resending mutation. A new
 adapter's `verify=false` does not revoke that legacy read-only diagnosis.
+Existing v2 plans likewise receive no v3 evidence. An affected unstarted mutation
+must be replanned; an unknown operation must be recovered before any new mutation.
 
 Herdr is inventory-only. By default, `records --client herdr
 [--herdr-root PATH ...]` reads snapshot schema3 current and recognized recovery
@@ -236,5 +264,5 @@ installed `OperationCoordinator` is unavailable, the new command returns
 
 Legacy agent v1 plans cannot freeze Orca protection locators. New plans and
 unattempted applies that discover them return `missing_guard_source_evidence`
-and direct callers to the high-level v2 surface. Existing agent status/verify
+and direct callers to the high-level operation surface. Existing agent status/verify
 remain read-only, and unknown apply is still refused before scanning guards.

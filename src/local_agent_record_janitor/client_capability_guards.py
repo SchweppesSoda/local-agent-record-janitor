@@ -86,13 +86,17 @@ class ClientCapabilityLimits:
         return tuple(matched)
 
     def reasons(self, engine: str, field: str, *, sources: Sequence[Path | str] = (),
-                native_root: Path | str | None = None) -> tuple[str, ...]:
+                native_root: Path | str | None = None, target_ids: Sequence[str] = (),
+                execution: bool = False) -> tuple[str, ...]:
+        from .orca_authorization import permits
         reasons = list(
             f"{CLIENT_CAPABILITY_LIMIT}: {descriptor.client}/{engine} {field} is unavailable"
             + (f" ({limit.reason})" if limit.reason else "")
             for descriptor in self.matching(engine, sources=sources, native_root=native_root,
                                             frontend=field.startswith("frontend_"))
             if not getattr(limit := descriptor.limit_for(engine), field)
+            and not (descriptor.client == "orca" and engine == "codex" and field == "native_delete"
+                     and permits(native_root, target_ids, execution=execution))
         )
         if native_root is not None and (field == "native_delete" or field == "frontend_project_delete" and not sources):
             root_key = canonical_path(native_root)
@@ -124,7 +128,9 @@ class ClientCapabilityLimits:
             engines = tuple(dict.fromkeys(limit.engine for descriptor in matching
                                            for limit in descriptor.capability_limits)) or (engine,)
         return tuple(dict.fromkeys(reason for value in engines
-            for reason in self.reasons(value, field, sources=sources, native_root=root)))
+            for reason in self.reasons(value, field, sources=sources, native_root=root,
+                target_ids=(str(action.target.thread_id), *getattr(getattr(action, "impact", None), "descendant_thread_ids", ()),
+                            *getattr(getattr(action, "impact", None), "affected_thread_ids", ())))))
 
     def restrict_plan(self, plan: Any) -> Any:
         if not self.descriptors:

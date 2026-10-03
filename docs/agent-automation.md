@@ -44,13 +44,21 @@ store. `--out PLAN.json` is optional:
 
 Legacy agent v1 does not serialize new Orca protection sources. When planning
 or applying an unattempted mutation with such a known source, it returns
-`missing_guard_source_evidence`; use [the high-level v2 operation
+`missing_guard_source_evidence`; use [the high-level operation
 plan](operation-cli.md) instead. Existing v1 documents are never enriched or
 rehashed at runtime. Started/ambiguous operations are diagnosed through the
 original status/verify contract, and no new guard or schema condition permits
 resending an unknown mutation. Metadata readers use read-only SQL; SQLite WAL
 read locks may still create or update SQLite-owned side files, which are never
 cleaned up by the inventory command.
+
+The qualified Orca Windows native combination uses top-level v3 and child v2.
+Legacy `agent`/direct/manual/GUI calls lack its exact frozen target/runtime proof
+and remain blocked. Startup is a durable mutation boundary with root-wide
+coordination; read-only recovery requires the original named Job's absence on
+the same machine and Windows session. It reads frozen native artifacts directly
+even when today's capability is closed. See [the precise operation
+contract](operation-cli.md) and [admission limits](adapters.md#orca精确原生删除的限定组合).
 
 For one native store, repeat `--thread-id ID_OR_UNIQUE_PREFIX` to freeze only
 actions whose root thread identity matches every supplied selector. Any missing

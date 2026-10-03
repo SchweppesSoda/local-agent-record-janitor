@@ -1,7 +1,8 @@
 # 多客户端记录清理施工方案
 
 状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 已交付持久化引用与显式本机
-live metadata 两个只读切片，全部 writer 归属仍未知；P5 写入能力仍关闭，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
+live metadata 两个只读切片，全部 writer 归属仍未知；P5 已交付首个 Orca/Codex/Windows
+精确原生组合，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -237,26 +238,62 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 
 ### P5：逐组合开放精确删除
 
-**当前状态：**写入能力未开放；Orca、Herdr writer 均保持关闭，不因只读切片交付获得写入授权。
+**当前状态：**首个 Orca/Codex/Windows 精确 native-only 组合已通过固定真实 binary 的
+公共 v3 plan/cold apply/cold verify TEMP 验收。品牌静态 capability 仍关闭，逐目标票据
+只开放该组合；Herdr、其他引擎/home/runtime/OS 和 frontend/remote 写入继续关闭。
 
-后续可继续本地开发限定组合的预检与验收，首先考虑 Orca/Codex/Windows、
-journal4/record2、单 managed account home、已知 current/history/restore 对精确目标
-无引用且无 bridge 的 native-only 目标。完成范围继续限于
+#### P5 首个切片的施工与验收
+
+本次施工限定 Orca/Codex/Windows、固定 journal4/record2、本机一个明确 managed
+account home 的 native-only 目标及引擎必须后代；runtime home、bridge、其他账号、
+其他引擎、前端字段清理与远端写入不纳入可写组合。进程观察和源读取均按目标相关
+范围判断；完整性不足阻止该目标，不要求证明全盘未知副本或所有无关 writer 消失。
+
+1. **关闭预检：**保留显式 `--clients-closed`，从已读取的 lease 保留最小
+   owner PID/host/start-time 与状态元数据。使用真实 Windows Toolhelp metadata，拒绝已知
+   Orca 主进程、目标 home 相关 lease owner 及已知后代；进程探测失败、身份不足、
+   活跃/冲突/未协调 lease 或恢复状态未知均返回目标 blocker。released 且
+   `deathEvidence=null` 不自动当作关闭证明，仍需关闭确认与当前 PID 检查。
+2. **沿现有 action/cascade 冻结边界：**冻结精确目标和必须后代、plain managed
+   home/marker、相关 journal/恢复来源、目标 rollout 文件身份与 nlink、已知别名、
+   `state_5.sqlite` 及存在的 WAL/SHM/journal、`session_index.jsonl`、storage 配置
+   边界和固定 API binary 身份。共享 DB/index 的未知 hardlink、路径替换、外部
+   `sqlite_home`、配置来源不能证明、未知 bridge/恢复源分别阻止，不从 marker
+   推断 app-server 副作用范围。只读 alias 投影保持观察含义，不成为全盘别名证明。
+   固定 SQLite migration/schema、complete backfill、初始无配置/凭据/startup artifacts
+   均为首版资格；实际允许的新建 family/leaf 有限枚举，详见
+   [精确组合限制](adapters.md#orca精确原生删除的限定组合)。
+3. **显式协议版本：**新授权边界采用条件 `larj.operation-plan.v3`，仅受影响
+   顶层计划携带有版本的 target safety evidence，并纳入同一 approval hash。
+   原生 child batch/cascade writer 与 journal 继续复用；实际 startup 占用采用 child v2
+   root-wide 范围，startup 前落 durable mutation_started 和原 named Job/machine/session
+   证据；所有 Job 后代回收、post-close 检查后才发布 verified。v1/v2 原证据原 hash
+   只读恢复，受新增边界影响的未开始旧计划要求重计划，不能补 evidence 重 hash。
+   apply 的新证据重检接在候选重新绑定之后和 mutation 前；每次 action 前再次
+   检查当前引用、alias/storage/binary/关闭证据，漂移停止剩余动作。verify 只读
+   复核批准 IDs/paths/rows/edges/index/references，原 Job 在同 machine/Windows session
+   明确不存在后才能收口；当前 cap/policy 变化不夺走只读恢复，不能以空可执行 catalog
+   推断目标消失。已开始 unknown 沿既有 status/verify 收口。
+4. **隔离真实 binary 验收：**由一个 lab runner 统一启动固定 Codex binary，
+   所有 home、cwd、profile、APPDATA/LOCALAPPDATA/XDG/TMP/TEMP 和认证、代理、
+   继承配置均置于全新 TEMP 范围；只允许合成记录和哨兵，无登录、真实 profile
+   或用户 stores。先验证 migration/config/index/DB 副作用范围，再通过现有
+   native batch 执行精确删除，检查目标和必须后代消失、范围外哨兵不变。lab
+   固定 0.160.0 policy 禁同步且隔离 Git 配置/credentials；真实 cascade、原子 index
+   替换、sentinel 整行与文件身份保持、冷 named Job 收口及 parent crash 回收已验证。
+   失败或缺少完整组合证据时，对应组合保持关闭。
+5. **回归与提交：**用 TEMP fixtures 覆盖 target/descendant current/history/
+   restore 保护、lease/PID/子进程/探测失败、rollout 与 DB/index hardlink、
+   新 alias、路径/marker/config/binary 替换、冻结源不可读、v1/v2 不补授权、
+   apply 新引用/新链接、unknown 防重发及 status/verify。相关既有 protocol
+   回归、真实双进程互斥和完整 suite 通过后，检查文档链接/diff，在既有 main
+   scoped local commit；报告固定 binary/OS 的验收范围及剩余限制，不 push。
+
+上述关闭检查、冻结/复查与真实 binary 隔离验收共同决定逐目标资格，不翻转品牌
+capability。当前完成范围继续限于
 [冻结 paths/rows/approved references](agent-automation.md#result-contract)，不要求证明
-全盘未知副本或所有无关 writer 消失。按以下顺序补齐尚未实现的门槛：
-
-1. 冻结并在 apply/verify 重检目标 rollout、DB/index family 的已知 alias/nlink、
-   普通路径与 storage 配置边界；未知 bridge/恢复范围、新链接或漂移拒绝执行。
-   现有两项 alias 投影只是观察，尚未进入审批，DB hardlink 与范围外 `sqlite_home`
-   不能忽略；accountHome marker 本身不证明 API 副作用限于该 root。
-2. 沿真实 `--clients-closed` 确认补充目标范围的 Orca 主进程、lease owner 和子进程
-   保护；可先保守地阻止存在已知 Orca 主进程的情况。released lease 可有
-   `deathEvidence=null`，不能代替关闭确认，后台 bridge 仍可能 link/heal。
-3. 复用现有 native batch 与 unknown/status/verify 契约，以固定真实 Codex binary
-   在全隔离 TEMP home、cwd 和环境中验证 thread/delete、migration、index/DB 副作用。
-   隔离 HOME/USERPROFILE/APPDATA/LOCALAPPDATA/XDG/TMP/TEMP 及认证、代理、继承配置，
-   不能只设置 `CODEX_HOME`。这是隔离验收，不是对真实用户 profile 执行清理；
-   具体 OS/binary 缺失或必须使用真实 profile/login 时再报告外部限制。
+全盘未知副本或所有无关 writer 消失。已有配置/凭据/startup artifacts、未完成 backfill、
+未知 schema、bridge、runtime home 及其他组合继续阻挡，不从空 TEMP 正例推广支持。
 
 依据：[lease schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)、
 [close predicate](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/structured-agent-session-close.ts)、

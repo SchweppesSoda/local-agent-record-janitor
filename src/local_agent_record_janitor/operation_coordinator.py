@@ -17,7 +17,7 @@ from .action_registry import action_capability
 from .agent_operations import action_binding
 from .operation_store import OperationStore, plan_sha256, strict_json_load, write_new_json
 from .operation_guard_sources import (
-    PLAN_V1, PLAN_V2, guard_sources_for, refresh_guard_sources,
+    PLAN_V1, PLAN_V2, PLAN_V3, guard_sources_for, refresh_guard_sources,
     required_source_errors, retain_guard_sources, validate_guard_sources,
 )
 from .mutation_guard import (
@@ -58,6 +58,7 @@ class _LiveOperation:
     action_contexts: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
     completed_child_ids: frozenset[str] = field(default_factory=frozenset)
     result: dict[str, Any] | None = None
+    clients_closed_ack: bool = False
     terminal_context: Any | None = field(default=None, repr=False, compare=False)
 
 
@@ -140,6 +141,7 @@ class OperationCoordinator:
                 active_adapters=active_adapters,
                 action_contexts=action_contexts,
                 manual_actions=manual_actions,
+                manual_catalog=manual_catalog,
             )
             write_new_json(Path(str(document["plan_path"])), document)
             self._live[operation] = _LiveOperation(
@@ -218,6 +220,17 @@ class OperationCoordinator:
                     modified=child_inspection.modified,
                     mutation_started=child_inspection.mutation_started,
                 )
+            if document["schema_version"] == PLAN_V3:
+                # Even a closed capability can expose a concrete preflight.
+                # Refresh process/reference/file evidence on apply; planning
+                # observations never stand in for the caller's current ack.
+                from .orca_target_safety import recheck_document_targets
+                safety_errors = recheck_document_targets(document)
+                if safety_errors:
+                    return self._result_document(document, normalized_scope, goal_status="blocked",
+                        blockers=[self._blocker(code, code, scope="target_safety") for code in safety_errors],
+                        batches=child_inspection.batches, modified=child_inspection.modified,
+                        mutation_started=child_inspection.mutation_started)
             if self._blocked_without_mutation(document):
                 return self._result_document(document, normalized_scope, goal_status="blocked",
                     blockers=document.get("blockers", ()) or [self._blocker("action_unavailable", "The frozen plan has no authorized mutation")],
@@ -227,11 +240,15 @@ class OperationCoordinator:
             client_name = str(document["scope"]["client"])
             codex_home = self._bound_codex_home(document, codex_home)
             frozen_roots = validate_guard_sources(document)
+            discovery_roots = (*frozen_roots, *orca_roots) if document["schema_version"] == PLAN_V3 else orca_roots
             live = self._live.get(operation)
             source = (tuple(adapters) if adapters is not None else live.adapters if live is not None
-                      else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=orca_roots)))
+                      else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=discovery_roots)))
+            if document["schema_version"] == PLAN_V3:
+                source = retain_guard_sources(source, frozen_roots)
             source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
             source = refresh_guard_sources(retain_guard_sources(source, (*frozen_roots, *orca_roots)))
+            source = self._frozen_orca_execution_sources(document, source)
             pending = any(str(batch.get("child_operation_id")) not in child_inspection.completed_child_ids
                           for batch in document.get("child_batches", ()))
             if pending and document["schema_version"] == PLAN_V1 and guard_sources_for(source):
@@ -313,6 +330,7 @@ class OperationCoordinator:
                     completed_child_ids=child_inspection.completed_child_ids,
                 )
                 self._live[operation] = live
+            live.clients_closed_ack = clients_closed is True
             return self._execute_live(
                 live,
                 timeout=float(timeout),
@@ -584,12 +602,27 @@ class OperationCoordinator:
                     operation_home=operation_home,
                     codex_home=codex_home,
                 )
+                if document["schema_version"] == PLAN_V3:
+                    from .orca_target_safety import recheck_document_targets
+                    safety_errors = (*self._orca_runtime_recovery_errors(document),
+                                     *recheck_document_targets(document, phase="readonly_recovery"))
+                    if safety_errors:
+                        inspection = self._inspect_child_states(document)
+                        return self._result_document(document, dict(scope or {}), goal_status="unknown",
+                            blockers=[self._blocker(code, code, scope="target_safety") for code in safety_errors],
+                            batches=inspection.batches, modified=inspection.modified,
+                            mutation_started=inspection.mutation_started)
                 client_name = str(document["scope"]["client"])
                 codex_home = self._bound_codex_home(document, codex_home)
+                discovery_roots = ((*validate_guard_sources(document), *orca_roots)
+                                   if document["schema_version"] == PLAN_V3 else orca_roots)
                 source = tuple(adapters) if adapters is not None else tuple(self._default_adapters(
-                    client_name, codex_home=codex_home, orca_roots=orca_roots))
+                    client_name, codex_home=codex_home, orca_roots=discovery_roots))
+                if document["schema_version"] == PLAN_V3:
+                    source = retain_guard_sources(source, validate_guard_sources(document))
                 source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
                 source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(document), *orca_roots)))
+                source = self._orca_recovery_sources(document, source)
                 (
                     context,
                     active_adapters,
@@ -598,7 +631,7 @@ class OperationCoordinator:
                     manual_actions,
                     action_contexts,
                 ) = self._build_context(
-                    client_name,
+                    "native" if document.get("schema_version") == PLAN_V3 else client_name,
                     source,
                     explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(document.get("scope", {}).get("engines", ())),
@@ -632,16 +665,28 @@ class OperationCoordinator:
                 # facts rather than become a new, unattempted blocked result.
                 raise
         if terminal is None:
+            if live.document["schema_version"] == PLAN_V3:
+                from .orca_target_safety import recheck_document_targets
+                safety_errors = (*self._orca_runtime_recovery_errors(live.document),
+                                 *recheck_document_targets(live.document, phase="readonly_recovery"))
+                if safety_errors:
+                    inspection = self._inspect_child_states(live.document)
+                    return self._result_document(live.document, dict(scope or {}), goal_status="unknown",
+                        blockers=[self._blocker(code, code, scope="target_safety") for code in safety_errors],
+                        batches=inspection.batches, modified=inspection.modified,
+                        mutation_started=inspection.mutation_started)
             source = tuple(adapters) if adapters is not None else live.adapters
+            if live.document["schema_version"] == PLAN_V3:
+                source = retain_guard_sources(source, validate_guard_sources(live.document))
             source = self._with_current_guard_sources(source, live.client, codex_home=self._bound_codex_home(live.document, codex_home), orca_roots=orca_roots)
             source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(live.document), *orca_roots)))
-            self._retain_live_guards(live, source)
+            self._retain_live_guards(live, source, readonly_recovery=True)
             try:
                 self._bound_codex_home(live.document, codex_home)
             except OperationCoordinatorError as exc:
                 return self._result_document(live.document, dict(scope or {}), goal_status="blocked",
                     blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=())
-            terminal, error = self._terminal_context(live)
+            terminal, error = self._terminal_context(live, readonly_recovery=True)
         if error is not None:
             inspection = self._inspect_child_states(live.document)
             return self._result_document(
@@ -886,6 +931,9 @@ class OperationCoordinator:
     ) -> list[str]:
         """Map terminal residuals back to the immutable plan action IDs."""
 
+        if document.get("schema_version") == PLAN_V3:
+            return cls._orca_native_residual_action_ids(document)
+
         cls._assert_store_coverage(document, context)
         frozen = cls._frozen_action_signatures(document)
         fresh = cls._fresh_action_signatures(context)
@@ -946,6 +994,46 @@ class OperationCoordinator:
                 residuals.append(str(action["action_id"]))
         return list(dict.fromkeys(residuals))
 
+    @staticmethod
+    def _orca_native_residual_action_ids(document: Mapping[str, Any]) -> list[str]:
+        """Read frozen native artifacts without consulting today's abilities."""
+        from .cleaner import verify_finding_deleted
+        from .models import Finding
+        from .orca_target_safety import evidence_for_actions
+
+        residuals = []
+        for evidence in evidence_for_actions(document, document.get("actions", ())):
+            frozen = evidence["frozen"]
+            home = Path(frozen["home"])
+            finding = Finding(platform="native", platform_session_id=frozen["record_id"],
+                thread_id=frozen["record_id"], reason="frozen read-only recovery",
+                platform_db=home / "state_5.sqlite", codex_home=home,
+                details={"planned_impact_thread_ids": frozen["affected_thread_ids"],
+                         "planned_known_artifact_paths": frozen["rollout_paths"]})
+            verification = verify_finding_deleted(finding)
+            if verification.status == "unknown":
+                raise OperationCoordinatorError(verification.error or "native residual inspection incomplete")
+            present = not verification.deleted
+            # The API also rewrites the legacy sidebar index. Read only IDs;
+            # malformed data is not evidence that the frozen IDs are absent.
+            index = home / "session_index.jsonl"
+            try:
+                handle = index.open("r", encoding="utf-8")
+            except FileNotFoundError:
+                handle = None
+            if handle is not None:
+                with handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                            raise OperationCoordinatorError("native session index inspection incomplete")
+                        present = present or row["id"] in frozen["affected_thread_ids"]
+            if present:
+                residuals.append(str(evidence["action_id"]))
+        return residuals
+
     def _persist_verified_child_journals(
         self,
         document: Mapping[str, Any],
@@ -1005,6 +1093,10 @@ class OperationCoordinator:
                 ) in {"complete", "completed_with_residuals"}:
                     continue
                 state = store.read_state()
+                if document.get("schema_version") == PLAN_V3 and state is not None and not state.get("mutation_started"):
+                    startup_events = [event for event in store.read_events() if event["event"] == "orca_runtime_startup"]
+                    if len(startup_events) == 1:
+                        state = {**state, "mutation_started": True, "runtime_instance": startup_events[0]["runtime_instance"]}
                 if state is None or not (
                     bool(state.get("mutation_started"))
                     or bool(state.get("modified"))
@@ -1019,6 +1111,8 @@ class OperationCoordinator:
                     },
                     state_updates={
                         "phase": "finished",
+                        "mutation_started": bool(state.get("mutation_started")),
+                        **({"runtime_instance": state["runtime_instance"]} if "runtime_instance" in state else {}),
                         "goal_status": goal,
                         "goal_satisfied": goal == "complete",
                         "current_action_state": "verified",
@@ -1135,6 +1229,10 @@ class OperationCoordinator:
                   () if client in {"pi", "claude"} else
                   tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)))
         guards = self._with_current_guard_sources(candidates, client, codex_home=codex_home, orca_roots=orca_roots)
+        if client == "orca" and explicit_frontend_ids:
+            qualified = self._qualified_orca_context(candidates, guards, explicit_frontend_ids, engines)
+            if qualified is not None:
+                return qualified if include_action_contexts else qualified[:5]
         result = self._build_context_sources(client, candidates, engines=engines,
             include_action_contexts=include_action_contexts, codex_home=codex_home,
             explicit_frontend_ids=explicit_frontend_ids)
@@ -1150,6 +1248,42 @@ class OperationCoordinator:
                         for action_id, bound in result[5].items()}
             return (context, active, catalog, manual_plan, result[4], bindings)
         return (context, active, catalog, manual_plan, result[4])
+
+    def _qualified_orca_context(self, candidates, guards, selectors, engines):
+        """The first mutation family is an exact selected native-only closure."""
+        from .orca_runtime import RUNTIME_ACCEPTED
+        if not RUNTIME_ACCEPTED or os.name != "nt" or engines and tuple(engines) != ("codex",):
+            return None
+        from .client_contracts import describe_adapter
+        from .orca_target_safety import plan_target_evidence
+        from .orca_authorization import coordinator_scope
+        from .adapters import NativeIntegrityAdapter
+        from .inventory import build_session_catalog
+        from .manual_delete import build_manual_delete_plan
+        from .client_capability_guards import restrict_cleanup_context
+        selected = tuple(a for a in candidates if describe_adapter(a).client == "orca")
+        if not selected:
+            return None
+        readonly, catalog = self._readonly_client_context(selected, "orca", engines)
+        def inventory_only():
+            context = restrict_cleanup_context(readonly, guards, self.service.typed_actions)
+            return context, context.active_adapters, replace(catalog, active_adapters=context.active_adapters), None, {}, {}
+        scope = {"client": "orca", "record_ids": tuple(selectors), "engines": ("codex",)}
+        evidence = plan_target_evidence(readonly, scope, guards, (), (), catalog)
+        if not evidence or any(not value.get("native_delete") for value in evidence):
+            return inventory_only()
+        homes = {value["frozen"]["home"]: value["frozen"]["binary"]["path"] for value in evidence}
+        if len(homes) != 1:
+            return inventory_only()
+        native = tuple(NativeIntegrityAdapter(codex_home=Path(home), codex_bin_hint=Path(binary))
+                       for home, binary in homes.items())
+        with coordinator_scope(evidence):
+            catalog = build_session_catalog((*native, *guards))
+            manual = build_manual_delete_plan(catalog)
+            result = self._native_manual_context(native, catalog, manual)
+            context = restrict_cleanup_context(result[0], (*native, *guards), self.service.typed_actions)
+        return context, context.active_adapters, replace(result[2], active_adapters=context.active_adapters), \
+            replace(result[3], active_adapters=context.active_adapters), result[4], {}
 
     def _build_context_sources(
         self,
@@ -1194,7 +1328,8 @@ class OperationCoordinator:
         selected = tuple(adapter for adapter in source if self._adapter_matches(adapter, client))
         if selected and all(callable(getattr(adapter, "snapshot_references", None))
                             and not callable(getattr(adapter, "scan", None)) for adapter in selected):
-            result = (self._readonly_client_context(selected, client, engines), selected, None, None, {}, {})
+            context, catalog = self._readonly_client_context(selected, client, engines)
+            result = (context, selected, catalog, None, {}, {})
             return result if include_action_contexts else result[:5]
         if client in {"native", "codex-desktop"}:
             # Native inventory is the authoritative healthy-record snapshot.
@@ -1268,7 +1403,7 @@ class OperationCoordinator:
             result = (*merged, result[5])
         return result if include_action_contexts else result[:5]
 
-    def _readonly_client_context(self, adapters: tuple[Any, ...], client: str, engines: Sequence[str]) -> Any:
+    def _readonly_client_context(self, adapters: tuple[Any, ...], client: str, engines: Sequence[str]) -> tuple[Any, Any]:
         """Inventory a pure client without calling legacy scan or fabricating actions."""
         from .cleaner import ScanReport
         from .client_inventory import build_client_engine_contexts, build_client_inventory
@@ -1278,9 +1413,12 @@ class OperationCoordinator:
         if contexts:
             inventory = contexts[0].inventory
         context = self.service.prepare_report(ScanReport(), active_adapters=adapters, platforms=(client,))
-        return replace(context, client_inventory=inventory)
+        from .inventory import SessionCatalog
+        catalog = SessionCatalog(records=tuple(record for item in contexts if item.engine == "codex"
+                                               for record in item.native_records), active_adapters=adapters)
+        return replace(context, client_inventory=inventory), catalog
 
-    def _retain_live_guards(self, live: _LiveOperation, adapters: tuple[Any, ...]) -> None:
+    def _retain_live_guards(self, live: _LiveOperation, adapters: tuple[Any, ...], *, readonly_recovery: bool = False) -> None:
         """Keep newly supplied protections without rebuilding the approved catalog."""
         from .client_capability_guards import restrict_cleanup_context
         from .client_contracts import describe_adapter
@@ -1288,7 +1426,12 @@ class OperationCoordinator:
         if adapters == live.adapters and not any(describe_adapter(a).client == "orca" for a in adapters):
             return
 
-        live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
+        from contextlib import nullcontext
+        from .orca_authorization import coordinator_scope
+        ticket = (coordinator_scope(live.document["target_safety_evidence"])
+                  if not readonly_recovery and live.document.get("schema_version") == PLAN_V3 and live.document.get("actions") else nullcontext())
+        with ticket:
+            live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
         live.adapters = live.context.active_adapters
         live.action_contexts = {key: restrict_cleanup_context(bound, adapters, self.service.typed_actions)
                                 for key, bound in live.action_contexts.items()}
@@ -2738,6 +2881,7 @@ class OperationCoordinator:
         active_adapters: Sequence[Any],
         action_contexts: Mapping[str, Any] | None = None,
         manual_actions: Mapping[str, Any] | None = None,
+        manual_catalog: Any = None,
     ) -> dict[str, Any]:
         from .cleanup_service import partition_actions
 
@@ -2885,7 +3029,33 @@ class OperationCoordinator:
                 payload["blockers"].append(self._blocker("guard_source_incomplete", "; ".join(errors)))
                 payload["counts"]["blocked_count"] = len(payload["blockers"])
                 payload["goal_status"] = "blocked"
+        from .orca_target_safety import plan_target_evidence
+        safety = plan_target_evidence(context, scope, active_adapters, candidates, blockers, manual_catalog)
+        if safety:
+            payload["schema_version"] = PLAN_V3
+            payload["target_safety_evidence"] = safety
+            for evidence in safety:
+                matched = [action for action in action_docs if action["target"]["thread_id"] == evidence["frozen"]["record_id"]
+                           and canonical_path(next(storage["path"] for storage in payload["storages"]
+                               if storage["storage_id"] == action["target"]["storage_id"])) == canonical_path(evidence["frozen"]["home"])]
+                if len(matched) == 1:
+                    evidence["action_id"] = matched[0]["action_id"]
+            for evidence in safety:
+                for code in evidence["blocker_codes"]:
+                    payload["blockers"].append(self._blocker(code, code, scope="target_safety"))
+            # No validated API boundary is currently registered. A successful
+            # metadata preflight cannot make this a mutation authorization.
+            if any(not evidence.get("native_delete") for evidence in safety):
+                payload["blockers"].append(self._blocker("orca_api_boundary_not_validated",
+                    "Orca native deletion remains closed until this binary/storage/runtime combination is validated"))
+            elif candidates:
+                for capability in payload["capabilities"].values():
+                    capability["native_delete"] = True
+            payload["counts"]["blocked_count"] = len(payload["blockers"])
+            payload["goal_status"] = "ready" if candidates and not payload["blockers"] else "blocked"
         payload["plan_sha256"] = plan_sha256(payload)
+        from .orca_target_safety import validate_document_targets
+        validate_document_targets(payload)
         return payload
 
     def _action_document(
@@ -3050,7 +3220,7 @@ class OperationCoordinator:
                 raise OperationCoordinatorError("operation plan is not a JSON object")
             document = raw
         if (
-            document.get("schema_version") not in {PLAN_V1, PLAN_V2}
+            document.get("schema_version") not in {PLAN_V1, PLAN_V2, PLAN_V3}
             or document.get("document_type") != "operation_plan"
         ):
             raise OperationCoordinatorError("operation plan schema is invalid")
@@ -3062,6 +3232,8 @@ class OperationCoordinator:
         if operation_id is not None and str(operation_id) != str(document.get("operation_id")):
             raise OperationCoordinatorError("operation ID does not match plan")
         validate_guard_sources(document)
+        from .orca_target_safety import validate_document_targets
+        validate_document_targets(document)
         return document
 
     @staticmethod
@@ -3606,6 +3778,15 @@ class OperationCoordinator:
                     batches.append(view)
                     continue
 
+                if document.get("schema_version") == PLAN_V3:
+                    startup_events = [event for event in store.read_events() if event["event"] == "orca_runtime_startup"]
+                    if startup_events and not state.get("mutation_started"):
+                        mutation_started = True
+                        view["status"] = "unknown"
+                        blockers.append(self._blocker("recovery_required", "Startup event is ahead of durable state",
+                            scope=f"child:{child_id}"))
+                        batches.append(view)
+                        continue
                 goal = str(state.get("goal_status") or "")
                 phase = str(state.get("phase") or "")
                 started = self._child_attempted(state)
@@ -3693,11 +3874,15 @@ class OperationCoordinator:
         try:
             with mutation_roots(frozen_operation_roots(live.document)):
                 entered = True
-                return self._execute_live_locked(
-                    live, timeout=timeout,
-                    app_server_factory=app_server_factory,
-                    binary_resolver=binary_resolver,
-                )
+                if live.document.get("schema_version") == PLAN_V3:
+                    if app_server_factory is not None or binary_resolver is not None:
+                        raise OperationCoordinatorError("Orca frozen runtime does not allow factory/binary overrides")
+                    from .orca_authorization import execution_scope
+                    with execution_scope(live.document, live.candidates, clients_closed=live.clients_closed_ack):
+                        return self._execute_live_locked(live, timeout=timeout,
+                            app_server_factory=None, binary_resolver=None)
+                return self._execute_live_locked(live, timeout=timeout,
+                    app_server_factory=app_server_factory, binary_resolver=binary_resolver)
         except Exception as exc:
             inspection = self._inspect_child_states(live.document)
             prior = live.result or {}
@@ -3745,7 +3930,7 @@ class OperationCoordinator:
         current = self._with_current_guard_sources(live.adapters, live.client,
             codex_home=self._bound_codex_home(live.document, None))
         self._retain_live_guards(live, refresh_guard_sources(retain_guard_sources(
-            current, validate_guard_sources(live.document) if live.document.get("schema_version") == PLAN_V2 else ())))
+            current, validate_guard_sources(live.document) if live.document.get("schema_version") in {PLAN_V2, PLAN_V3} else ())))
         source_errors = required_source_errors(live.document, live.adapters)
         if source_errors:
             result = self._result_document(live.document, live.document.get("scope", {}), goal_status="blocked",
@@ -3861,7 +4046,10 @@ class OperationCoordinator:
                 store, state = self._open_batch_store(
                     live, batch, child_id, storage_path, index
                 )
-                with mutation_guard(scopes_for_actions(live.context.plan, batch.actions), store=store), store.mutation_lock():
+                from .mutation_guard import scopes_for_frozen_plan
+                batch_scopes = (scopes_for_frozen_plan(store.read_plan()) if live.document.get("schema_version") == PLAN_V3
+                                else scopes_for_actions(live.context.plan, batch.actions))
+                with mutation_guard(batch_scopes, store=store), store.mutation_lock():
                     def checkpoint(
                         phase: str,
                         action: Any,
@@ -3906,6 +4094,23 @@ class OperationCoordinator:
                             event["result_status"] = status
                         store.append_event(event, state_updates=current)
 
+                    def startup_checkpoint(job_name):
+                        nonlocal batch_mutation_started, mutation_started
+                        from .orca_runtime import runtime_host_identity
+                        instance = {"schema_version": "larj.orca-runtime-instance.v1", "job_name": job_name,
+                                    **runtime_host_identity()}
+                        current = dict(store.read_state() or state)
+                        current.update(phase="executing", mutation_started=True,
+                            current_action_ids=[str(a.action_id) for a in batch.actions],
+                            current_action_state="mutation_started", runtime_instance=instance)
+                        store.append_event({"event": "orca_runtime_startup", "mutation_started": True,
+                                            "runtime_instance": instance}, state_updates=current)
+                        batch_mutation_started = mutation_started = True
+
+                    def startup_boundary_checkpoint(snapshot):
+                        store.append_event({"event": "orca_runtime_boundary_observed", "startup_artifacts": snapshot},
+                            state_updates={"startup_artifacts": snapshot})
+
                     if str(batch.mutation_family) == "remove_frontend_reference":
                         required_frontend = {
                             str(action.action_id)
@@ -3937,6 +4142,8 @@ class OperationCoordinator:
                                 binary_resolver or choose_codex_binary
                             ),
                             action_state_callback=checkpoint,
+                            startup_callback=startup_checkpoint,
+                            startup_boundary_callback=startup_boundary_checkpoint,
                         )
                     else:
                         batch_context = self._context_for_batch(live, batch)
@@ -4275,6 +4482,8 @@ class OperationCoordinator:
         app_server_factory: Any,
         binary_resolver: Any,
         action_state_callback: Any,
+        startup_callback: Any = None,
+        startup_boundary_callback: Any = None,
     ) -> Any:
         """Execute one native store batch from the frozen manual snapshot."""
 
@@ -4335,7 +4544,44 @@ class OperationCoordinator:
         # collection before execute_manual_delete can emit mutation_started.
         for by_native in evidence_by_database.values():
             guard_frontend_reference_closure(by_native)
-        return execute_manual_delete(
+        kwargs = {}
+        from contextlib import nullcontext
+        runtime = nullcontext()
+        if live.document.get("schema_version") == PLAN_V3:
+            from .orca_target_safety import evidence_for_actions, recheck_orca_target, _startup_manifest, recheck_startup_snapshot
+            from .orca_runtime import IsolatedCodexRuntime
+            from .adapters.orca import OrcaAdapter
+            evidence = evidence_for_actions(live.document, actions)
+            startup_snapshot = None
+            def boundary(phase):
+                nonlocal startup_snapshot
+                errors = [code for value in evidence for code in recheck_orca_target(value,
+                    OrcaAdapter(profile_root=value["frozen"]["profile_root"]), phase=phase)]
+                if errors:
+                    raise OperationCoordinatorError("; ".join(sorted(set(errors))))
+                home = Path(evidence[0]["frozen"]["home"])
+                if phase == "post_start":
+                    startup_snapshot = _startup_manifest(home, after_start=True)
+                    startup_boundary_callback(startup_snapshot)
+                elif phase == "readonly_recovery" and startup_snapshot is not None:
+                    recheck_startup_snapshot(home, startup_snapshot)
+            boundary("before_start")
+            binaries = {value["frozen"]["binary"]["path"] for value in evidence}
+            if len(binaries) != 1:
+                raise OperationCoordinatorError("Orca batch has conflicting pinned binaries")
+            runtime = IsolatedCodexRuntime(Path(next(iter(binaries))))
+            def factory(*, codex_home, codex_binary, timeout):
+                if Path(codex_binary) != runtime.binary or canonical_path(codex_home) != canonical_path(evidence[0]["frozen"]["home"]):
+                    raise OperationCoordinatorError("Orca runtime factory scope differs from approval")
+                return runtime.server(codex_home=codex_home, timeout=timeout, job_ready_callback=startup_callback)
+            app_server_factory = factory
+            binary_resolver = lambda _hint: runtime.binary
+            kwargs = {"defer_verification_until_close": True,
+                "post_start_validator": lambda: boundary("post_start"),
+                "post_close_validator": lambda: boundary("readonly_recovery"),
+                "targeted_guard": lambda _action: boundary("readonly_recovery")}
+        with runtime:
+            return execute_manual_delete(
             selected,
             catalog_builder=lambda: live.manual_catalog,
             approved_plan_fingerprint=str(selected.plan_fingerprint or ""),
@@ -4346,7 +4592,8 @@ class OperationCoordinator:
             preflight_verified=True,
             targeted_guards_only=True,
             action_state_callback=action_state_callback,
-        )
+            **kwargs,
+            )
 
     def _open_batch_store(
         self,
@@ -4384,6 +4631,12 @@ class OperationCoordinator:
             "mutation_family": batch.mutation_family,
             "actions": child_actions,
         }
+        if live.document.get("schema_version") == PLAN_V3:
+            from .orca_target_safety import evidence_for_actions
+            child_plan["schema_version"] = "larj.child-operation-plan.v2"
+            child_plan["startup_boundary"] = {"schema_version": "larj.orca-startup-boundary.v1",
+                "coordination_scope": "root_wide", "home": str(storage_path),
+                "target_safety_evidence": evidence_for_actions(live.document, batch.actions)}
         child_plan["plan_sha256"] = plan_sha256(child_plan)
         store = OperationStore(storage_path, child_id)
         new_store = not store.directory.exists()
@@ -4437,12 +4690,13 @@ class OperationCoordinator:
     def _terminal_context(
         self,
         live: _LiveOperation,
+        *, readonly_recovery: bool = False,
     ) -> tuple[Any | None, str | None]:
         try:
             self._retain_live_guards(live, self._with_current_guard_sources(live.adapters, live.client,
-                codex_home=self._bound_codex_home(live.document, None)))
+                codex_home=self._bound_codex_home(live.document, None)), readonly_recovery=readonly_recovery)
             self._retain_live_guards(live, refresh_guard_sources(retain_guard_sources(
-                live.adapters, validate_guard_sources(live.document))))
+                live.adapters, validate_guard_sources(live.document))), readonly_recovery=readonly_recovery)
             for adapter in live.adapters:
                 invalidate = getattr(adapter, "invalidate_frontend_snapshot", None)
                 if callable(invalidate):
@@ -4461,8 +4715,8 @@ class OperationCoordinator:
                 )
             context, _adapters, _catalog, _manual_plan, _manual_actions, _action_contexts = (
                 self._build_context(
-                    live.client,
-                    live.adapters,
+                    "native" if live.document.get("schema_version") == PLAN_V3 else live.client,
+                    self._orca_recovery_sources(live.document, live.adapters),
                     explicit_frontend_ids=tuple(live.document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(
                         live.document.get("scope", {}).get("engines", ())
@@ -4477,6 +4731,98 @@ class OperationCoordinator:
             )
         except Exception as exc:
             return None, str(exc) or repr(exc)
+
+    @staticmethod
+    def _frozen_orca_execution_sources(document, source):
+        if document.get("schema_version") != PLAN_V3:
+            return source
+        from .adapters.orca import OrcaAdapter
+        from .client_contracts import describe_adapter
+        binaries = {canonical_path(value["frozen"]["profile_root"]): Path(value["frozen"]["binary"]["path"])
+                    for value in document.get("target_safety_evidence", ()) if value["frozen"].get("binary")}
+        result = []
+        for adapter in source:
+            descriptor = describe_adapter(adapter)
+            binary = binaries.get(canonical_path(descriptor.profile_root)) if descriptor.profile_root else None
+            if descriptor.client == "orca" and binary is not None:
+                hint = getattr(adapter, "codex_bin_hint", None)
+                if hint is not None and Path(hint).absolute() != binary.absolute():
+                    raise OperationCoordinatorError("Orca binary hint differs from frozen approval")
+                if hint is None:
+                    adapter = OrcaAdapter(profile_root=descriptor.profile_root, codex_bin_hint=binary)
+            result.append(adapter)
+        return tuple(result)
+
+    @staticmethod
+    def _orca_recovery_sources(document, source):
+        if document.get("schema_version") != PLAN_V3:
+            return source
+        from .adapters import NativeIntegrityAdapter
+        homes = {value["frozen"]["home"]: value["frozen"]["binary"]["path"]
+                 for value in document.get("target_safety_evidence", ()) if value["frozen"].get("binary")}
+        return (*source, *(NativeIntegrityAdapter(codex_home=Path(home), codex_bin_hint=Path(binary))
+                          for home, binary in homes.items()))
+
+    @staticmethod
+    def _orca_runtime_recovery_errors(document):
+        if document.get("schema_version") != PLAN_V3:
+            return ()
+        from .orca_runtime import runtime_instance_stopped
+        storages = {s["storage_id"]: Path(s["path"]) for s in document["storages"]}
+        try:
+            for batch in document.get("child_batches", ()):
+                store = OperationStore(storages[batch["storage_id"]], batch["child_operation_id"])
+                if not store.directory.exists():
+                    continue
+                approved = [action for action in document["actions"] if action["action_id"] in batch["action_ids"]]
+                from .orca_target_safety import evidence_for_actions
+                projection = {"schema_version": "larj.child-operation-plan.v2", "operation_id": batch["child_operation_id"],
+                    "target": {"codex_home": str(storages[batch["storage_id"]]), "storage_id": batch["storage_id"]},
+                    "parent_operation_id": document["operation_id"], "mutation_family": batch["mutation_family"],
+                    "actions": OperationCoordinator._metadata(approved),
+                    "startup_boundary": {"schema_version": "larj.orca-startup-boundary.v1", "coordination_scope": "root_wide",
+                        "home": str(storages[batch["storage_id"]]), "target_safety_evidence": evidence_for_actions(document, approved)}}
+                state = store.read_state()
+                if state is None:
+                    result = store.read_result()
+                    if (result is not None and result.get("goal_status") in {"complete", "completed_with_residuals"}
+                            and result.get("plan_sha256") == plan_sha256(projection)
+                            and sorted(result.get("action_ids", ())) == sorted(batch["action_ids"])
+                            and result.get("runtime_instance") is not None
+                            and runtime_instance_stopped(result["runtime_instance"])):
+                        continue
+                    return ("orca_runtime_instance_unproven",)
+                events = [e for e in store.read_events() if e["event"] == "orca_runtime_startup"]
+                if not state.get("mutation_started") and not events:
+                    continue
+                child = store.read_plan()
+                if (child.get("plan_sha256") != plan_sha256(projection)
+                        or child.get("schema_version") != "larj.child-operation-plan.v2"
+                        or child.get("parent_operation_id") != document["operation_id"]
+                        or child.get("actions") != approved
+                        or child.get("target", {}).get("codex_home") != str(storages[batch["storage_id"]])):
+                    return ("orca_runtime_instance_unproven",)
+                from .mutation_guard import scopes_for_frozen_plan
+                scopes_for_frozen_plan(child)
+                if len(events) != 1:
+                    return ("orca_runtime_instance_unproven",)
+                instance = events[0].get("runtime_instance")
+                if state.get("runtime_instance") is not None and state["runtime_instance"] != instance:
+                    return ("orca_runtime_instance_unproven",)
+                if not runtime_instance_stopped(instance):
+                    return ("orca_runtime_instance_running",)
+                snapshots = [e for e in store.read_events() if e["event"] == "orca_runtime_boundary_observed"]
+                if len(snapshots) > 1:
+                    return ("orca_startup_snapshot_invalid",)
+                if snapshots:
+                    snapshot = snapshots[0].get("startup_artifacts")
+                    if state.get("startup_artifacts") is not None and state["startup_artifacts"] != snapshot:
+                        return ("orca_startup_snapshot_invalid",)
+                    from .orca_target_safety import recheck_startup_snapshot
+                    recheck_startup_snapshot(storages[batch["storage_id"]], snapshot)
+        except (ValueError, OSError, KeyError, TypeError):
+            return ("orca_runtime_instance_unproven",)
+        return ()
 
     @staticmethod
     def _outcome_statuses(outcome: Any) -> set[str]:
@@ -4667,6 +5013,11 @@ class OperationCoordinator:
         modified: bool = False,
         mutation_started: bool = False,
     ) -> dict[str, Any]:
+        if document.get("schema_version") == PLAN_V3 and goal_status == "unknown":
+            inspection = self._inspect_child_states(document)
+            modified = modified or inspection.modified
+            mutation_started = mutation_started or inspection.mutation_started
+            batches = batches or inspection.batches
         return {
             "schema_version": "larj.operation-result.v1",
             "document_type": "operation_result",

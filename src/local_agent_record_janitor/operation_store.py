@@ -436,7 +436,7 @@ class OperationStore:
                 "Unknown operations must retain their detailed recovery journal"
             )
         plan = self.read_plan()
-        if plan.get("schema_version") == "larj.child-operation-plan.v1":
+        if plan.get("schema_version") in {"larj.child-operation-plan.v1", "larj.child-operation-plan.v2"}:
             roots = plan.get("actions", [])
         else:
             authorization = plan.get("authorization")
@@ -514,6 +514,12 @@ class OperationStore:
                 completed_at + _RECEIPT_RETENTION
             ).isoformat(),
         }
+        if plan.get("schema_version") == "larj.child-operation-plan.v2" and receipt["mutation_started"]:
+            state = self.read_state()
+            instance = state.get("runtime_instance") if state is not None else None
+            if not isinstance(instance, Mapping):
+                raise OperationStoreError("Orca terminal receipt requires original runtime evidence")
+            receipt["runtime_instance"] = dict(instance)
         receipt["receipt_sha256"] = _receipt_sha256(receipt)
         existing = _optional_lstat(self.receipt_path)
         if existing is not None:
@@ -748,6 +754,7 @@ class OperationStore:
             "completed_at": receipt.get("completed_at"),
             "receipt_expires_at": receipt.get("receipt_expires_at"),
             "receipt_sha256": receipt.get("receipt_sha256"),
+            **({"runtime_instance": dict(receipt["runtime_instance"])} if isinstance(receipt.get("runtime_instance"), Mapping) else {}),
         }
 
     def _discard_detailed_files(self, *, ignore_errors: bool = False) -> None:

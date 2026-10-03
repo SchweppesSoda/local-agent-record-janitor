@@ -123,6 +123,10 @@ delete or replace it. This root lock does not prove that an older writer holding
 receipt. Unknown journals have no expiry. Missing or untrusted journal scope
 blocks the whole affected root. Exact frozen IDs and artifact paths allow
 independent targets and stores to proceed when their scopes do not overlap.
+The qualified Orca v3/child-v2 startup boundary occupies the whole selected home:
+another record in that home remains blocked while startup/teardown is unknown.
+Its original named Job must be absent on the same machine and Windows session
+before read-only recovery can publish a known result.
 
 Legacy direct CLI/GUI and service writers share this admission gate, so they
 cannot bypass an existing journal's unknown outcome. They do not create a new

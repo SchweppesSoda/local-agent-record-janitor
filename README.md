@@ -86,8 +86,9 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 正常独立 Codex/Pi/Claude 会话无需前端引用；Codex 子记录的完整父链也不要求独立 UI
 绑定。未知 backend 仅显示 `unverified`/`inventory_only`，不提供删除动作。`native`
 涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
-Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；所有 Orca 写入和
-完整终验能力仍关闭。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
+Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；高层 operation 的
+精确 Windows/Codex 组合按冻结证据逐目标核查删除资格，见
+[限定组合](docs/adapters.md#orca精确原生删除的限定组合)。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
 并可显式查询本机 live metadata；native root 和全部 writer 归属仍未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
 
@@ -316,7 +317,7 @@ Codex thread ID 的 Cindy `status=deleted` 前端记录也会显示，并可由�
 owner process root；它与 native root 分开。`probe_complete` 表示探测成功，
 `coverage_complete` 另行说明限定进程范围的覆盖；当前仅检查 Windows 下 Codex、
 ChatGPT、AionUI、Cindy 四类进程。明确选择 Herdr 时改用下述 metadata API 观察；
-Orca/Herdr 的全部 writer、Pi/Claude 运行时、任意 node/server 和非 Windows 进程归属
+Herdr 的全部 writer、Pi/Claude 运行时、任意 node/server 和非 Windows 进程归属
 未被完整覆盖，不能由空结果推断 `clients_closed=true`。
 
 盘点 Orca 可使用默认或 `ORCA_USER_DATA_PATH` 指向的 userData，也可显式指定一个或多个
@@ -331,9 +332,12 @@ local-agent-record-janitor records --client orca --orca-root 'D:\OrcaProfile' --
 runtime home 必须有该已知 profile 的持久化 `accountHome` 关联，目录名称本身不授予归属。
 未知 schema、WSL/SSH、未支持的恢复来源和读取失败保留为 `incomplete`；本机 Claude
 root 只提供精确保护证据，不成为 Orca native catalog 或 writer。已发现的 Orca 保护来源
-也约束同一 store 的 native 删除入口，明确选择 Orca 执行 `delete plan/run` 返回 `blocked`。
+也约束同一 store 的 native 删除入口。Orca `delete plan/run` 只有
+[固定 Windows 原生组合](docs/adapters.md#orca精确原生删除的限定组合)可获得逐目标资格；
+其他组合返回 `blocked`，旧 direct/manual/GUI 入口不授予该资格。
 
-含 Orca 保护来源的新高层计划使用顶层 v2，将所有已知 profile locator 纳入批准 hash；
+含 Orca 保护来源的新高层计划使用顶层 v2，合格的精确 Orca 原生删除采用 v3；均将
+所需 profile locator 纳入批准 hash；
 apply/verify 恢复这些来源，并合并当前 default/env 和显式 root。它们不属于 mutation
 storages。旧 v1 不补字段或重算 hash；需要新保护来源的未执行 mutation 必须重新生成
 高层计划，已有 unknown 仍只通过 status/verify 恢复。自定义、移动或去除 marker 的未知
