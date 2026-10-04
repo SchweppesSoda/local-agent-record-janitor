@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -385,6 +386,31 @@ class FrontendDiscoveryTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             discover_aionui_databases(self.appdata)
+
+    def test_distinct_case_sensitive_aion_brand_directories_keep_layout_order(self) -> None:
+        first = self.appdata / "AionUi"
+        second = self.appdata / "AionUI"
+        first.mkdir()
+        if second.exists():
+            self.skipTest("This filesystem cannot create distinct case-only directories")
+        second.mkdir()
+        expected = []
+        for root in (first, second):
+            (root / "aionui").mkdir()
+            for path in (root / "aionui" / "aionui.db", root / "aionui-backend.db"):
+                path.touch()
+                expected.append(path)
+        self.assertEqual(discover_aionui_databases(self.appdata), tuple(expected))
+
+    def test_hardlinked_aion_databases_keep_their_distinct_sqlite_pathnames(self) -> None:
+        root = self.appdata / "AionUi"
+        current = root / "aionui" / "aionui.db"
+        current.parent.mkdir(parents=True)
+        current.touch()
+        legacy = root / "aionui.db"
+        os.link(current, legacy)
+        self.assertTrue(current.samefile(legacy))
+        self.assertEqual(discover_aionui_databases(self.appdata), (current, legacy))
 
     def test_discovers_cindy_profiles_and_excludes_backup_files(self) -> None:
         global_root = self.appdata / "CindyGlobal"

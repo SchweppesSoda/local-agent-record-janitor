@@ -262,7 +262,7 @@ class GuiSnapshotTests(unittest.TestCase):
     def test_real_desktop_writer_completes_compound_gui_deletion(self) -> None:
         thread_id = "019f9873-d075-7940-aa54-f30c5028524f"
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory) / "codex-home"
+            home = Path(directory).resolve(strict=True) / "codex-home"
             rollout = write_rollout(
                 home,
                 thread_id,
