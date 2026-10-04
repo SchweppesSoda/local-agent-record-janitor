@@ -129,7 +129,9 @@ def refresh_guard_sources(adapters: Iterable[object]) -> tuple[object, ...]:
         from .herdr_bound_adapter import HerdrBoundAdapter
         client = describe_adapter(adapter).client
         if client in {"cindy", "aionui"}:
-            adapter.invalidate_frontend_snapshot()
+            invalidate = getattr(adapter, "invalidate_frontend_snapshot", None)
+            if callable(invalidate):
+                invalidate()
         if client == "orca" or isinstance(adapter, HerdrBoundAdapter):
             adapter.snapshot_references(refresh=True)
     return adapters
