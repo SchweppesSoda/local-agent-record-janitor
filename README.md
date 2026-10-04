@@ -109,6 +109,23 @@ local-agent-record-janitor records --client qwenwork --qwenwork-root 'D:\profile
 会话和云端引用的证据限制，删除入口保持 blocked，用户生成的文件保留。详见
 [办公版适配边界](docs/adapters.md#千问办公与-qoderworkcn-只读盘点)。
 
+### Paseo
+
+`records --client paseo` 可只读盘点 Paseo 的本机 agent 注册记录，包含旧版平铺记录、
+项目目录中的记录、归档状态和提供者恢复引用。默认使用 `PASEO_HOME` 或 `~/.paseo`；
+可重复指定 `--paseo-root`。同 ID 的不同 profile 分开显示，同 profile 的重复快照保留
+全部来源并报告不完整，不自动选择一个副本覆盖其他副本。
+
+```powershell
+local-agent-record-janitor records --client paseo --json
+local-agent-record-janitor records --client paseo --paseo-root 'D:\profiles\paseo' --engine codex --json
+```
+
+适配依据为 Paseo `0.11.0-beta.3` 的固定源码；当前清单范围为 `persisted_agent_registry`。
+它不证明原生聊天已清除或后台进程已关闭，所有删除入口保持阻止。标题、配置、凭据与
+聊天正文不进入输出；不连接 daemon 或读取原生转录。详见
+[Paseo 适配边界](docs/adapters.md#paseoagent-注册记录只读盘点)。
+
 ### 术语与身份边界
 
 | 层 | 本项目中的含义 |

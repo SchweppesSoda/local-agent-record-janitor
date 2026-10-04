@@ -1031,6 +1031,8 @@ def _add_common_arguments(
                         help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
     parser.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
                         help="WorkBuddy 独立配置根目录（可重复；默认 WORKBUDDY_CONFIG_DIR 或 ~/.workbuddy）")
+    parser.add_argument("--paseo-root", action="append", default=[], type=Path, metavar="PATH",
+                        help="Paseo home（可重复；默认 PASEO_HOME 或 ~/.paseo；只读盘点）")
     for office_client, label in (("qwenwork", "千问办公 CN"), ("qoderwork", "QoderWork CN")):
         parser.add_argument("--" + office_client + "-root", action="append", default=[], type=Path, metavar="PATH",
                             help=label + " userData 根目录（可重复；只读盘点）")
@@ -1073,7 +1075,7 @@ def _add_operation_scope_arguments(
 
     parser.add_argument(
         "--client",
-        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr", "workbuddy", "qwenwork", "qoderwork"),
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr", "workbuddy", "qwenwork", "qoderwork", "paseo"),
         required=client_required,
         help=(
             "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
@@ -1146,6 +1148,7 @@ _CLIENT_PLATFORM_MAP = {
     "workbuddy": "workbuddy",
     "qwenwork": "qwenwork",
     "qoderwork": "qoderwork",
+    "paseo": "paseo",
 }
 _OPERATION_BODY_KEYS = frozenset(
     {
@@ -1181,7 +1184,7 @@ def _normalize_client_name(value: object) -> str:
     except KeyError as exc:
         raise ValueError(
             "--client 必须指定一个受支持的客户端："
-            "native、codex-native、cindy、aionui、pi、claude、orca、herdr、workbuddy、qwenwork 或 qoderwork"
+            "native、codex-native、cindy、aionui、pi、claude、orca、herdr、workbuddy、qwenwork、qoderwork 或 paseo"
         ) from exc
 
 
@@ -1463,7 +1466,7 @@ def _run_operation_backend(
 
     try:
         if verb == "plan":
-            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork"}:
+            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}:
                 supplied_adapters = _create_default_adapters(args)
             operation_kwargs: dict[str, Any] = {
                 "client": str((scope or {}).get("client") or ""),
@@ -1509,7 +1512,7 @@ def _run_operation_backend(
                 operation_kwargs["progress_callback"] = progress_callback
             result = coordinator.apply_operation(**operation_kwargs)
         elif verb == "run":
-            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork"}:
+            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}:
                 supplied_adapters = _create_default_adapters(args)
             operation_kwargs = {
                 "client": str((scope or {}).get("client") or ""),
@@ -3019,6 +3022,8 @@ def _run_client_records(
         payload["inventory_scope"] = "persisted_and_live_metadata" if args.inspect_clients else "persisted_metadata"
     elif client in {"qwenwork", "qoderwork"}:
         payload["inventory_scope"] = "database_metadata_and_known_sdk_paths"
+    elif client == "paseo":
+        payload["inventory_scope"] = "persisted_agent_registry"
     from .client_inventory import collect_client_file_aliases, collect_shared_store_file_aliases
     payload["file_aliases"] = collect_client_file_aliases(contexts, selected).to_dict()
     payload["shared_store_file_aliases"] = collect_shared_store_file_aliases(contexts, selected)

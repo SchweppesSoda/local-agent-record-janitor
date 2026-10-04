@@ -218,6 +218,27 @@ false. Plans with no authorized actions stay blocked through apply, status and
 verify. No message, credential, workspace, generated artifact or cloud entity is
 deleted. See [the evidence and limits](adapters.md#千问办公与-qoderworkcn-只读盘点).
 
+## Paseo agent registry metadata
+
+```powershell
+local-agent-record-janitor records --client paseo --json
+local-agent-record-janitor records --client paseo --paseo-root 'D:\profiles\paseo' --engine claude --json
+local-agent-record-janitor records --client paseo --record-id '<Paseo agent ID>' --inspect-clients --json
+```
+
+The default is `PASEO_HOME`, then `~/.paseo`; `--paseo-root` can be repeated.
+Records include flat legacy and project-directory snapshots, including archived
+agents and agents without a provider session ID. Agent IDs are profile-qualified;
+provider persistence/runtime references retain their separate provenance. Duplicate
+snapshots and unreadable sources report incomplete inventory rather than an empty success.
+
+`inventory_scope=persisted_agent_registry` does not cover provider transcripts,
+schedules, workspaces, client caches or all writers. Saved status is not a live
+probe: `--inspect-clients` keeps `clients_closed=null`. No daemon is started or
+contacted. All mutation and verification capabilities are disabled; plan/run/apply
+and cold status/verify remain blocked without dispatching a native writer. See
+[Paseo boundaries](adapters.md#paseoagent-注册记录只读盘点).
+
 ## WorkBuddy local sessions
 
 `records --client workbuddy [--workbuddy-root PATH ...]` inventories an independent

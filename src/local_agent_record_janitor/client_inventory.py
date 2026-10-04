@@ -440,7 +440,7 @@ def build_client_engine_contexts(
             adapter_list, client=selected_client, engines=engines
         )
     requested = _normalize_engines(engines)
-    if selected_client in {"workbuddy", "qwenwork", "qoderwork"}:
+    if selected_client in {"workbuddy", "qwenwork", "qoderwork", "paseo"}:
         return tuple(ClientEngineContext(inventory=inventory, engine=engine,
             targets=tuple(target for target in inventory.targets if target.engine == engine),
             frontend_sessions=(), native_catalog=None, capability=inventory.capabilities[engine])
@@ -1183,6 +1183,9 @@ def build_client_inventory(
     if not selected_client:
         raise ClientInventoryError("client selector must not be blank")
     requested_engines = _normalize_engines(engines)
+    if selected_client == "paseo":
+        from .paseo_store import build_inventory
+        return build_inventory(tuple(adapters), engines=requested_engines)
     if selected_client in {"qwenwork", "qoderwork"}:
         from .office_store import build_inventory
         return build_inventory(tuple(adapters), client=selected_client, engines=requested_engines)

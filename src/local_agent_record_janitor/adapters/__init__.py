@@ -6,6 +6,7 @@ from .orca import OrcaAdapter
 from .herdr import HerdrAdapter
 from ..workbuddy_store import WorkBuddyAdapter
 from ..office_store import OfficeAdapter
+from ..paseo_store import PaseoAdapter
 
 __all__ = [
     "AdapterScanError",
@@ -18,4 +19,5 @@ __all__ = [
     "HerdrAdapter",
     "WorkBuddyAdapter",
     "OfficeAdapter",
+    "PaseoAdapter",
 ]

@@ -3,7 +3,7 @@
 状态：P0–P4 的限定功能已落地；Herdr 持久化与显式本机 live metadata 保持只读，
 全部 writer 归属仍未知。P5 已扩展 Orca/Codex/Windows 精确原生组合至有界配置、
 凭据和已有启动产物；P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
-规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公与 QoderWork 的独立适配。
+规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公、QoderWork 与 Paseo 的独立适配。
 当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
@@ -25,6 +25,11 @@ SDK 位置，再逐组合证明 SQLite、转录、草稿与恢复副本闭包。
 完整 writer 尚受 LevelDB 草稿、共享 SDK UUID、自动化/import/fork/ACP、会话缓存、
 办公版后台进程关闭及 profile/SDK 双根持久恢复协议限制。未知格式、远程关联及生成文档不进入自动删除；边界见
 [办公版适配](adapters.md#千问办公与-qoderworkcn-只读盘点)。
+
+Paseo 已接入固定源码下的 agent 注册快照盘点：保留 profile 身份、归档和恢复引用，
+重复副本不覆盖。提供者根目录、daemon/监督进程/插件 writer、调度和子代理引用尚不能
+形成安全删除与终验契约，全部 writer 保持关闭；[适配边界](adapters.md#paseoagent-注册记录只读盘点)
+说明本轮只读交付范围与后续门槛。
 
 目标是让同一套记录清理流程正确回答：记录属于哪个客户端和存储、被谁引用、关系是否
 完整、哪些动作确实可执行，以及执行后还剩什么。新增客户端应复用身份、计划、保护和

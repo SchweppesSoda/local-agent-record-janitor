@@ -524,6 +524,46 @@ macOS/Linux 实机或 CI 验收仍未完成。
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。
 
+### Paseo：agent 注册记录只读盘点
+
+固定依据为上游 `0.11.0-beta.3`、commit
+[`05b074764dd1be4b7b04c7ab403ebeb88393aee3`](https://github.com/getpaseo/paseo/tree/05b074764dd1be4b7b04c7ab403ebeb88393aee3)。
+`paseo` 是独立客户端身份；记录 ID 属于 Paseo profile，不能替代提供者的 native ID。
+仅选中该客户端或显式传入 `--paseo-root` 才发现其根目录，默认 `PASEO_HOME` 或
+`~/.paseo`，不扫描其他主机或连接 daemon。相同物理 profile 的已证明路径别名合并，
+链接/reparse 根和文件在读取前拒绝。
+
+[AgentStorage](https://github.com/getpaseo/paseo/blob/05b074764dd1be4b7b04c7ab403ebeb88393aee3/packages/server/src/server/agent/agent-storage.ts)
+保存没有独立版本字段的 JSON，读取 `agents/*.json` 与 `agents/*/*.json`；新记录位于
+cwd 编码的项目目录。reader 检查已知字段和有界元数据形状，不把缺失或损坏的目录解释为
+零记录成功。未发布的 `.tmp` 不读取，更深目录报告未覆盖。单文件上限 4 MiB、总读取
+预算 64 MiB（最多额外一个检测越界的字节）、目录项上限 20,000；单个文件读取期间的
+身份、大小、mtime 或扫描到的目录变化会使观察不完整。这不是跨文件事务快照，也不能
+证明完成观察后文件不再变化。
+
+输出采用明确字段清单：Paseo ID、provider、cwd、workspaceId、时间、保存的 status、
+archivedAt、internal、daemon owner ID、固定 parent-agent 标签、恢复 ID 及快照来源/指纹。
+`persistence` 和 `runtimeInfo` 的引用分别保留。Codex/Claude 等已核实 provider 的
+标量 `nativeHandle` 为 ID，Pi/omp 的为不透明 session 文件路径；不会打开该文件或
+推断 native root。未知 provider 原名保留在元数据中，引擎投影为 `unsupported:*`；
+未知或对象类型的 nativeHandle 只报告存在与未解析状态。JSON 中的 title、任意 labels、
+config、provider metadata、runtime extra 和 lastError 不进入输出；原生转录不读取。
+同 profile 重复 agent ID 保留每个快照与引用，并报告冲突，不采用上游缓存的最后覆盖值。
+
+所有 capability 的删除与 verify 标志关闭，`delete plan/run/apply`、`operation status/verify`
+不会把只读结果升级为删除完成。`records --inspect-clients` 只说明持久元数据观察范围，
+`clients_closed=null`、`coverage_complete=false`；保存的 `closed` 状态不是进程关闭证据。
+
+当前完整性只覆盖 `persisted_agent_registry`，不包含 schedules、project/workspace 注册表、
+原生 provider 历史、daemon 内存、客户端缓存或所有子代理关系。Codex/Claude 的 native root
+取决于启动环境及 provider 配置，快照中的 ID/cwd 不足以绑定它。Paseo 的
+[删除请求](https://github.com/getpaseo/paseo/blob/05b074764dd1be4b7b04c7ab403ebeb88393aee3/packages/server/src/server/session.ts#L3161)
+通过缓存写入屏障、关闭运行时及排空队列后移除注册快照；该动作不是通用原生历史删除，
+错误也可能只记录到日志后继续发送删除事件。直接 unlink 则可能被内存缓存写回。
+归档会调用 provider 生命周期并可能级联子代理；桌面退出还可能保留后台 daemon，
+监督进程可能重启 worker。后续 writer 必须明确批准副本/调度与父子引用范围、证明全部
+相关写入者停止并提供持久 journal/只读恢复，不能用归档或删除事件代替终验。
+
 ## 既有 Codex Finding adapter
 
 Codex compatibility adapter 将外部平台的删除状态转换为保守的 `Finding`，不能直接

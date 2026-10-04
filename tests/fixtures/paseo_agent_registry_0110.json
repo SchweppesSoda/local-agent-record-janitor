@@ -1,0 +1,83 @@
+{
+  "upstream_commit": "05b074764dd1be4b7b04c7ab403ebeb88393aee3",
+  "upstream_version": "0.11.0-beta.3",
+  "provenance": "Synthetic AgentStorage.upsert/parseStoredAgentRecord output; cwd replaced for portability",
+  "records": [
+    {
+      "layout": "project",
+      "record": {
+        "id": "synthetic-archived",
+        "provider": "claude",
+        "cwd": "/synthetic/paseo-project",
+        "createdAt": "2026-10-04T00:00:00.000Z",
+        "updatedAt": "2026-10-04T00:00:00.000Z",
+        "title": "Synthetic archived record",
+        "labels": {},
+        "lastStatus": "closed",
+        "persistence": {
+          "provider": "claude",
+          "sessionId": "synthetic-claude-session"
+        },
+        "archivedAt": "2026-10-04T00:00:00.000Z"
+      }
+    },
+    {
+      "layout": "project",
+      "record": {
+        "id": "synthetic-current",
+        "provider": "codex",
+        "cwd": "/synthetic/paseo-project",
+        "workspaceId": "synthetic-workspace",
+        "createdAt": "2026-10-04T00:00:00.000Z",
+        "updatedAt": "2026-10-04T00:00:00.000Z",
+        "title": "Synthetic current record",
+        "labels": {},
+        "lastStatus": "closed",
+        "runtimeInfo": {
+          "provider": "codex",
+          "sessionId": "synthetic-native-session",
+          "model": null
+        },
+        "persistence": {
+          "provider": "codex",
+          "sessionId": "synthetic-native-session",
+          "nativeHandle": "synthetic-native-session"
+        },
+        "archivedAt": null
+      }
+    },
+    {
+      "layout": "project",
+      "record": {
+        "id": "synthetic-no-session",
+        "provider": "synthetic-provider-alias",
+        "cwd": "/synthetic/paseo-project",
+        "createdAt": "2026-10-04T00:00:00.000Z",
+        "updatedAt": "2026-10-04T00:00:00.000Z",
+        "title": "Synthetic no-session record",
+        "labels": {},
+        "lastStatus": "closed",
+        "runtimeInfo": {
+          "provider": "synthetic-provider-alias",
+          "sessionId": null
+        },
+        "persistence": null,
+        "archivedAt": null
+      }
+    },
+    {
+      "layout": "legacy",
+      "record": {
+        "id": "synthetic-legacy",
+        "provider": "codex",
+        "cwd": "/synthetic/paseo-project",
+        "createdAt": "2026-10-04T00:00:00.000Z",
+        "updatedAt": "2026-10-04T00:00:00.000Z",
+        "title": "Synthetic flat legacy record",
+        "labels": {},
+        "lastStatus": "closed",
+        "persistence": null
+      }
+    }
+  ]
+}

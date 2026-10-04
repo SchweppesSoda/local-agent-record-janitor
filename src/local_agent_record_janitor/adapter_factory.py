@@ -96,6 +96,14 @@ def create_default_adapters(args: Any) -> list[object]:
     codex_bin = args.codex_bin.expanduser() if args.codex_bin else None
     selected = selected_platforms(args.platform)
     adapters: list[object] = []
+    paseo_roots = tuple(getattr(args, "paseo_root", ()) or ())
+    if "paseo" in selected or str(getattr(args, "client", "")) == "paseo" or paseo_roots:
+        from .paseo_store import PaseoAdapter, default_root, local_root
+        roots = paseo_roots or (default_root(),)
+        # Validate the original spelling before canonicalization can conceal
+        # a link. Physical alias deduplication happens after reader checks.
+        unique = {os.path.normcase(os.path.normpath(os.fspath(root))): root for root in roots}
+        adapters.extend(PaseoAdapter(profile_root=local_root(root)) for root in unique.values())
     from .office_store import PROFILES, default_profile_roots
     for client in PROFILES:
         requested = tuple(getattr(args, client + "_root", ()) or ())
