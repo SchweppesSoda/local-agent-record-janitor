@@ -2,8 +2,8 @@
 
 状态：P0–P4 的限定功能已落地；后续完整删除流程继续开发。办公版已接入本地
 SQLite、SDK 文件和 Chromium 界面状态的双根删除及冷验证；Orca 的限定 Windows/Codex
-组合已补齐普通 structured-chat 的原生链、前端及恢复副本操作。Herdr、Paseo 的
-完整删除仍待补齐。此前 P5 的 Orca/Codex/Windows 原生组合与 P6
+组合已补齐普通 structured-chat 的原生链、前端及恢复副本操作。Herdr 已接入 Windows
+显式绑定下的原生、窗格、历史和恢复副本清理；Paseo 完整删除继续开发。此前 P5 的 Orca/Codex/Windows 原生组合与 P6
 平台验收仅代表当时范围，不能替代新增全流程的验收。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公、QoderWork 与 Paseo 的独立适配。
 当前功能以 [设计与安全边界](design.md)、
@@ -16,7 +16,7 @@ plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读�
 旧 v1 `status/verify` 继续只读诊断，不重发未知 mutation。Orca 的有界发现与 journal
 reader 已接入同一公共清单和保护链；含新保护来源的顶层计划采用条件 v2 冻结 locator，
 旧 v1 不补字段或重 hash。Herdr schema3 的 current/restore reader 已接入公共清单，
-所有引用保持 rootless；明确选择 Herdr 的 records 可显式探测 protocol22 metadata，
+默认引用保持 rootless；完整删除单独使用显式原生根和运行文件绑定。明确选择 Herdr 的 records 可显式探测 protocol22 metadata，
 运行投影复用同次缓存，metadata 完整性与 writer 覆盖分别报告，删除限制保留。当前不承诺发现任意
 自定义或未证明关联的存储。
 

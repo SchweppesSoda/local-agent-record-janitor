@@ -175,7 +175,8 @@ class TargetedReferenceGuard:
                 if native is not None and native.store.backend == "codex" and native.store.canonical_path == target_home:
                     if native.record_id in affected:
                         from .orca_authorization import permits_reference
-                        if permits_reference(reference, execution=True):
+                        from .herdr_cleanup import permits_reference as herdr_permits_reference
+                        if permits_reference(reference, execution=True) or herdr_permits_reference(reference, execution=True):
                             continue
                         if (reference.evidence_complete is True and reference.lifecycle is ReferenceLifecycle.DELETED
                                 and reference.kind in {ReferenceKind.CURRENT, ReferenceKind.HISTORY}):
@@ -185,7 +186,9 @@ class TargetedReferenceGuard:
                             f"{descriptor.client} reference: {native.record_id}")
             limit = descriptor.limit_for("codex")
             from .orca_authorization import permits
-            if not limit.native_delete and not (descriptor.client == "orca" and permits(home, affected, execution=True)):
+            from .herdr_cleanup import permits as herdr_permits
+            if (not limit.native_delete and not (descriptor.client == "orca" and permits(home, affected, execution=True))
+                    and not herdr_permits(descriptor.client, "codex", home, affected, execution=True)):
                 raise TargetedGuardError(f"client_capability_limit: {descriptor.client}/codex native_delete is unavailable")
         except TargetedGuardError:
             raise

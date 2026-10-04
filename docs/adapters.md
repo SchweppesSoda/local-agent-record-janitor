@@ -35,7 +35,7 @@
 | native / Codex、Pi、Claude | 对应引擎专用 writer | 无前端行的独立记录正常；每个物理 root 分别批准 |
 | Orca / Codex | journal 引用与已证明 homes 的原生清单；限定 Windows 原生删除 | 静态能力关闭，精确 v3 operation 逐目标资格见下文；未知来源保持 incomplete |
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
-| Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore；显式 live metadata | rootless；全部 writer 归属未知，全部写入及自身 verify 关闭 |
+| Herdr / Codex、Claude、Pi | 持久化 current/restore；显式 live metadata | 默认 rootless 只读；Windows 显式绑定有原生、前端及恢复副本的完整清理路径 |
 | WorkBuddy / WorkBuddy | 独立 SQLite、精确会话 artifacts 和 UI 引用 | 仅支持已识别 5.6.2 本地终态范围，Windows writer 覆盖及完整冻结证据；未知副本只读 |
 | 千问办公 / QwenWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 1.2.5 CN schema；草稿/恢复/共享 SDK 范围未闭合，写入和 verify 关闭 |
 | QoderWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 0.9.18 CN schema；不与 Qoder IDE/CLI 混用，写入和 verify 关闭 |
@@ -556,12 +556,29 @@ mutation 命令，不启动/attach/restore，也不查询 `agent.get`、终端�
 JSON 中的 private 字段可能被读取，但不投影或执行；server 自身可能写请求日志或处理
 已有 title 事件，不能承诺产品内存/文件系统零副作用。
 
-所有 native/frontend/remote 写入及 Herdr 自身 verify 关闭；选择
-Herdr 的 delete plan/run 结构化 blocked，无授权动作的 apply/status/verify 保留该结果。
+上述默认无绑定 adapter 的写入保持关闭，无授权动作的 apply/status/verify 保留 blocked 结果。
 rootless Herdr 不进入 Orca `guard_sources`，也不改变旧 v1 hash 或只读恢复契约。
-合成临时来源已通过 Windows/macOS/Linux × Python 3.10/3.12 的实际 CI，包含
-Windows 临时 named pipe 与 macOS/Linux 临时 Unix socket。全部 runtime writer
-归属及产品实机验收仍未完成，平台测试通过不授予删除能力。
+
+### Herdr：Windows 显式绑定的完整清理
+
+`--herdr-bindings` 载入 `larj.herdr-bindings.v1` JSON，按 `(profile, session, engine)`
+绑定原生根目录。Codex/Claude 使用持久 ID；Pi 使用绝对 session JSONL 路径、
+实际 header ID、session root 与 agent directory。同 ID 跨根必须使用精确窗格或路径选择，
+不能按裸 ID 广播。一个计划选择一个 profile；多个 Codex 根需分别创建计划。
+
+绑定后的 operation 复用既有 Codex、Pi、Claude 删除器。审批冻结完整原生影响范围、
+选中窗格和全部 current/recovery/tmp 副本；history 必须能通过上游 Rust 指纹关联到
+同一 session 的结构快照。删除整个已归属窗格，同时修正布局、稳定编号、选中项和
+历史指纹，保留未选窗格的字段与终端内容。未知副本命名、无来源 history、未归属
+resume/launch 命令和未知 schema 均阻断，不能以清掉当前视图代替恢复闭包。
+
+Windows apply 冻结并重新核对绑定的 Herdr 可执行文件、原始拼写的 API 管道和
+已有恢复文件，在整个原生/前端批次及终验期间持有系统句柄。进程枚举不得发现存活
+Herdr writer；不会停止应用。该边界仅覆盖冻结的 binary 和 namespace，无法将未知
+binary、自定义 socket 或 Unix 平台视为已排除。文件经同一句柄读取、就地写入和 flush；
+多个文件不承诺整体原子性。中途写入后保持 unknown，不重发删除；只读 verify 检查完整
+after，原生批次已完成而前端尚未开始时可冷继续。实际 Codex 二进制与合成 Herdr
+文件的隔离验收不等同于启动真实 Herdr GUI/server 的端到端验收。
 
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。

@@ -27,7 +27,7 @@ def decode(raw):
     if len(raw) > 16 * 1024 * 1024:
         fail("json_budget_exceeded")
     try:
-        value = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
         todo, count = [(value, 0)], 0
         while todo:
             item, depth = todo.pop()
@@ -217,6 +217,9 @@ def _selection(old, surviving, *, nullable=False):
 def prune_snapshot(snapshot, owned):
     """owned is the exact set of (old workspace, old tab, u32 pane) locators."""
     projection = normalized(snapshot)
+    if not owned:
+        return deepcopy(snapshot), [(wi, [(ti, set(map(int, tab["panes"])))
+            for ti, tab in enumerate(workspace["tabs"])]) for wi, workspace in enumerate(snapshot["workspaces"])]
     result, kept_workspaces, coordinates = deepcopy(snapshot), [], []
     for wi, workspace in enumerate(result["workspaces"]):
         if not any(w == wi for w, _t, _p in owned):
@@ -233,7 +236,7 @@ def prune_snapshot(snapshot, owned):
                     next_pane += 1
         tab_numbers = original["public_tab_numbers"]
         effective_tabs = [tab_numbers[i] if i < len(tab_numbers) else i + 1 for i in range(len(original["tabs"]))]
-        next_tab = max([original["next_public_tab_number"], 1, *(v + 1 for v in effective_tabs)])
+        next_tab = max([original["next_public_tab_number"], 1, *(v + 1 for v in tab_numbers), *(v + 1 for v in effective_tabs)])
         integer(next_pane); integer(next_tab)
         kept_tabs, tab_coordinates, changed = [], [], False
         for ti, tab in enumerate(workspace["tabs"]):
@@ -259,7 +262,7 @@ def prune_snapshot(snapshot, owned):
             continue
         if changed:
             workspace["tabs"] = [workspace["tabs"][ti] for ti in kept_tabs]
-            survivors = {str(pid) for tab in workspace["tabs"] for pid in leaves(tab["layout"])}
+            survivors = {str(int(pid)) for tab in workspace["tabs"] for pid in tab["panes"]}
             workspace["public_pane_numbers"] = {key: value for key, value in pane_numbers.items() if key in survivors}
             workspace["next_public_pane_number"] = next_pane
             workspace["public_tab_numbers"] = [effective_tabs[ti] for ti in kept_tabs]

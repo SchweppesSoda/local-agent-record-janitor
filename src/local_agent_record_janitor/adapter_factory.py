@@ -56,6 +56,13 @@ def discover_orca_guards(args: Any) -> tuple[OrcaAdapter, ...]:
 
 def discover_herdr_adapters(args: Any) -> tuple[HerdrAdapter, ...]:
     """Bounded profiles; socket queries require selected Herdr + inspection."""
+    if getattr(args, "herdr_bindings", None) is not None:
+        from .herdr_bound_adapter import HerdrBoundAdapter, load_manifest
+        adapter = HerdrBoundAdapter(load_manifest(args.herdr_bindings))
+        roots = tuple(getattr(args, "herdr_root", ()) or ())
+        if roots and (len(roots) != 1 or canonical_path(roots[0]) != canonical_path(adapter.profile_root)):
+            raise ValueError("herdr_binding_profile_mismatch")
+        return (adapter,)
     requested = tuple(getattr(args, "herdr_root", ()) or ())
     selected = str(getattr(args, "client", "")) == "herdr" or "herdr" in (getattr(args, "platform", ()) or ())
     roots = [os.fspath(root) for root in requested]
@@ -84,6 +91,18 @@ def discover_herdr_adapters(args: Any) -> tuple[HerdrAdapter, ...]:
     unique = dict.fromkeys(roots)
     inspect_live = selected and bool(getattr(args, "inspect_clients", False))
     return tuple(HerdrAdapter(profile_root=root, inspect_live=inspect_live) for root in unique)
+
+
+def discover_shared_codex_guards(*, appdata=None):
+    """Existing frontend owners, independently of the selected candidate client."""
+    base = (appdata or default_appdata()).expanduser()
+    result = []
+    for profile in resolve_cindy_profiles(base):
+        result.append(CindyAdapter(database=profile.database, codex_home=profile.codex_home,
+                                   cindy_root=profile.root))
+    for database in discover_aionui_databases(base):
+        result.append(AionUIAdapter(database=Path(database), codex_home=default_codex_home()))
+    return tuple(result)
 
 
 def create_default_adapters(args: Any) -> list[object]:

@@ -89,6 +89,7 @@ class ClientCapabilityLimits:
                 native_root: Path | str | None = None, target_ids: Sequence[str] = (),
                 execution: bool = False) -> tuple[str, ...]:
         from .orca_authorization import permits, permits_frontend, permits_error
+        from .herdr_cleanup import permits as herdr_permits
         reasons = list(
             f"{CLIENT_CAPABILITY_LIMIT}: {descriptor.client}/{engine} {field} is unavailable"
             + (f" ({limit.reason})" if limit.reason else "")
@@ -99,6 +100,7 @@ class ClientCapabilityLimits:
                      and permits(native_root, target_ids, execution=execution))
             and not (descriptor.client == "orca" and field == "frontend_session_delete"
                      and permits_frontend(native_root, target_ids, execution=execution))
+            and not herdr_permits(descriptor.client, engine, native_root, target_ids, field=field, execution=execution)
         )
         if native_root is not None and (field == "native_delete" or field == "frontend_project_delete" and not sources):
             root_key = canonical_path(native_root)

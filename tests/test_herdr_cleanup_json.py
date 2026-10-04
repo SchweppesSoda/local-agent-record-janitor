@@ -71,6 +71,29 @@ class HerdrCleanupJsonTests(unittest.TestCase):
         value["workspaces"][0]["tabs"][0]["panes"]["00"] = pane(Path("/synthetic"))
         with self.assertRaises(HerdrCleanupError):
             normalized(value)
+
+    def test_saved_high_tab_counter_and_off_layout_survivor_are_preserved(self):
+        value = self.fixture()
+        workspace = value["workspaces"][0]
+        workspace["public_tab_numbers"] = [5, 7, 99]
+        workspace["tabs"][0]["panes"]["9"] = pane(Path("/synthetic"))
+        workspace["public_pane_numbers"] = {"9": 50}
+        after, _ = prune_snapshot(value, {(0, 0, 0)})
+        self.assertEqual(after["workspaces"][0]["next_public_tab_number"], 100)
+        self.assertEqual(after["workspaces"][0]["public_pane_numbers"]["9"], 50)
+
+    def test_unselected_out_of_range_selection_is_not_normalized(self):
+        value = self.fixture()
+        value["active"] = value["selected"] = 9
+        after, _ = prune_snapshot(value, set())
+        self.assertEqual(after, value)
+
+    def test_rust_utf8_input_contract_rejects_other_json_encodings(self):
+        from local_agent_record_janitor.herdr_cleanup_json import decode
+        raw = json.dumps(self.fixture())
+        for encoding in ("utf-16", "utf-32", "utf-8-sig"):
+            with self.subTest(encoding=encoding), self.assertRaises(HerdrCleanupError):
+                decode(raw.encode(encoding))
         value = self.fixture()
         value["workspaces"][0]["tabs"][0]["panes"]["0"]["agent_resume"]["argv"] = "not-an-array"
         with self.assertRaises(HerdrCleanupError):

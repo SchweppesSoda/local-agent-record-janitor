@@ -87,6 +87,15 @@ def current_guard_sources(adapters: Iterable[object] = (), *, client: str = "nat
     from .adapter_factory import discover_orca_guards
 
     adapters = tuple(adapters)
+    # A bound multi-provider client may delete a shared native record. Keep
+    # known frontend owners even when candidate discovery selected only it.
+    from .herdr_bound_adapter import HerdrBoundAdapter
+    if any(isinstance(adapter, HerdrBoundAdapter) for adapter in adapters):
+        from .adapter_factory import discover_shared_codex_guards
+        present = {(describe_adapter(a).client, canonical_path(getattr(a, "database", None)))
+                   for a in adapters if getattr(a, "database", None) is not None}
+        adapters += tuple(a for a in discover_shared_codex_guards(appdata=appdata)
+                          if (describe_adapter(a).client, canonical_path(a.database)) not in present)
     requested = tuple(orca_roots)
     # A supplied explicit profile is the selection. Still observe an existing
     # default protection profile, but do not invent a missing default as a
@@ -117,7 +126,11 @@ def refresh_guard_sources(adapters: Iterable[object]) -> tuple[object, ...]:
     """Refresh known product metadata, without adding native catalog targets."""
     adapters = tuple(adapters)
     for adapter in adapters:
-        if describe_adapter(adapter).client == "orca":
+        from .herdr_bound_adapter import HerdrBoundAdapter
+        client = describe_adapter(adapter).client
+        if client in {"cindy", "aionui"}:
+            adapter.invalidate_frontend_snapshot()
+        if client == "orca" or isinstance(adapter, HerdrBoundAdapter):
             adapter.snapshot_references(refresh=True)
     return adapters
 

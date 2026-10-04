@@ -151,7 +151,7 @@ local-agent-record-janitor records --client paseo --paseo-root 'D:\profiles\pase
 Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；高层 operation 的
 精确 Windows/Codex 组合支持普通本机会话的原生链、界面和恢复副本清理，按冻结证据逐目标核查删除资格，见
 [限定组合](docs/adapters.md#orca精确原生删除的限定组合)。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
-并可显式查询本机 live metadata；native root 和全部 writer 归属仍未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
+并可显式查询本机 live metadata。Windows 上通过显式绑定清单，可清理 Codex/Claude/Pi 原生记录、窗格、终端历史及恢复副本，并沿用审批和冷验证流程。关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
 
 ## 为什么需要它
@@ -182,7 +182,7 @@ OpenAI 稳定 API。
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
 | WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session` 与独立 `remove_workbuddy_ui_reference`；已证明的本地终态会话或仅置顶引用，未知归属及云同步关联阻止删除 |
 | Orca | 本机 journal、profile 界面及恢复副本、已证明的 managed Codex home | 限定 Windows/Codex 组合支持完整操作及冷验证；未知恢复、其他引擎、runtime home 与远端写入关闭 |
-| Herdr | 持久化 current/restore 引用及显式本机 live metadata | 只读盘点；native root 与完整 writer 归属未证明，删除及自身终验关闭 |
+| Herdr | 持久化 current/restore 引用及显式本机 live metadata | Windows 显式绑定支持原生记录、窗格、历史和恢复副本清理；默认无绑定盘点仍只读 |
 | 千问办公 / QoderWork CN | 已核实 CN schema、独占 SDK 记录、界面缓存与逐会话文件 | 本地会话分 SDK/profile 两批删除并冷验证；云端、共享或未知恢复引用阻止对应目标 |
 | Paseo | 当前及旧格式 agent 注册快照、归档状态和恢复引用 | 只读盘点；不推断 provider 原生存储归属或 daemon 已停止 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
@@ -443,8 +443,11 @@ current/restore 来源分别展示；公共 pane ID 不等于持久化 pane ID�
 或 live/persisted 冲突仍返回退出码 `1` 和 `goal_status=blocked`，不表示零记录。
 API 请求可能触发 server 自身日志或已有事件处理，
 不承诺产品文件系统零写。
-损坏或未知版本来源也保留独立错误。`delete plan/run` 选择 Herdr 返回只读 capability
-blocker；无授权动作的 blocked 计划经 apply/status/verify 仍保持 blocked。
+损坏或未知版本来源也保留独立错误。完整删除使用 `delete plan --client herdr
+--herdr-bindings bindings.json --record-id ID --out plan.json`；绑定清单明确会话、引擎、
+原生目录和 Herdr 可执行文件，不能用项目 cwd 代替。Windows 执行期间持有运行文件、
+已知管道和恢复文件的系统句柄，先删除原生记录，再清理前端并终验。
+未提供绑定的计划保持只读；macOS/Linux 写入、未知格式及无法证明归属的恢复命令仍阻断。
 来源、命名和隐私边界见 [Herdr 接入说明](docs/adapters.md#herdr已接入持久化只读引用)。
 
 Pi session 使用独立清单，不会伪装成 Codex native store。只查看 Pi：

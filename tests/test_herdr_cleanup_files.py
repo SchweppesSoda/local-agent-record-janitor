@@ -15,7 +15,7 @@ class HerdrClosureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.bindings = [{"session": "default", "engine": "codex", "kind": "id", "value": CODEX_ID,
                           "native_root": canonical_path(self.root / "native")}]
         self.value = snapshot(self.root / "project", (tab({0: pane(self.root, agent_session(), private="ERASE"),
@@ -72,6 +72,26 @@ class HerdrClosureTests(unittest.TestCase):
         write_snapshot(self.root / "session-history.json", {**self.history, "layout_fingerprint": "0" * 64})
         with self.assertRaisesRegex(HerdrCleanupError, "history_provenance_unverified"):
             cleanup.freeze(self.root, self.bindings)
+
+    def test_opaque_resume_only_recovery_cannot_survive_selected_native_delete(self):
+        write_snapshot(self.root / "session.json", self.value)
+        recovery = snapshot(self.root, (tab({5: pane(self.root, agent_resume={"source": "herdr:codex",
+            "agent": "codex", "argv": ["codex", "resume", CODEX_ID]})}),))
+        write_snapshot(self.root / "session-backups" / recovery_name(), recovery)
+        with self.assertRaisesRegex(HerdrCleanupError, "unselected_opaque_resume_unverified"):
+            cleanup.freeze(self.root, self.bindings)
+
+    def test_unselected_same_content_replacement_is_not_after_proof(self):
+        self.populated()
+        evidence = cleanup.freeze(self.root, self.bindings)
+        for relative, raw in cleanup.replacements(evidence).items():
+            (self.root / relative).write_bytes(raw)
+        target = self.root / "sessions/unselected/session.json"
+        raw = target.read_bytes()
+        target.rename(self.root / "saved-unselected.json")
+        target.write_bytes(raw)
+        with self.assertRaisesRegex(HerdrCleanupError, "file_identity_changed"):
+            cleanup.remaining(evidence)
         write_snapshot(self.root / "session-backups" / "unrecognized.pending", self.value)
         with self.assertRaisesRegex(HerdrCleanupError, "recovery_name_unverified"):
             cleanup.freeze(self.root, self.bindings)

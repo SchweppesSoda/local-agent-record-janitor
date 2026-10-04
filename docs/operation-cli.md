@@ -161,7 +161,7 @@ within the user's existing scope is required for remaining records. Other
 families, mixed frontend evidence and Orca startup boundaries still require
 their original top-level plan.
 
-Herdr is inventory-only. By default, `records --client herdr
+Herdr is inventory-only without an explicit binding manifest. By default, `records --client herdr
 [--herdr-root PATH ...]` reads snapshot schema3 current and recognized recovery
 files across default/named sessions. Explicit roots replace default candidate
 profiles. Rootless IDs and Pi paths do not prove native ownership or join a
@@ -183,11 +183,37 @@ Records may return exit code `0` and `goal_status=complete` for its explicit
 retaining these cleanup restrictions. Actual read/schema/transport/conflict
 failures still return blocked. Source errors
 remain scoped to the selected profile/source. Herdr does not add Orca
-`guard_sources`; all native/frontend/remote mutation and its own verify
-capabilities are false. Delete plan/run returns structured capability blockers;
+`guard_sources`; the rootless reader's mutation and verify capabilities stay false.
+Delete plan/run without bindings returns structured capability blockers;
 apply/status/verify preserve a blocked plan with no authorized actions instead
 of interpreting the empty action set as successful cleanup. See
 [the source and coverage limits](adapters.md#herdr已接入持久化只读引用).
+
+On Windows, `delete plan --client herdr --herdr-bindings bindings.json
+--record-id ID --out plan.json` enables the qualified native → frontend workflow.
+Use the normal operation ID, immutable plan SHA and `--clients-closed` acknowledgement
+for apply; status/verify rehydrate the frozen binding without reading the input file again.
+An example binding is:
+
+```json
+{
+  "schema_version": "larj.herdr-bindings.v1",
+  "profile_root": "D:/HerdrConfig",
+  "runtime_binaries": ["D:/Apps/Herdr/herdr.exe"],
+  "native_stores": [
+    {"session": "default", "engine": "codex", "root": "D:/CodexHome", "codex_binary": "D:/Apps/Codex/codex.exe"},
+    {"session": "work", "engine": "claude", "root": "D:/ClaudeHome"},
+    {"session": "work", "engine": "pi", "root": "D:/PiHome/sessions", "agent_dir": "D:/PiHome"}
+  ]
+}
+```
+
+Every observed agent pane needs an explicit session/engine root. `default` names the
+profile's root session; other names refer to `sessions/<name>`. Select a native ID,
+exact Pi path, or persisted `session/workspaces/N/tabs/N/panes/N` locator. All panes
+and recovery copies bound to the selected native record enter its frozen closure.
+The input declares root ownership; cwd and resume arguments never supply it.
+See [the lifecycle and recovery limits](adapters.md#herdrwindows-显式绑定的完整清理).
 
 Cindy Codex plans include ordinary native conversations from the same
 client-qualified inventory used by `records`, together with their frozen

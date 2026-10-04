@@ -163,7 +163,7 @@ def _mutation_resource_key(action: Any, family: str) -> tuple[str, ...]:
     if family == "remove_frontend_reference":
         attributes = ("frontend_database_paths", "owner_process_root")
     elif family in {"delete_schedule_run", "delete_workbuddy_session", "remove_workbuddy_ui_reference",
-                    "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend"}:
+                    "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend", "delete_herdr_frontend"}:
         attributes = ("resource_path", "owner_process_root")
     elif family == "delete_frontend_session":
         attributes = (

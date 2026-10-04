@@ -102,6 +102,20 @@ def _owned(snapshot, session, bindings):
                         codec.fail("native_handle_source_unverified")
                     owned.add((wi, ti, int(pid)))
                     matched.add(key)
+    if session in {item["session"] for item in bindings}:
+        for wi, workspace in enumerate(snapshot["workspaces"]):
+            for ti, tab in enumerate(workspace["tabs"]):
+                for pid, pane in tab["panes"].items():
+                    if (wi, ti, int(pid)) not in owned:
+                        handle, resume = pane.get("agent_session"), pane.get("agent_resume")
+                        if resume is not None:
+                            engine = handle.get("agent") if isinstance(handle, dict) else None
+                            flag = {"codex": "resume", "claude": "--resume", "pi": "--session"}.get(engine)
+                            if (flag is None or resume.get("source") != handle.get("source")
+                                    or resume.get("agent") != engine or resume.get("argv") != [engine, flag, handle["value"]]):
+                                codec.fail("unselected_opaque_resume_unverified")
+                        if pane.get("launch_argv") is not None:
+                            codec.fail("unselected_opaque_launch_unverified")
     return owned, matched
 
 
@@ -182,6 +196,9 @@ def remaining(evidence, *, reader=None):
     for item in evidence["files"]:
         current, _ = (reader or files.read_file)(root, item["before"]["path"])
         if current["sha256"] == item["after_sha256"] and current["size"] == item["after_size"]:
+            if (current["identity"] != item["before"]["identity"] or current["mode"] != item["before"]["mode"]
+                    or item["before"]["sha256"] == item["after_sha256"] and current != item["before"]):
+                codec.fail("file_identity_changed")
             continue
         if current != item["before"]:
             codec.fail("file_state_unknown")

@@ -282,6 +282,14 @@ def frozen_operation_roots(document: Mapping[str, Any]) -> tuple[Path, ...]:
     if involved - paths.keys():
         raise OperationStoreError("Frozen operation has an unresolved mutation root")
     extra = set()
+    from .herdr_cleanup import evidence_from_document, validate as validate_herdr
+    herdr = evidence_from_document(document)
+    if herdr is not None:
+        validate_herdr(herdr)
+        for target in herdr["native_targets"]:
+            # Pi's durable operation root is agent_dir; session_root is a
+            # bounded transcript layout and must not receive journal trees.
+            extra.add(Path(target["binding"]["agent_dir"] if target["engine"] == "pi" else target["root"]))
     for action in document.get("actions", ()):
         if action.get("kind") == "delete_orca_frontend":
             from .orca_cleanup import validate_action

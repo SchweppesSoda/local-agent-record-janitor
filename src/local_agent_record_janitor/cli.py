@@ -1029,6 +1029,8 @@ def _add_common_arguments(
                         help="Orca userData 根目录（可重复；仅本机 metadata 盘点与保护）")
     parser.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
                         help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
+    parser.add_argument("--herdr-bindings", type=Path, metavar="JSON",
+                        help="Herdr 完整清理的显式会话/原生目录/运行文件绑定清单（Windows）")
     parser.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
                         help="WorkBuddy 独立配置根目录（可重复；默认 WORKBUDDY_CONFIG_DIR 或 ~/.workbuddy）")
     parser.add_argument("--paseo-root", action="append", default=[], type=Path, metavar="PATH",
@@ -1466,7 +1468,8 @@ def _run_operation_backend(
 
     try:
         if verb == "plan":
-            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}:
+            if supplied_adapters is None and ((scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}
+                    or (scope or {}).get("client") == "herdr" and getattr(args, "herdr_bindings", None)):
                 supplied_adapters = _create_default_adapters(args)
             operation_kwargs: dict[str, Any] = {
                 "client": str((scope or {}).get("client") or ""),
@@ -1512,7 +1515,8 @@ def _run_operation_backend(
                 operation_kwargs["progress_callback"] = progress_callback
             result = coordinator.apply_operation(**operation_kwargs)
         elif verb == "run":
-            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}:
+            if supplied_adapters is None and ((scope or {}).get("client") in {"qwenwork", "qoderwork", "paseo"}
+                    or (scope or {}).get("client") == "herdr" and getattr(args, "herdr_bindings", None)):
                 supplied_adapters = _create_default_adapters(args)
             operation_kwargs = {
                 "client": str((scope or {}).get("client") or ""),
