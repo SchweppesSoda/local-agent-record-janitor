@@ -120,7 +120,7 @@ class HerdrLiveIntegrationTests(unittest.TestCase):
             return pong(request["id"], version="99.0.0") if request["method"] == "ping" else live_snapshot(request["id"], version="99.0.0")
         with Endpoint(self.profile / "herdr.sock", future):
             code, result = self.invoke("--inspect-clients")
-            self.assertEqual(len(result["targets"]), 5)
+            self.assertEqual(len(result["targets"]), 5, result)
             self.assertIn("live_version_unverified", [e["message"] for e in result["store_errors"]])
             self.assertFalse(result["client_ownership"][0]["probe_complete"])
             self.assertFalse(result["client_ownership"][0]["coverage_complete"])
@@ -176,6 +176,13 @@ class HerdrLiveIntegrationTests(unittest.TestCase):
         self.assertEqual(names, ["\\\\.\\pipe\\" + endpoint] * 2)
         self.assertEqual(len(result["targets"]), 5)
         self.assertEqual(result["client_ownership"][0]["sessions"][0]["endpoint"], endpoint)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named pipe listener lifecycle")
+    def test_server_scheduling_between_requests_does_not_remove_the_endpoint(self):
+        with Endpoint(self.profile / "herdr.sock", rearm_delay=0.05) as endpoint:
+            _, result = self.invoke("--inspect-clients")
+            self.assertEqual(len(result["targets"]), 5, result.get("store_errors"))
+            self.assertEqual([request["method"] for request in endpoint.requests], ["ping", "session.snapshot"])
 
     @unittest.skipUnless(os.name == "nt", "Windows HOME raw namespace join")
     def test_actual_default_home_join_keeps_embedded_slash_and_reaches_that_endpoint(self):

@@ -51,10 +51,11 @@ def wire(value):
 
 class Endpoint:
     """A real temporary socket/pipe, polling only in the test server thread."""
-    def __init__(self, locator, responder=response):
+    def __init__(self, locator, responder=response, *, rearm_delay=0.0):
         self.raw_locator = os.fspath(locator)
         self.path = Path(locator)
         self.responder = responder
+        self.rearm_delay = rearm_delay
         self.requests, self.violations = [], []
         self.connections = 0
         self.ready, self.stop = threading.Event(), threading.Event()
@@ -138,12 +139,16 @@ class Endpoint:
         for operation in (read, write):
             operation.argtypes, operation.restype = [w.HANDLE, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD), w.LPVOID], w.BOOL
         close.argtypes, close.restype = [w.HANDLE], w.BOOL
-        while not self.stop.is_set():
-            handle = create("\\\\.\\pipe\\" + self.raw_locator, 3, 1, 1, 65536, 65536, 0, None)
-            if handle == ctypes.c_void_p(-1).value:
+        def create_listener():
+            value = create("\\\\.\\pipe\\" + self.raw_locator, 3, 1, 2, 65536, 65536, 0, None)
+            if value == ctypes.c_void_p(-1).value:
                 raise OSError(ctypes.get_last_error())
-            try:
-                self.ready.set()
+            return value
+        handle = create_listener()
+        successor = None
+        try:
+            self.ready.set()
+            while not self.stop.is_set():
                 while not self.stop.is_set():
                     if connect(handle, None) or ctypes.get_last_error() == 535:
                         break
@@ -176,5 +181,16 @@ class Endpoint:
                         if count.value == 0:
                             time.sleep(0.002)
                         offset += count.value
-            finally:
+                # Keep a listening instance alive while the server is being
+                # scheduled between requests. Closing the sole instance first
+                # made a healthy endpoint briefly return FILE_NOT_FOUND.
+                successor = create_listener() if not self.stop.is_set() else None
                 close(handle)
+                handle, successor = successor, None
+                if not self.stop.is_set() and self.rearm_delay:
+                    self.stop.wait(self.rearm_delay)
+        finally:
+            if handle is not None:
+                close(handle)
+            if successor is not None:
+                close(successor)
