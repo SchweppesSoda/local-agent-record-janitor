@@ -25,7 +25,7 @@ class ClaudeSessionInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.home = self.root / "home"
         self.config = self.home / ".claude"
 

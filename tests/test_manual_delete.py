@@ -43,7 +43,7 @@ class ManualDeleteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
+        self.root = Path(self.temporary_directory.name).resolve(strict=True)
         self.home = self.root / "codex-home"
         self.home.mkdir()
         self.frontend_db = self.root / "frontend.sqlite"

@@ -84,7 +84,7 @@ class PiCliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.session_root = self.root / "agent" / "sessions"
         self.session_root.mkdir(parents=True)
         self.path = self.session_root / "session.jsonl"

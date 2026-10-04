@@ -88,7 +88,7 @@ class MutationGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve(strict=True)
         self.home = self.root / "store"
         self.home.mkdir()
         self.scope = MutationScope(self.home, frozenset(("synthetic-thread",)))
@@ -96,7 +96,7 @@ class MutationGuardTests(unittest.TestCase):
     def test_legacy_child_unknown_blocks_new_ids_but_allows_unrelated_target_and_store(self) -> None:
         for legacy in (False, True):
             with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as temporary:
-                home = Path(temporary)
+                home = Path(temporary).resolve(strict=True)
                 scope = MutationScope(home, frozenset(("synthetic-thread",)))
                 old = write_journal(home, "old-operation", basic_action(home), legacy=legacy)
                 fresh = write_journal(home, "fresh-operation", basic_action(home), legacy=not legacy, started=False)
@@ -211,7 +211,7 @@ class MutationGuardTests(unittest.TestCase):
     def test_incomplete_checkpoints_and_old_terminal_locks_still_occupy_root(self) -> None:
         for checkpoint in ("plan_only", "guard_started", "blocked_missing_state", "terminal", "receipt"):
             with self.subTest(checkpoint=checkpoint), tempfile.TemporaryDirectory() as temporary:
-                home = Path(temporary)
+                home = Path(temporary).resolve(strict=True)
                 action = basic_action(home)
                 store = write_journal(home, "old", action, started=False)
                 state = store.read_state()
@@ -585,7 +585,7 @@ with mutation_roots((root,)):
     def test_real_frontend_and_native_ids_share_footprint_and_all_direct_writers_are_blocked(self) -> None:
         for native_unknown in (True, False):
             with self.subTest(native_unknown=native_unknown), tempfile.TemporaryDirectory() as temporary:
-                home = Path(temporary)
+                home = Path(temporary).resolve(strict=True)
                 native_id = "native-id"
                 rollout = write_rollout(home, native_id, originator="cindy")
                 create_thread_index(home, [{"id": native_id, "rollout_path": str(rollout), "source": "cindy"}])

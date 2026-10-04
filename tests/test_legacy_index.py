@@ -26,7 +26,7 @@ class LegacyIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.codex_home = Path(self.temporary_directory.name) / "codex-home"
+        self.codex_home = Path(self.temporary_directory.name).resolve(strict=True) / "codex-home"
         self.codex_home.mkdir()
         self._create_state(["live"])
 

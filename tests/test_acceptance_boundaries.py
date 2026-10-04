@@ -157,7 +157,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows process attribution contract")
     def test_cindy_root_name_is_not_an_ownership_signal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             profile = root / "owner-process-root-without-brand-name"
             home = profile / "codex-home"
             home.mkdir(parents=True)
@@ -179,7 +179,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows process attribution contract")
     def test_official_family_is_ignored_and_cindy_running_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             profile = root / "arbitrary-owner-profile"
             home = profile / "codex-home"
             home.mkdir(parents=True)
@@ -236,7 +236,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows process attribution contract")
     def test_different_cindy_profile_does_not_block_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             owner_root = root / "renamed-owner-data-root"
             other_root = root / "another-renamed-profile"
             owner_root.mkdir()
@@ -253,7 +253,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows process attribution contract")
     def test_official_family_is_ignored_without_cindy_bundle_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             owner_root = root / "owner-root-with-arbitrary-name"
             owner_root.mkdir()
             official = self._official_processes(root / "official")
@@ -272,7 +272,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
         observed: list[tuple[int, int]] = []
         for count in (1, 10, 100):
             with tempfile.TemporaryDirectory() as temporary:
-                database, ids = self._database(Path(temporary), count)
+                database, ids = self._database(Path(temporary).resolve(strict=True), count)
                 evidence = self._evidence(database, ids)
                 snapshot_calls = 0
                 process_calls = 0
@@ -291,7 +291,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 with patch.object(module, "_snapshot", side_effect=counted_snapshot):
                     execute_cindy_session_cleanup(
                         evidence,
-                        owner_process_root=Path(temporary),
+                        owner_process_root=Path(temporary).resolve(strict=True),
                         client_inspector=inspect,
                     )
                 observed.append((snapshot_calls, process_calls))
@@ -406,7 +406,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
 
     def test_blocked_child_can_resume_without_repeating_complete_child(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            coordinator, live, blocker = self._blocked_child_fixture(Path(temporary))
+            coordinator, live, blocker = self._blocked_child_fixture(Path(temporary).resolve(strict=True))
             before = coordinator._status_for_document(live.document)
             self.assertEqual(before["goal_status"], "blocked")
             self.assertIn(blocker, before["blockers"])
@@ -448,7 +448,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
 
     def test_unknown_after_mutation_never_increases_mutation_calls(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, ids = self._database(Path(temporary), 1)
+            database, ids = self._database(Path(temporary).resolve(strict=True), 1)
             evidence = self._evidence(database, ids)
             mutation_calls = 0
             import local_agent_record_janitor.frontend_session_cleanup as module

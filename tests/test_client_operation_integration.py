@@ -193,7 +193,7 @@ class ClientOperationIntegrationTests(unittest.TestCase):
     def test_cindy_pi_and_claude_child_contexts_route_independent_stores_and_stop_after_unknown(self) -> None:
         for unknown_first in (True, False):
             with self.subTest(unknown_first=unknown_first), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 frontend_home = root / "cindy-home"
                 frontend_home.mkdir()
                 database = root / "cindy.db"

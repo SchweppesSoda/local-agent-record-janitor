@@ -168,12 +168,14 @@ class SourceFailure:
     store: StoreKey | None = None
     error_type: str = "InventoryError"
     blocks_delete: bool = True
+    blocks_inventory: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {"source": self.source, "message": self.message, "error_type": self.error_type,
                 "profile_root": str(self.profile_root) if self.profile_root else None,
                 "database": str(self.database) if self.database else None,
-                "store": self.store.to_dict() if self.store else None, "blocks_delete": self.blocks_delete}
+                "store": self.store.to_dict() if self.store else None, "blocks_delete": self.blocks_delete,
+                "blocks_inventory": self.blocks_inventory}
 
 
 @dataclass(frozen=True)

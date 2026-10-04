@@ -6,7 +6,7 @@ from typing import Any
 
 from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter, WorkBuddyAdapter
 from .herdr_discovery import default_herdr_locators, local_herdr_path
-from .orca_discovery import default_orca_root, local_orca_path, reverse_account_profile
+from .orca_discovery import OrcaDiscoveryError, default_orca_root, local_orca_path, reverse_account_profile
 from .record_identity import canonical_path
 from .cleanup_service import selected_platforms
 from .discovery import (
@@ -27,16 +27,23 @@ def discover_orca_guards(args: Any) -> tuple[OrcaAdapter, ...]:
     selected = str(getattr(args, "client", "")) == "orca" or "orca" in (getattr(args, "platform", ()) or ())
     roots = [local_orca_path(root) for root in requested]
     if not requested:
-        default = default_orca_root(appdata=getattr(args, "appdata", None))
         try:
-            default.lstat()
-        except FileNotFoundError:
+            default = default_orca_root(appdata=getattr(args, "appdata", None))
+        except OrcaDiscoveryError:
             if selected or os.environ.get("ORCA_USER_DATA_PATH"):
-                roots.append(default)
-        except OSError:
-            roots.append(default)
+                raise
+            # An invalid optional default cannot locate a protection source.
+            # Continue checking exact native account markers below.
         else:
-            roots.append(default)
+            try:
+                default.lstat()
+            except FileNotFoundError:
+                if selected or os.environ.get("ORCA_USER_DATA_PATH"):
+                    roots.append(default)
+            except OSError:
+                roots.append(default)
+            else:
+                roots.append(default)
     home = getattr(args, "codex_home", None)
     if home is not None:
         profile = reverse_account_profile(Path(home).expanduser().absolute())

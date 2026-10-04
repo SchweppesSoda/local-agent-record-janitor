@@ -39,7 +39,7 @@ class CodexDesktopStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.codex_home = Path(self.temporary_directory.name) / "codex-home"
+        self.codex_home = Path(self.temporary_directory.name).resolve(strict=True) / "codex-home"
         self.codex_home.mkdir()
         create_thread_index(self.codex_home, [])
         self.database = self.codex_home / "sqlite" / "codex-dev.db"
@@ -298,7 +298,7 @@ class CodexDesktopStateTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows Cindy ownership attribution")
     def test_owner_projection_target_child_unrelated_and_missing_metadata(self):
-        root = Path(self.temporary_directory.name) / "owner-evidence"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "owner-evidence"
         records = self._cindy_process_records(root)
         owner = root / "CindyGlobal"
         target = inspect_client_ownership(owner, owner_client="cindy", records=records)
@@ -308,7 +308,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         self.assertEqual({item["process_id"] for item in target["processes"]
                           if item["relation"] == "target_or_unproven"}, {100, 101, 102})
         self.assertNotIn("command_line", str(target))
-        separate = Path(self.temporary_directory.name) / "separate-profile"
+        separate = Path(self.temporary_directory.name).resolve(strict=True) / "separate-profile"
         separate.mkdir()
         unrelated = inspect_client_ownership(separate, owner_client="cindy", records=records)
         self.assertTrue(unrelated["clients_closed"])
@@ -408,8 +408,9 @@ class CodexDesktopStateTests(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows Cindy installations")
     def test_native_home_ignores_proven_separate_cindy_family(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         records = self._cindy_process_records(root) + (
             {
                 "process_id": 200,
@@ -431,7 +432,7 @@ class CodexDesktopStateTests(unittest.TestCase):
     def test_machine_installations_keep_profile_and_identity_guards(self) -> None:
         for installation in ("Program Files", "Program Files (x86)"):
             with self.subTest(installation=installation):
-                root = Path(self.temporary_directory.name) / installation
+                root = Path(self.temporary_directory.name).resolve(strict=True) / installation
                 records = self._cindy_process_records(root, installation)
                 native = root / ".codex"
                 native.mkdir()
@@ -454,7 +455,7 @@ class CodexDesktopStateTests(unittest.TestCase):
                                  ("Cindy.exe", "codex.exe"))
 
     def test_cindy_store_blocks_cindy_and_bundled_codex(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         records = self._cindy_process_records(root)
         cindy_root = root / "CindyGlobal"
 
@@ -464,7 +465,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
     def test_cindy_store_ignores_proven_official_codex_family(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         self._cindy_process_records(root)
         records = self._official_codex_process_records(root)
         cindy_root = root / "CindyGlobal"
@@ -475,7 +476,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
     def test_cindy_store_ignores_unrelated_chatgpt_without_metadata(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         self._cindy_process_records(root)
         cindy_root = root / "CindyGlobal"
         records = (
@@ -493,10 +494,11 @@ class CodexDesktopStateTests(unittest.TestCase):
             (),
         )
 
+    @unittest.skipUnless(os.name == "nt", "Windows Cindy installations")
     def test_cindy_store_ignores_unrelated_metadata_gaps_but_blocks_unknown_cindy(
         self,
     ) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         owner_root = root / "renamed-owner-root"
         owner_root.mkdir(parents=True)
         records = (
@@ -556,7 +558,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
     def test_unproven_or_orphan_related_processes_still_block(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         native_home = root / "native" / ".codex"
         native_home.mkdir(parents=True)
         records = (
@@ -582,7 +584,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
     def test_identity_check_failure_keeps_cindy_family_blocking(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         records = self._cindy_process_records(root)
         native_home = root / "native" / ".codex"
         native_home.mkdir(parents=True)
@@ -597,7 +599,7 @@ class CodexDesktopStateTests(unittest.TestCase):
             )
 
     def test_relative_cindy_user_data_dir_cannot_prove_another_store(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         records = [dict(item) for item in self._cindy_process_records(root)]
         relative_name = f"relative-{root.parent.name}"
         records[1]["command_line"] = (
@@ -625,7 +627,7 @@ class CodexDesktopStateTests(unittest.TestCase):
         )
 
     def test_relative_or_environment_executable_paths_remain_blocking(self) -> None:
-        root = Path(self.temporary_directory.name) / "processes"
+        root = Path(self.temporary_directory.name).resolve(strict=True) / "processes"
         native_home = root / "native" / ".codex"
         native_home.mkdir(parents=True)
         for executable in (r"Programs\Cindy\Cindy.exe", r"%LOCALAPPDATA%\Cindy.exe"):

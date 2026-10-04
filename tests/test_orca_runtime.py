@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from local_agent_record_janitor.codex_app_server import CodexAppServer
+from local_agent_record_janitor.codex_app_server import CodexAppServer, CodexAppServerStartupError
 from local_agent_record_janitor.orca_runtime import (JobCodexAppServer, isolated_environment,
     _WindowsJob, runtime_host_identity, runtime_instance_stopped)
 
@@ -39,9 +39,14 @@ class IsolatedCodexRuntimeTests(unittest.TestCase):
               "    print(json.dumps({'id': message['id'], 'result': result}), flush=True)\n", encoding="utf-8")
         return path
 
-    def test_explicit_empty_environment_and_cwd_do_not_inherit_credentials_or_config(self):
+    def test_explicit_environment_and_cwd_do_not_inherit_credentials_or_config(self):
         script = self.protocol_script()
         environment = {"JANITOR_EXPLICIT": "safe"}
+        if os.name == "nt":
+            # CPython 3.10 needs the OS path to load its entropy provider.
+            # This is an explicit fixture runtime prerequisite, not inheritance.
+            from local_agent_record_janitor.orca_runtime import _windows_directory
+            environment["SystemRoot"] = str(_windows_directory())
         server = CodexAppServer(codex_home=self.home, command=[sys.executable, "-I", str(script)],
                                 environment=environment, working_directory=self.root, timeout=10)
         environment["LATE_MUTATION"] = "must not leak"
@@ -53,8 +58,13 @@ class IsolatedCodexRuntimeTests(unittest.TestCase):
         for name in ("OPENAI_API_KEY", "CODEX_SQLITE_HOME", "LATE_MUTATION"):
             self.assertNotIn(name, result["environment"])
         self.assertEqual(Path(result["cwd"]), self.root)
-        with CodexAppServer(codex_home=self.home, command=[sys.executable, "-I", str(script)], environment={}, timeout=10) as empty:
-            self.assertNotIn("JANITOR_EXPLICIT", empty.request("inspect-isolation", {})["environment"])
+    def test_explicit_empty_environment_reaches_process_boundary_without_inheritance(self):
+        server = CodexAppServer(codex_home=self.home, command=["never-started"], environment={})
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "PRIVATE_TEST_SENTINEL"}), patch(
+            "local_agent_record_janitor.codex_app_server.subprocess.Popen", side_effect=OSError("fixture stop")) as launch:
+            with self.assertRaises(CodexAppServerStartupError):
+                server.start()
+        self.assertEqual(launch.call_args.kwargs["env"], {"CODEX_HOME": str(self.home)})
 
     def test_runtime_allowlist_isolates_all_homes_git_credentials_and_configuration(self):
         with patch("local_agent_record_janitor.orca_runtime._windows_directory", return_value=self.root), patch.dict(

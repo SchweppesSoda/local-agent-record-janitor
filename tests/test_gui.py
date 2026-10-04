@@ -40,7 +40,7 @@ class GuiSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.home = home = Path(temporary.name) / "codex-home"
+        self.home = home = Path(temporary.name).resolve(strict=True) / "codex-home"
         home.mkdir()
         reference = FrontendSessionRecord(
             platform="codex-desktop",

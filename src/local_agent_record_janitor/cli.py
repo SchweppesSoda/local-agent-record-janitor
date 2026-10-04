@@ -2947,6 +2947,7 @@ def _run_client_records(
         if any(error_matches_group(error, key) for key in selected_group_keys):
             relevant_errors.append(error)
     relevant_errors = list(dict.fromkeys(relevant_errors))
+    inventory_blockers = [error for error in relevant_errors if getattr(error, "blocks_inventory", True)]
 
     payload = {
         "schema_version": "larj.client-records.v1",
@@ -2987,8 +2988,8 @@ def _run_client_records(
         ],
         "count": len(rendered_targets),
         "total_count": len(rendered_targets),
-        "goal_status": "complete" if not relevant_errors else "blocked",
-        "goal_satisfied": not bool(relevant_errors),
+        "goal_status": "complete" if not inventory_blockers else "blocked",
+        "goal_satisfied": not bool(inventory_blockers),
         "blockers": [
             {
                 "blocker_code": "inventory_error",
@@ -2997,7 +2998,7 @@ def _run_client_records(
                 "retryable": True,
                 "message": str(error.message),
             }
-            for error in relevant_errors
+            for error in inventory_blockers
         ],
     }
     payload["snapshot_id"] = "inventory:v1:" + hashlib.sha256(
@@ -3064,7 +3065,7 @@ def _run_client_records(
                     "clients_closed": None, "probe_complete": False, "coverage_complete": False, "error": str(exc)})
     if args.json:
         _write_json(payload, stdout)
-        return EXIT_OK if not relevant_errors else EXIT_ERROR
+        return EXIT_OK if not inventory_blockers else EXIT_ERROR
     stdout.write(
         f"客户端 {client}：{len(rendered_targets)} 个目标，"
         f"{len(groups)} 个项目/引擎/存储分组\n"
@@ -3086,7 +3087,7 @@ def _run_client_records(
             f"  阻塞：{blocker['blocker_code']} "
             f"{_human_message(blocker['message'])}\n"
         )
-    return EXIT_OK if not relevant_errors else EXIT_ERROR
+    return EXIT_OK if not inventory_blockers else EXIT_ERROR
 
 
 def _build_native_client_contexts(

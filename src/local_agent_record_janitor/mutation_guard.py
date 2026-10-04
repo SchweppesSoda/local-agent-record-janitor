@@ -291,7 +291,7 @@ def _operations_directory(root: Path) -> Path:
         candidate = current / part
         if _optional_lstat(candidate) is None:
             try:
-                candidate.mkdir()
+                candidate.mkdir(mode=0o700)
                 _fsync_directory(current)
             except FileExistsError:
                 pass

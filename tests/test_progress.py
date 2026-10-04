@@ -22,7 +22,7 @@ from tests.support import create_thread_index, write_rollout
 class ProgressTests(unittest.TestCase):
     def test_cli_verify_progress_reaches_public_coordinator_and_stays_on_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             path = write_rollout(home, "retained", originator="codex_cli_rs")
             create_thread_index(home, [{"id": "retained", "rollout_path": str(path)}])
@@ -52,7 +52,7 @@ class ProgressTests(unittest.TestCase):
         """A real temporary native batch exposes live per-action progress."""
 
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             thread_ids = tuple(f"native-{index:03d}" for index in range(100))
@@ -130,7 +130,7 @@ class ProgressTests(unittest.TestCase):
 
     def test_unknown_batch_reports_recovery_without_verify_completion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             action = SimpleNamespace(
                 action_id="unknown-action",
                 kind="delete_pi_session",

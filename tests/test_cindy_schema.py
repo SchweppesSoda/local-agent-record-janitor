@@ -51,7 +51,7 @@ class CindySchemaTests(unittest.TestCase):
     def test_upstream_versions_preserve_neighbor_rows_and_search_results(self):
         for version in FTS_TRIGGER_VERSIONS:
             with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 database = self.database(root, version)
                 evidence = self.evidence(root, database)
                 with closing(sqlite3.connect(database)) as db:
@@ -75,7 +75,7 @@ class CindySchemaTests(unittest.TestCase):
 
     def test_same_trigger_name_with_other_side_effects_is_rejected_before_write(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = self.database(root, "0096")
             evidence = self.evidence(root, database)
             with closing(sqlite3.connect(database)) as db:
@@ -95,7 +95,7 @@ class CindySchemaTests(unittest.TestCase):
             "CREATE TRIGGER session_side_effect AFTER DELETE ON sessions BEGIN DELETE FROM messages; END;",
         ):
             with self.subTest(alteration=alteration), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 database = self.database(root, "0096")
                 with closing(sqlite3.connect(database)) as db:
                     db.executescript(alteration)
@@ -104,7 +104,7 @@ class CindySchemaTests(unittest.TestCase):
 
     def test_closed_client_uses_persistent_cjk_fallback_without_installing_functions(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = self.database(root, "0100")
             with closing(sqlite3.connect(database)) as db:
                 guard_cindy_triggers(db, "messages")
@@ -115,7 +115,7 @@ class CindySchemaTests(unittest.TestCase):
 
     def test_rewind_trigger_is_not_activated_by_reference_update_or_delete(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = self.database(root, "0100")
             with closing(sqlite3.connect(database)) as db:
                 db.executescript("CREATE TABLE embedding_jobs(source TEXT, source_id TEXT); CREATE TABLE chat_messages_vec_v1(embedding BLOB);")

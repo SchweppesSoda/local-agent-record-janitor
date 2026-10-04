@@ -214,9 +214,11 @@ profile 发现与公共 CLI 接线，见 [Herdr 接入边界](adapters.md#herdr�
 查询 protocol22 ping/session.snapshot，保留独立 live 引用与 session 级观察值差异；
 deadline、响应预算、父链/endpoint 身份变化、版本变化和 partial coverage 均保守处理。
 普通盘点不连接，运行投影消费同次缓存，不按公共 pane ID 推断持久化 pane。
-全部写入及自身 verify 关闭。响应 server 不证明 attached/detached 实况、全部 agent/
-后台 writer 归属或原子实例一致，运行覆盖始终 unknown；因此原 P4 完成条件尚未全部
-满足，有效引用可展示，但 records 不宣告闭合盘点。当前实测为 Windows 合成临时
+全部写入及自身 verify 关闭。Pong 保留服务自报的 detached daemon 启动状态，ping
+成功而 snapshot 失败时保留 server_active；附着客户端数量、全部 agent/后台 writer
+归属及原子实例一致仍未知。请求范围内的 metadata 清单与 writer 证明分别报告，
+完整读取支持的持久化/显式 live 来源可完成 records，写入限制仍保留且无法生成动作。
+只读实现已覆盖原 P4 的负例，跨平台验收纳入 P6。当前实测为 Windows 合成临时
 named pipe，macOS/Linux 及产品实机验收未完成。
 
 **依赖：**P1、P2；研究可与 P3 并行，代码按单写者顺序提交。

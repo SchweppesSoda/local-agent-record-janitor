@@ -46,11 +46,12 @@ class HerdrAdapter:
         known_sessions, current_observations, current_complete = [], {}, {}
         runtime_sessions = []
 
-        def failure(code: str, source: Path | None = None) -> None:
+        def failure(code: str, source: Path | None = None, *, blocks_inventory: bool = True) -> None:
             if source is not None and source not in sources:
                 sources.append(source)
             errors.append(SourceFailure(str(source) if source is not None else "herdr-discovery", code,
-                profile_root=root, database=source, error_type="HerdrInventoryIncomplete"))
+                profile_root=root, database=source, error_type="HerdrInventoryIncomplete",
+                blocks_inventory=blocks_inventory))
 
         def append_observations(source, session_name, role, observations, codes, *, live=False, endpoint_namespace=None):
             for item in observations:
@@ -105,7 +106,8 @@ class HerdrAdapter:
         if root is not None:
             # Persisted files and socket markers cannot establish running or
             # closed state. Never call Herdr's connecting session_info helper.
-            failure("runtime_writer_coverage_unknown" if self.inspect_live else "live_metadata_not_probed", root)
+            failure("runtime_writer_coverage_unknown" if self.inspect_live else "live_metadata_not_probed", root,
+                    blocks_inventory=False)
             try:
                 require_plain_directory(root)
             except (OSError, ValueError) as exc:
@@ -169,6 +171,9 @@ class HerdrAdapter:
             "check_mode": "json_api_metadata", "probe_source": "herdr_protocol22" if self.inspect_live else "not_requested",
             "probe_complete": bool(runtime_sessions) and all(row["probe_complete"] for row in runtime_sessions),
             "coverage_complete": False,
+            "metadata_scope": "persisted_and_live" if self.inspect_live else "persisted",
+            "metadata_complete": not any(error.blocks_inventory for error in errors),
+            "attached_clients": None,
             "clients_closed": False if any(row["server_active"] for row in runtime_sessions) else None,
             "coverage": {"scope": "profile_sessions", "endpoint_namespace": "known_original_spelling",
                 "other_runtime_writers": "not_proven", "native_store_ownership": "unproven",

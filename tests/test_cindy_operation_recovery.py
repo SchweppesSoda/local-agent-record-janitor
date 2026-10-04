@@ -143,7 +143,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
         from local_agent_record_janitor.agent_operations import action_binding
         import copy
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database, session_id = self._database(root, None)
             base = build_cindy_session_delete_evidence(({
                 "database": str(database), "session_id": session_id, "expected_status": "deleted",
@@ -330,7 +330,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            result = self._apply(Path(temporary), None)
+            result = self._apply(Path(temporary).resolve(strict=True), None)
             self.assertEqual(result["goal_status"], "complete")
             self.assertEqual(result["_reference_event_count"], result["_reference_event_count_before"])
             self.assertEqual(len(result["batches"]), 1)
@@ -348,7 +348,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
 
     def test_non_null_sdk_replacement_remains_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            result = self._apply(Path(temporary), "replacement-session")
+            result = self._apply(Path(temporary).resolve(strict=True), "replacement-session")
             self.assertEqual(result["goal_status"], "blocked")
             self.assertTrue(
                 any(
@@ -367,7 +367,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
 
     def test_guard_checkpoint_without_mutation_is_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             _database, document, _plan_path, _reference_store, extras = (
                 self._prepare_operation(root, sdk_after_clear=None)
             )
@@ -420,7 +420,7 @@ class CindyOperationRecoveryTests(unittest.TestCase):
     def test_changed_session_rebind_validation_is_linear(self) -> None:
         for count in (1, 10, 100):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 database = root / "cindy.sqlite"
                 owner_root = root / "CindyGlobal"
                 storage_id = storage_id_for_path(root)

@@ -20,7 +20,7 @@ class ScheduleCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.database = self.root / 'cindy.db'
         self.home = self.root / 'codex-home'
         self.home.mkdir()

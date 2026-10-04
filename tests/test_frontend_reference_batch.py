@@ -21,7 +21,7 @@ class FrontendReferenceBatchTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve(strict=True)
         self.codex_home = self.root / "codex-home"
         self.codex_home.mkdir()
 

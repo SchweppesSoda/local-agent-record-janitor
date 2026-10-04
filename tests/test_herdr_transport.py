@@ -32,6 +32,7 @@ class HerdrTransportTests(unittest.TestCase):
             result = probe_runtime(str(self.locator), RuntimeBudget())
             self.assertEqual(len(result.metadata.observations), 2)
             self.assertEqual(result.errors, ())
+            self.assertTrue(result.detached_daemon_observed)
             self.assertEqual([r["method"] for r in endpoint.requests], ["ping", "session.snapshot"])
             self.assertEqual(endpoint.connections, 2)
             for r in endpoint.requests:
@@ -40,6 +41,22 @@ class HerdrTransportTests(unittest.TestCase):
                 request_metadata(str(self.locator), "server.stop", "no", deadline=time.monotonic() + 1,
                     maximum=1024, identity=endpoint_identity(self.locator))
             self.assertEqual(endpoint.connections, 2)
+
+    def test_successful_ping_survives_failed_snapshot_without_claiming_complete_coverage(self):
+        def failed_snapshot(request):
+            return pong(request["id"]) if request["method"] == "ping" else {
+                "id": request["id"], "error": {"message": "private server details"}}
+        with Endpoint(self.locator, failed_snapshot):
+            result = probe_runtime(str(self.locator), RuntimeBudget())
+        self.assertIsNone(result.metadata)
+        row = result.to_dict("default", str(self.locator))
+        self.assertTrue(row["server_active"])
+        self.assertTrue(row["detached_daemon_observed"])
+        self.assertEqual(row["detached_observation_source"], "pong_startup_self_report")
+        self.assertFalse(row["probe_complete"])
+        self.assertFalse(row["generation_atomic"])
+        self.assertEqual(row["errors"], ["live_api_error"])
+        self.assertNotIn("private server details", repr(row))
 
     def test_real_oversize_truncation_and_two_frame_responses_are_bounded(self):
         cases = [(lambda r: b"x" * 100 + b"\n", 20, "live_response_limit_exceeded"),

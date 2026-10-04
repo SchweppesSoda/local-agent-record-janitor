@@ -97,7 +97,7 @@ class MultiEngineCliTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve(strict=True)
         self.config = self.root / ".claude"
         self.transcript = write_claude_session(self.config, ONE, "claude secret body")
 

@@ -33,6 +33,26 @@ class OrcaAdapterTests(unittest.TestCase):
             rows.append({"id": native_id, "rollout_path": str(path), "source": "cli"})
         create_thread_index(home, rows)
 
+    def test_invalid_optional_default_keeps_reverse_marker_and_explicit_guards(self):
+        from types import SimpleNamespace
+        from local_agent_record_janitor.adapter_factory import discover_orca_guards
+        from local_agent_record_janitor.orca_discovery import OrcaDiscoveryError
+        args = SimpleNamespace(client="herdr", platform=("all",), codex_home=self.homes[0])
+        with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": ""}), patch(
+            "local_agent_record_janitor.adapter_factory.default_orca_root",
+            side_effect=OrcaDiscoveryError("orca_local_path_unproven"),
+        ):
+            guards = discover_orca_guards(args)
+            self.assertEqual([guard.profile_root for guard in guards], [self.root])
+            args.client = "orca"
+            with self.assertRaises(OrcaDiscoveryError):
+                discover_orca_guards(args)
+            args.client = "herdr"
+            with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": "relative"}), self.assertRaises(OrcaDiscoveryError):
+                discover_orca_guards(args)
+            args.orca_root = (self.root,)
+            self.assertEqual([guard.profile_root for guard in discover_orca_guards(args)], [self.root])
+
     def test_readonly_descriptor_and_snapshot_never_start_native_catalog(self):
         adapter = OrcaAdapter(profile_root=self.root)
         with patch("local_agent_record_janitor.inventory.build_session_catalog", side_effect=AssertionError("native scan")):

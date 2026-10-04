@@ -35,7 +35,7 @@ class _LimitedCindy(CindyAdapter):
 class ExistingContractGapTests(unittest.TestCase):
     def test_descriptor_engines_discover_native_records_without_frontend_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             _write_pi_session(root, "native-only")
             catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
             descriptor = ClientDescriptor("cindy", sources=(root / "metadata.json",),
@@ -64,7 +64,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_incomplete_native_binding_does_not_restrict_an_independent_frontend_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             paths = [_write_pi_session(root / name, name) for name in ("a", "c")]
             catalogs = [build_pi_session_catalog(agent_dir=root / name, session_root=root / name / "sessions")
                         for name in ("a", "c")]
@@ -101,7 +101,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_inherited_descriptor_checks_host_before_constructing_a_local_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             adapter = CindyAdapter(database=root / "metadata.db", codex_home=root / "codex-home", cindy_root=root)
             adapter.host = "ssh:synthetic-host"
             with patch("local_agent_record_janitor.adapters.base.StoreKey", side_effect=AssertionError("remote path")):
@@ -110,7 +110,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_typed_native_binding_is_exact_and_does_not_duplicate_frontend_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             paths = [_write_pi_session(root / name, "same-id") for name in ("one", "two")]
             catalogs = tuple(build_pi_session_catalog(agent_dir=root / name, session_root=root / name / "sessions")
                              for name in ("one", "two"))
@@ -143,7 +143,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_evidence_projection_indexes_paths_once_for_a_large_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             for index in range(100):
                 _write_pi_session(root, f"session-{index}")
             catalog = build_pi_session_catalog(agent_dir=root, session_root=root / "sessions")
@@ -156,7 +156,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_descriptor_only_reader_preserves_unqualified_and_remote_restore_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             source = root / "metadata.json"
             descriptor = ClientDescriptor("cindy", profile_root=root, sources=(source,),
                 inventory_engines=("codex",), capability_limits=(EngineCapability("cindy", "codex"),))
@@ -200,7 +200,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_current_and_agent_switch_project_as_distinct_typed_references_without_changing_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             database = root / "cindy.db"
@@ -221,7 +221,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_native_pi_branch_and_claude_manifest_keep_independent_relation_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             pi_root = root / "pi"
             parent = _write_pi_session(pi_root, "parent")
             child = _write_pi_session(pi_root, "child")
@@ -250,7 +250,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_frontend_reader_without_codex_home_is_not_silently_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             row = FrontendSessionRecord("cindy", "ui", "pi-id", root / "metadata.db",
                                         root / "known-codex-home", backend="pi")
 
@@ -267,7 +267,7 @@ class ExistingContractGapTests(unittest.TestCase):
 
     def test_readonly_profile_limit_survives_without_disabling_independent_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             adapters = []
             for name, cls in (("writable", CindyAdapter), ("readonly", _LimitedCindy)):
                 profile = root / name

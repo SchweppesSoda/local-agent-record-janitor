@@ -13,7 +13,7 @@ class ReadOnlySQLiteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.database = Path(self.temporary_directory.name) / "frontend.db"
+        self.database = Path(self.temporary_directory.name).resolve(strict=True) / "frontend.db"
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("CREATE TABLE records (id TEXT PRIMARY KEY)")
             connection.execute("INSERT INTO records (id) VALUES ('original')")

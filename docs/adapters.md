@@ -435,11 +435,16 @@ restorable；两者不按同数值 pane ID 合并，live 的 public ID 会重映
 
 `client_ownership` 从同次 adapter 缓存输出，不发第二轮查询。`probe_complete` 仅表示
 metadata 查询完整，`coverage_complete` 始终 false，scope 明确为 profile/session。
-响应端点使 `clients_closed=false`；未响应或证据失败保持 unknown，永不由缺 socket
-推断 true。Pong 的 `detached_server_daemon` 是能力，`agent_status` 是 Herdr 观察，均不
-证明 attached/detached 实况、OS 进程停止或 native 归属。清单始终保留
-`runtime_writer_coverage_unknown`（未探测时为 `live_metadata_not_probed`），返回退出码 `1`
-和 `goal_status=blocked` 并展示已读引用；这不是完整扫描或完整终验。API 不发送
+有效 Pong 即使后续 snapshot 失败也保留 `clients_closed=false`；没有有效响应则保持
+unknown，永不由缺 socket 推断 true。`detached_daemon_observed` 是 Pong 中严格的
+布尔值或 unknown，表示服务启动时自报的 detached daemon 状态，依据
+[上游进程检测](https://github.com/herdrdev/herdr/blob/d6b40d4edd550ccea081f089605a64314f8c8b27/src/api/server.rs#L61)。
+它不证明当前附着客户端数量、OS 进程停止或 native 归属；`attached_clients` 仍为 null。
+清单保留 `runtime_writer_coverage_unknown`（未探测时为 `live_metadata_not_probed`），
+这些限制的 `blocks_delete=true`、`blocks_inventory=false`。`metadata_scope` 区分
+persisted 与 persisted_and_live；完整读取请求范围内的已支持元数据时，records 返回
+退出码 `0` 和 `goal_status=complete`，不表示可以清理。读取失败、未知 schema/argv、
+transport 失败及 live/persisted 冲突仍使清单 blocked。API 不发送
 mutation 命令，不启动/attach/restore，也不查询 `agent.get`、终端正文或进程命令行。
 JSON 中的 private 字段可能被读取，但不投影或执行；server 自身可能写请求日志或处理
 已有 title 事件，不能承诺产品内存/文件系统零副作用。

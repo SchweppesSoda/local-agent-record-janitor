@@ -25,7 +25,7 @@ class AionUIAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
+        self.root = Path(self.temporary_directory.name).resolve(strict=True)
         self.database = self.root / "aionui-backend.db"
         self.codex_home = self.root / "codex-home"
         self.codex_home.mkdir()
@@ -462,7 +462,7 @@ class CindyAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
+        self.root = Path(self.temporary_directory.name).resolve(strict=True)
         self.database = self.root / "cindy.db"
         self.codex_home = self.root / "codex-home"
         self.codex_home.mkdir()

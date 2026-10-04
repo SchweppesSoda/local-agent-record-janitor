@@ -35,7 +35,7 @@ class CindyEmptyCompletionTests(unittest.TestCase):
 
     def test_empty_store_coverage_requires_readable_supported_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary) / "native"
+            home = Path(temporary).resolve(strict=True) / "native"
             create_thread_index(home, [])
             adapter = NativeIntegrityAdapter(codex_home=home)
             complete = build_session_catalog((adapter,))
@@ -54,13 +54,13 @@ class CindyEmptyCompletionTests(unittest.TestCase):
 
     def test_nonexistent_home_is_not_successful_empty_coverage(self):
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary) / "missing"
+            home = Path(temporary).resolve(strict=True) / "missing"
             catalog = build_session_catalog((NativeIntegrityAdapter(codex_home=home),))
             self.assertEqual(catalog.scanned_native_homes, ())
 
     def test_existing_home_without_state_database_is_not_successful_coverage(self):
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             catalog = build_session_catalog((NativeIntegrityAdapter(codex_home=home),))
             self.assertEqual(catalog.scanned_native_homes, ())
 

@@ -15,7 +15,7 @@ from local_agent_record_janitor.record_identity import EngineCapability
 class ProjectOperationIntegrationTests(unittest.TestCase):
     def test_aion_orphan_project_rows_run_as_one_database_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = root / "aionui.db"
             codex_home = root / "codex-home"
             codex_home.mkdir()

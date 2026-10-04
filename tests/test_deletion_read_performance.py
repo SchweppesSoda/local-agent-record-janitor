@@ -55,7 +55,7 @@ class DeletionReadPerformanceTests(unittest.TestCase):
         """One fresh read serves each check phase and every post-write verify."""
 
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             thread_ids = tuple(f"native-{index:03d}" for index in range(4))
@@ -169,7 +169,7 @@ class DeletionReadPerformanceTests(unittest.TestCase):
         """The large-scope path stays read-only and returns every matching row."""
 
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary) / "codex-home"
+            home = Path(temporary).resolve(strict=True) / "codex-home"
             home.mkdir()
             database = home / "state_5.sqlite"
             with closing(sqlite3.connect(database)) as connection:
@@ -223,7 +223,7 @@ class DeletionReadPerformanceTests(unittest.TestCase):
         """A new child appearing after root one cannot hide behind a cache."""
 
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             thread_ids = ("root-a", "root-b")

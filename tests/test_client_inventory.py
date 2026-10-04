@@ -173,7 +173,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_all_profiles_and_exact_bindings_survive_engine_projection_and_selection(self):
         for engine in ("pi", "claude"):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 sid = "11111111-1111-4111-8111-111111111111"
                 adapters = tuple(self._engine_profile(root / name, engine, sid) for name in ("one", "two"))
                 context = build_client_engine_contexts(adapters, client="cindy", engines=(engine,))[0]
@@ -198,7 +198,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_multi_profile_plan_and_revalidation_retain_every_store(self):
         for engine in ("pi", "claude"):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 ids = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
                 adapters = tuple(self._engine_profile(root / str(i), engine, sid, status="deleted")
                                  for i, sid in enumerate(ids))
@@ -218,7 +218,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_default_inventory_finds_native_sessions_without_frontend_rows(self):
         for engine in ("pi", "claude"):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
-                adapter = self._engine_profile(Path(temporary), engine, "11111111-1111-4111-8111-111111111111")
+                adapter = self._engine_profile(Path(temporary).resolve(strict=True), engine, "11111111-1111-4111-8111-111111111111")
                 with closing(sqlite3.connect(adapter.database)) as db:
                     db.execute("DELETE FROM sessions")
                     db.commit()
@@ -230,7 +230,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_codex_and_pi_same_id_never_share_native_identity_or_capability(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._engine_profile(Path(temporary), "pi", "same-id")
+            adapter = self._engine_profile(Path(temporary).resolve(strict=True), "pi", "same-id")
             path = write_rollout(adapter.codex_home, "same-id", originator="cindy")
             create_thread_index(adapter.codex_home, [{"id": "same-id", "rollout_path": str(path)}])
             with closing(sqlite3.connect(adapter.database)) as db:
@@ -246,7 +246,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_missing_current_binding_is_not_hidden_by_existing_historical_binding(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             database = root / "cindy.db"
@@ -270,7 +270,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_native_catalog_failures_are_visible_and_cannot_report_success(self):
         for engine in ("pi", "claude"):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 sid = "11111111-1111-4111-8111-111111111111"
                 adapter = self._engine_profile(root, engine, sid, status="deleted")
                 bad = (root / "pi-agent-home" / "sessions" / "bad.jsonl" if engine == "pi"
@@ -287,7 +287,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_builder_exception_is_not_an_empty_successful_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._engine_profile(Path(temporary), "pi", "pi-id")
+            adapter = self._engine_profile(Path(temporary).resolve(strict=True), "pi", "pi-id")
             output = StringIO()
             with patch.object(adapter, "native_catalog_for", side_effect=OSError("fixture")):
                 status = main(["records", "--client", "cindy", "--engine", "pi", "--json"],
@@ -297,7 +297,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_shared_claude_root_keeps_all_profile_references_and_excludes_standalone(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             shared = root / "shared-claude"
             sid = "11111111-1111-4111-8111-111111111111"
             other = "22222222-2222-4222-8222-222222222222"
@@ -325,7 +325,7 @@ class ClientInventoryTests(unittest.TestCase):
     def test_standalone_pi_claude_inventory_and_plan_classification_are_healthy(self):
         for engine in ("pi", "claude"):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 sid = "11111111-1111-4111-8111-111111111111"
                 if engine == "pi":
                     _write_pi_session(root, sid)
@@ -531,7 +531,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_unknown_cindy_engines_are_visible_and_never_have_delete_actions(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             (root / "codex-home").mkdir()
             create_database(root / "cindy.db", [("active", None, "active", "gemini"),
                                                 ("deleted", "unknown-id", "deleted", "gemini"),
@@ -562,7 +562,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_cindy_client_inspection_uses_owner_root_for_frontend_only_record(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             (root / "codex-home").mkdir()
             _create_cindy_database(root / "cindy.db", [("ui", "missing", "deleted", "pi")])
             adapter = CindyAdapter(database=root / "cindy.db", codex_home=root / "codex-home", cindy_root=root)
@@ -600,7 +600,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_cindy_children_keep_lineage_and_are_not_unreferenced_orphans(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._lineage_fixture(Path(temporary), {
+            adapter = self._lineage_fixture(Path(temporary).resolve(strict=True), {
                 "parent": None, "child": "parent", "grandchild": "child",
             })
             inventory = build_client_inventory((adapter,), client="cindy")
@@ -634,7 +634,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_parent_placeholder_and_other_store_do_not_hide_missing_parent(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             first = self._lineage_fixture(root / "one", {"child": "parent"})
             second = self._lineage_fixture(root / "two", {"parent": None})
             inventory = build_client_inventory((first, second), client="cindy")
@@ -648,7 +648,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_non_lineage_metadata_conflict_does_not_break_parent_chain(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._lineage_fixture(Path(temporary), {"parent": None, "child": "parent"})
+            adapter = self._lineage_fixture(Path(temporary).resolve(strict=True), {"parent": None, "child": "parent"})
             with closing(sqlite3.connect(adapter.codex_home / "state_5.sqlite")) as db:
                 db.execute("UPDATE threads SET archived=1 WHERE id='parent'")
                 db.commit()
@@ -660,7 +660,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_injected_native_catalog_binds_frontend_references_in_the_same_store(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             first = self._lineage_fixture(root / "one", {"parent": None, "child": "parent"})
             second = self._lineage_fixture(root / "two", {"parent": None}, references=())
             inventory = build_client_inventory((first, second), client="cindy")
@@ -683,7 +683,7 @@ class ClientInventoryTests(unittest.TestCase):
         for parent_source in ("index", "rollout"):
             with self.subTest(parent_source=parent_source), tempfile.TemporaryDirectory() as temporary:
                 adapter = self._lineage_fixture(
-                    Path(temporary), {"parent": None, "child": "parent"}, references=(),
+                    Path(temporary).resolve(strict=True), {"parent": None, "child": "parent"}, references=(),
                 )
                 catalog = build_session_catalog((adapter,))
                 parent = next(r for r in catalog.records if r.thread_id == "parent")
@@ -702,7 +702,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_incomplete_lineage_scan_does_not_prove_a_child_is_healthy(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._lineage_fixture(Path(temporary), {"parent": None, "child": "parent"})
+            adapter = self._lineage_fixture(Path(temporary).resolve(strict=True), {"parent": None, "child": "parent"})
             with patch("local_agent_record_janitor.inventory.read_native_lineage",
                        side_effect=OSError("fixture incomplete graph")):
                 inventory = build_client_inventory((adapter,), client="cindy")
@@ -717,7 +717,7 @@ class ClientInventoryTests(unittest.TestCase):
             {"parent": None, "child": "child"},
         ):
             with self.subTest(parents=parents), tempfile.TemporaryDirectory() as temporary:
-                adapter = self._lineage_fixture(Path(temporary), parents)
+                adapter = self._lineage_fixture(Path(temporary).resolve(strict=True), parents)
                 contexts = build_client_engine_contexts((adapter,), client="cindy")
                 child = next(t for c in contexts for t in c.targets if t.record_id == "child")
                 self.assertEqual(child.classification, RecordClassification.BROKEN_RELATION)
@@ -728,7 +728,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_child_with_unknown_parent_is_not_reported_as_a_confirmed_orphan(self):
         with tempfile.TemporaryDirectory() as temporary:
-            adapter = self._lineage_fixture(Path(temporary), {"child": None}, references=())
+            adapter = self._lineage_fixture(Path(temporary).resolve(strict=True), {"child": None}, references=())
             source = {"subagent": {"other": "guardian"}}
             write_rollout(adapter.codex_home, "child", originator="cindy", source=source)
             with closing(sqlite3.connect(adapter.codex_home / "state_5.sqlite")) as db:
@@ -743,7 +743,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_same_name_project_paths_are_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             first = root / "one" / "repo"
             second = root / "two" / "repo"
             first.mkdir(parents=True)
@@ -757,7 +757,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_orphan_without_project_evidence_is_record_id_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             capability = capability_for("native", "codex")
             target = ClientTarget(
                 client="native",
@@ -786,7 +786,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_duplicate_frontend_refs_produce_one_native_target_and_keep_both_refs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "home"
             home.mkdir()
             thread = "same-native-thread"
@@ -837,7 +837,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_cindy_all_backend_snapshot_and_pi_claude_native_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             cindy_root = root / "CindyDev"
             database = cindy_root / "cindy.db"
             codex_home = cindy_root / "codex-home"
@@ -887,7 +887,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_aionui_pi_without_unique_root_is_structured_blocker_and_never_full(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = root / "aionui.db"
             codex_home = root / "shared-codex"
             codex_home.mkdir()
@@ -922,7 +922,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_aionui_unreferenced_project_item_is_exact_delete_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = root / "aionui.db"
             codex_home = root / "shared-codex"
             codex_home.mkdir(parents=True)
@@ -981,7 +981,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_aionui_project_item_without_supported_schema_is_inventory_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database = root / "aionui-unsupported.db"
             codex_home = root / "shared-codex"
             codex_home.mkdir(parents=True)
@@ -1012,7 +1012,7 @@ class ClientInventoryTests(unittest.TestCase):
 
     def test_records_client_pi_keeps_native_catalog_contract_without_frontend_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             pi_root = root / "pi-agent"
             _write_pi_session(pi_root, "native-pi")
             output = StringIO()

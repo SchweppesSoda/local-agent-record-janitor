@@ -30,7 +30,7 @@ class PersistedV1CompatibilityTests(unittest.TestCase):
         self.samples = json.loads(FIXTURE.read_text(encoding="utf-8"))
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve(strict=True)
         self.home = self.root / "store"
         self.home.mkdir()
         create_thread_index(self.home, [])

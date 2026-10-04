@@ -27,7 +27,7 @@ class RelationCleanupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.codex_home = Path(self.temporary.name) / "codex-home"
+        self.codex_home = Path(self.temporary.name).resolve(strict=True) / "codex-home"
         live_parent = write_rollout(
             self.codex_home,
             "live-parent",
@@ -175,7 +175,7 @@ class RelationCleanupTests(unittest.TestCase):
         )
 
     def test_duplicate_relation_identity_is_blocked_without_row_evidence(self) -> None:
-        home = Path(self.temporary.name) / "duplicate-home"
+        home = Path(self.temporary.name).resolve(strict=True) / "duplicate-home"
         home.mkdir()
         database = home / "state_5.sqlite"
         with closing(sqlite3.connect(database)) as connection:
@@ -218,7 +218,7 @@ class RelationCleanupTests(unittest.TestCase):
 
     def test_agent_plan_apply_verifies_relation_and_compacts_receipt(self) -> None:
         adapter = NativeIntegrityAdapter(codex_home=self.codex_home)
-        plan_path = Path(self.temporary.name) / "relation-plan.json"
+        plan_path = Path(self.temporary.name).resolve(strict=True) / "relation-plan.json"
         plan_output = StringIO()
         code = main(
             [

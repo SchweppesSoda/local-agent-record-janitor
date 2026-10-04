@@ -23,7 +23,7 @@ class ChildRecoveryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve(strict=True)
         self.home = self.root / "native"
         self.home.mkdir()
         self.thread_id = "synthetic-native"

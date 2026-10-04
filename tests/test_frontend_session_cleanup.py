@@ -19,7 +19,7 @@ from local_agent_record_janitor.operation_coordinator import OperationCoordinato
 class FrontendSessionCleanupTests(unittest.TestCase):
     def test_explicit_unbound_active_session_plan_apply_and_dependency_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database, ids = self._database(root, 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute("UPDATE sessions SET status='active' WHERE id=?", (ids[0],))
@@ -45,7 +45,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_explicit_active_rebinding_is_blocked(self):
         with tempfile.TemporaryDirectory() as temporary:
-            database, ids = self._database(Path(temporary), 1)
+            database, ids = self._database(Path(temporary).resolve(strict=True), 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute("UPDATE sessions SET status='active' WHERE id=?", (ids[0],))
                 db.commit()
@@ -138,7 +138,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_deleted_rows_and_dependencies_are_removed_in_one_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, deleted = self._database(Path(temporary), 2)
+            database, deleted = self._database(Path(temporary).resolve(strict=True), 2)
             evidence = build_cindy_session_delete_evidence(
                 self._seeds(database, deleted)
             )
@@ -178,7 +178,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
     def test_explicit_retained_sessions_delete_dependencies_and_preserve_others(self) -> None:
         for status in ("active", "archived"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
-                database, ids = self._database(Path(temporary), 1)
+                database, ids = self._database(Path(temporary).resolve(strict=True), 1)
                 with closing(sqlite3.connect(database)) as db:
                     db.execute("UPDATE sessions SET status=? WHERE id=?", (status, ids[0]))
                     db.commit()
@@ -194,7 +194,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_explicit_selection_does_not_allow_status_drift_or_unknown_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, ids = self._database(Path(temporary), 1)
+            database, ids = self._database(Path(temporary).resolve(strict=True), 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute("UPDATE sessions SET status='active' WHERE id=?", ids)
                 db.commit()
@@ -210,7 +210,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_active_session_is_never_accepted_for_hard_delete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, _deleted = self._database(Path(temporary), 1)
+            database, _deleted = self._database(Path(temporary).resolve(strict=True), 1)
             with self.assertRaises(FrontendSessionGuardError):
                 build_cindy_session_delete_evidence(
                     self._seeds(database, ("active",), status="active")
@@ -228,7 +228,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
         observed: list[int] = []
         for count in (1, 10, 100):
             with tempfile.TemporaryDirectory() as temporary:
-                database, deleted = self._database(Path(temporary), count)
+                database, deleted = self._database(Path(temporary).resolve(strict=True), count)
                 calls = 0
                 original = module._snapshot
 
@@ -246,7 +246,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_archived_session_is_retained(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, deleted = self._database(Path(temporary), 1)
+            database, deleted = self._database(Path(temporary).resolve(strict=True), 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute(
                     "UPDATE sessions SET status = 'archived' WHERE id = ?",
@@ -268,7 +268,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_set_null_reference_is_updated_by_same_transaction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, deleted = self._database(Path(temporary), 1)
+            database, deleted = self._database(Path(temporary).resolve(strict=True), 1)
             evidence = build_cindy_session_delete_evidence(
                 self._seeds(database, deleted)
             )
@@ -302,7 +302,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_prior_authorized_reference_clear_keeps_session_delete_valid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, deleted = self._database(Path(temporary), 1)
+            database, deleted = self._database(Path(temporary).resolve(strict=True), 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute(
                     "UPDATE sessions SET sdk_session_id='native-original' WHERE id=?",
@@ -323,7 +323,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_replacement_sdk_session_id_is_still_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database, deleted = self._database(Path(temporary), 1)
+            database, deleted = self._database(Path(temporary).resolve(strict=True), 1)
             with closing(sqlite3.connect(database)) as db:
                 db.execute(
                     "UPDATE sessions SET sdk_session_id='native-original' WHERE id=?",
@@ -352,7 +352,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_client_check_uses_explicit_owner_process_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            data_root = Path(temporary) / "renamed-cindy-data"
+            data_root = Path(temporary).resolve(strict=True) / "renamed-cindy-data"
             owner_process_root = data_root / "renamed-engine-home"
             owner_process_root.mkdir(parents=True)
             database, deleted = self._database(data_root, 1)
@@ -385,7 +385,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_running_cindy_still_blocks_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            data_root = Path(temporary) / "renamed-cindy-data"
+            data_root = Path(temporary).resolve(strict=True) / "renamed-cindy-data"
             owner_process_root = data_root / "renamed-engine-home"
             owner_process_root.mkdir(parents=True)
             database, deleted = self._database(data_root, 1)
@@ -411,7 +411,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_high_level_cindy_plan_emits_session_delete_batch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database, deleted = self._database(root, 2)
             codex_home = root / "codex-home"
             codex_home.mkdir()
@@ -466,7 +466,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_capability_stays_enabled_when_no_deleted_rows_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database, _deleted = self._database(root, 0)
             codex_home = root / "codex-home"
             codex_home.mkdir()
@@ -491,7 +491,7 @@ class FrontendSessionCleanupTests(unittest.TestCase):
 
     def test_high_level_record_selector_matches_frontend_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             database, deleted = self._database(root, 2)
             codex_home = root / "codex-home"
             codex_home.mkdir()

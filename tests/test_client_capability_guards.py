@@ -56,7 +56,7 @@ class ClientCapabilityGuardTests(unittest.TestCase):
 
     def test_legacy_scan_and_manual_catalog_keep_readonly_profile_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             writable = self._profile(root, "writable", readonly=False)
             readonly = self._profile(root, "readonly", readonly=True)
             report = scan_adapters((writable, readonly))
@@ -88,7 +88,7 @@ class ClientCapabilityGuardTests(unittest.TestCase):
 
     def test_real_frontend_reference_uses_pi_limit_instead_of_codex_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             original = self._profile(root, "pi-only", readonly=False, engine="pi")
             create_thread_index(original.codex_home, [])
             writable = CindyAdapter(database=original.database, codex_home=original.codex_home,
@@ -124,7 +124,7 @@ class ClientCapabilityGuardTests(unittest.TestCase):
 
     def test_service_execution_checks_every_implemented_mutation_family_before_writer_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             adapter = self._profile(root, "readonly", readonly=True)
             service = CleanupService(client_inspector=lambda _root: ())
             base = service.prepare_report(ScanReport(), active_adapters=(adapter,))
@@ -159,7 +159,7 @@ class ClientCapabilityGuardTests(unittest.TestCase):
 
     def test_coordinator_retains_pi_target_limits_when_merging_one_native_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             writable = self._profile(root, "writable", readonly=False, engine="pi")
             readonly = self._profile(root, "readonly", readonly=True, engine="pi")
             coordinator = OperationCoordinator(CleanupService(client_inspector=lambda _root: ()))

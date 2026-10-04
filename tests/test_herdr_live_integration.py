@@ -81,6 +81,8 @@ class HerdrLiveIntegrationTests(unittest.TestCase):
             sessions = {r["session_name"]: r for r in owner["sessions"]}
             self.assertTrue(sessions["default"]["reference_values_match"])
             self.assertFalse(sessions["work"]["reference_values_match"])
+            self.assertTrue(sessions["default"]["detached_daemon_observed"])
+            self.assertIsNone(owner["attached_clients"])
             self.assertEqual(sessions["default"]["pane_identity_mapping"], "unproven")
             self.assertNotIn("detached", owner)
             self.assertIn("live_persisted_reference_values_differ", [e["message"] for e in result["store_errors"]])
@@ -95,8 +97,11 @@ class HerdrLiveIntegrationTests(unittest.TestCase):
         restore = next(r for r in HerdrAdapter(profile_root=self.profile).snapshot_references().references if r.kind.value == "restore")
         with Endpoint(self.profile / "herdr.sock") as endpoint:
             code, result = self.invoke("--inspect-clients", "--herdr-root", str(other), "--record-id", restore.binding_key)
-            self.assertNotEqual(code, 0)
+            self.assertEqual(code, 0)
             self.assertEqual(len(result["targets"]), 1)
+            self.assertTrue(result["client_ownership"][0]["metadata_complete"])
+            self.assertFalse(result["client_ownership"][0]["coverage_complete"])
+            self.assertFalse(result["targets"][0]["capability"]["native_delete"])
             self.assertEqual({e["profile_root"] for e in result["store_errors"]}, {str(self.profile)})
             self.assertEqual(len(result["client_ownership"]), 1)
             self.assertEqual(result["client_ownership"][0]["coverage"]["scope"], "profile_sessions")
@@ -154,7 +159,7 @@ class HerdrLiveIntegrationTests(unittest.TestCase):
             self.assertEqual(len(result["targets"]), 3)
             self.assertIn("live_profile_budget_exhausted", [e["message"] for e in result["store_errors"]])
             self.assertTrue(any(endpoint.connections == 0 for endpoint in endpoints))
-            self.assertIsNone(result["client_ownership"][0]["clients_closed"])
+            self.assertFalse(result["client_ownership"][0]["clients_closed"])
 
     @unittest.skipUnless(os.name == "nt", "Windows default raw namespace spelling")
     def test_actual_factory_preserves_raw_explicit_pipe_names(self):

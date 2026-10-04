@@ -63,7 +63,7 @@ class PiDeleteTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.pi_root = Path(self.temp.name) / ".pi"
+        self.pi_root = Path(self.temp.name).resolve(strict=True) / ".pi"
         self.session_root = self.pi_root / "agent" / "sessions"
         self.session_root.mkdir(parents=True)
 
@@ -119,7 +119,7 @@ class PiDeleteTests(unittest.TestCase):
 
     def test_same_session_id_across_roots_is_actionable_only_by_qualified_action(self) -> None:
         standalone = self.record("same")
-        cindy_root = Path(self.temp.name) / "Cindy" / "pi-agent-home"
+        cindy_root = Path(self.temp.name).resolve(strict=True) / "Cindy" / "pi-agent-home"
         cindy_session_root = cindy_root / "sessions"
         cindy_path = cindy_session_root / "same.jsonl"
         cindy = self.record("same", path=cindy_path)
@@ -140,7 +140,7 @@ class PiDeleteTests(unittest.TestCase):
 
     def test_catalog_failures_are_root_scoped_and_unqualified_failures_are_global(self) -> None:
         standalone = self.record("standalone")
-        cindy_root = Path(self.temp.name) / "Cindy" / "pi-agent-home"
+        cindy_root = Path(self.temp.name).resolve(strict=True) / "Cindy" / "pi-agent-home"
         cindy_session_root = cindy_root / "sessions"
         cindy_path = cindy_session_root / "cindy.jsonl"
         cindy = replace(

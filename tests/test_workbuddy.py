@@ -72,7 +72,7 @@ class WorkBuddyTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.base = Path(self.temporary.name)
+        self.base = Path(self.temporary.name).resolve(strict=True)
         self.root = create_store(self.base / "profile")
 
     def evidence(self, ids=(SID,)):
@@ -849,7 +849,7 @@ class WorkBuddyRuntimeTests(unittest.TestCase):
 
     def test_all_known_real_writers_and_root_based_generic_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             for name in sorted(runtime._WRITER_NAMES | runtime._VENDOR_NAMES):
                 result = runtime.probe(root, collector=lambda: [self.row(name)])
                 self.assertFalse(result["clients_closed"], name)
@@ -862,7 +862,7 @@ class WorkBuddyRuntimeTests(unittest.TestCase):
 
     def test_empty_invalid_and_failed_process_probes(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             self.assertTrue(runtime.probe(root, collector=lambda: [])["clients_closed"])
             with self.assertRaises(runtime.WorkBuddyRuntimeError):
                 runtime.probe(root, collector=lambda: [{"Name": "node.exe"}])
@@ -874,7 +874,7 @@ class WorkBuddyRuntimeTests(unittest.TestCase):
 
     def test_shell_mentions_are_not_writers_and_real_parent_still_blocks(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             shell = self.row("pwsh.exe", executable="C:/Program Files/PowerShell/7/pwsh.exe",
                 command="python -c inspect WorkBuddy --workbuddy-root " + str(root), pid=90)
             self.assertTrue(runtime.probe(root, collector=lambda: [shell])["clients_closed"])

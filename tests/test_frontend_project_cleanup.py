@@ -70,7 +70,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
     def test_one_set_guard_delete_verify_for_1_10_100_rows(self) -> None:
         for size in (1, 10, 100):
             with self.subTest(size=size), tempfile.TemporaryDirectory() as temporary:
-                database = self._database(Path(temporary), size)
+                database = self._database(Path(temporary).resolve(strict=True), size)
                 evidence = self._evidence(database)
                 observed: list[str] = []
                 result = execute_aionui_project_cleanup(
@@ -95,7 +95,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
 
     def test_reference_or_row_drift_is_guarded_before_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database = self._database(Path(temporary), 1)
+            database = self._database(Path(temporary).resolve(strict=True), 1)
             evidence = self._evidence(database)
             with closing(sqlite3.connect(database)) as connection:
                 connection.execute(
@@ -111,7 +111,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
                 )
             self.assertFalse(raised.exception.mutation_started)
             self.assertEqual(phases, [])
-            self.assertFalse(list(Path(temporary).glob(".larj-project-*")))
+            self.assertFalse(list(Path(temporary).resolve(strict=True).glob(".larj-project-*")))
             with closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(
                     connection.execute("SELECT COUNT(*) FROM conversations").fetchone()[0],
@@ -120,7 +120,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
 
     def test_sql_failure_after_marker_is_known_rolled_back(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database = self._database(Path(temporary), 1)
+            database = self._database(Path(temporary).resolve(strict=True), 1)
             evidence = self._evidence(database)
             with closing(sqlite3.connect(database)) as connection:
                 connection.execute(
@@ -146,7 +146,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
 
     def test_commit_verification_failure_is_unknown_and_keeps_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            database = self._database(Path(temporary), 1)
+            database = self._database(Path(temporary).resolve(strict=True), 1)
             evidence = self._evidence(database)
             with patch(
                 "local_agent_record_janitor.frontend_project_cleanup.verify_aionui_project_rows",
@@ -157,7 +157,7 @@ class FrontendProjectCleanupTests(unittest.TestCase):
             self.assertTrue(raised.exception.mutation_started)
             self.assertTrue(raised.exception.outcome_unknown)
             self.assertFalse(raised.exception.outcome_known_rolled_back)
-            backups = list(Path(temporary).glob(".larj-project-*/database.sqlite"))
+            backups = list(Path(temporary).resolve(strict=True).glob(".larj-project-*/database.sqlite"))
             self.assertEqual(len(backups), 1)
             backups[0].unlink(missing_ok=True)
             backups[0].parent.rmdir()

@@ -25,13 +25,13 @@ class NativeProjectCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name) / "native"
+        self.home = Path(self.temp.name).resolve(strict=True) / "native"
         self.home.mkdir()
         create_thread_index(self.home, [])
         with closing(sqlite3.connect(self.home / "state_5.sqlite")) as c:
             c.execute("ALTER TABLE threads ADD COLUMN cwd TEXT")
             c.commit()
-        self.root = Path(self.temp.name) / "missing-project"
+        self.root = Path(self.temp.name).resolve(strict=True) / "missing-project"
         self.project_id = "g-p-test-vegetables"
         self.host = "local:" + str(self.home)
         self.data = {
@@ -181,7 +181,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
         plan = OperationCoordinator(CleanupService()).plan_operation(
             client="native", all_projects=True, adapters=(adapter,),
-            plan_path=Path(self.temp.name) / "all.json")
+            plan_path=Path(self.temp.name).resolve(strict=True) / "all.json")
         self.assertEqual(plan["goal_status"], "ready", plan)
         self.assertEqual(plan["counts"]["action_count"], 1)
 
@@ -191,14 +191,14 @@ class NativeProjectCleanupTests(unittest.TestCase):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
         plan = OperationCoordinator(CleanupService()).plan_operation(
             client="native", projects=("蔬菜",), adapters=(adapter,),
-            plan_path=Path(self.temp.name) / "ambiguous.json")
+            plan_path=Path(self.temp.name).resolve(strict=True) / "ambiguous.json")
         self.assertEqual(plan["goal_status"], "blocked", plan)
         self.assertIn("ambiguous_project", [b["blocker_code"] for b in plan["blockers"]])
 
     def test_unknown_operation_never_replays_and_verify_preserves_bad_state(self):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
         coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
-        plan_path = Path(self.temp.name) / "unknown.json"
+        plan_path = Path(self.temp.name).resolve(strict=True) / "unknown.json"
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=plan_path)
         replace = os.replace
         calls = 0
@@ -225,7 +225,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
     def test_verify_checks_loose_markers_and_missing_frozen_files(self):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
         coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
-        plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=Path(self.temp.name) / "verify.json")
+        plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=Path(self.temp.name).resolve(strict=True) / "verify.json")
         self.run_cleanup()
         data = json.loads((self.home / STATE_FILES[0]).read_bytes())
         data["loose-reference"] = self.project_id
@@ -267,7 +267,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
 
     def test_multi_project_batch_removes_only_frozen_projects(self):
         second_id = "another-project"
-        self.data["local-projects"][second_id] = {"id": second_id, "name": "Second", "rootPaths": [str(Path(self.temp.name) / "second-missing")]}
+        self.data["local-projects"][second_id] = {"id": second_id, "name": "Second", "rootPaths": [str(Path(self.temp.name).resolve(strict=True) / "second-missing")]}
         self.write()
         projects = [p for p in discover_native_projects(self.home) if not p.blockers]
         self.assertEqual(len(projects), 2)
@@ -317,7 +317,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
         self.assertIn(self.project_id, output.getvalue())
         self.assertNotIn("PRIVATE BODY", output.getvalue())
         coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
-        plan_path = Path(self.temp.name) / "plan.json"
+        plan_path = Path(self.temp.name).resolve(strict=True) / "plan.json"
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=plan_path)
         self.assertEqual(plan["goal_status"], "ready", plan)
         self.assertEqual(plan["counts"]["action_count"], 1)

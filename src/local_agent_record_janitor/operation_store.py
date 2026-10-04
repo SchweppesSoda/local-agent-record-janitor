@@ -668,7 +668,7 @@ class OperationStore:
                         f"Operation directory does not exist: {candidate}"
                     )
                 try:
-                    candidate.mkdir()
+                    candidate.mkdir(mode=0o700)
                     _fsync_directory(current)
                 except OSError as exc:
                     raise OperationStoreError(

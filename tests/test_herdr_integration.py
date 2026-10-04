@@ -48,7 +48,10 @@ class HerdrIntegrationTests(unittest.TestCase):
         for root in (release, development):
             create_profile(root)
         code, default = self.invoke(["records", "--client", "herdr", "--json"])
-        self.assertEqual(default["goal_status"], "blocked")  # live metadata remains unknown.
+        self.assertEqual(default["goal_status"], "complete")  # Requested persisted metadata only.
+        self.assertEqual(code, 0)
+        self.assertTrue(all(error["blocks_delete"] for error in default["store_errors"]))
+        self.assertTrue(all(not error["blocks_inventory"] for error in default["store_errors"]))
         self.assertEqual(len(default["targets"]), 14)
         code, explicit = self.invoke(["records", "--client", "herdr", "--herdr-root", str(self.profile), "--json"])
         self.assertEqual(len(explicit["targets"]), 7)
@@ -68,8 +71,8 @@ class HerdrIntegrationTests(unittest.TestCase):
         restore = next(r for r in first.snapshot_references().references if r.kind.value == "restore")
         code, selected = self.invoke(["records", "--client", "herdr", "--herdr-root", str(self.profile),
             "--herdr-root", str(broken), "--record-id", restore.binding_key, "--json"])
-        self.assertNotEqual(code, 0)
-        self.assertFalse(selected["goal_satisfied"])
+        self.assertEqual(code, 0)
+        self.assertTrue(selected["goal_satisfied"])
         self.assertEqual(len(selected["targets"]), 1)
         self.assertEqual(selected["targets"][0]["references"][0]["kind"], "restore")
         self.assertTrue(selected["store_errors"])

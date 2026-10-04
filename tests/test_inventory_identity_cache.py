@@ -18,7 +18,7 @@ from tests.support import create_cindy_database, create_thread_index, write_roll
 class InventoryIdentityCacheTests(unittest.TestCase):
     def test_only_proven_exact_spellings_are_reused_within_nested_read_scope(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "record.jsonl"
+            path = Path(temporary).resolve(strict=True) / "record.jsonl"
             path.touch()
             extended = "\\\\?\\" + str(path)
             with patch("local_agent_record_janitor.path_identity.os.path.samefile",
@@ -37,7 +37,7 @@ class InventoryIdentityCacheTests(unittest.TestCase):
 
     def test_failed_identity_is_rechecked_and_exception_discards_scope(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary)
+            path = Path(temporary).resolve(strict=True)
             with patch("local_agent_record_janitor.path_identity.os.path.samefile",
                        side_effect=[False, True, True]) as proof:
                 with self.assertRaisesRegex(RuntimeError, "aborted"):
@@ -51,7 +51,7 @@ class InventoryIdentityCacheTests(unittest.TestCase):
 
     def test_missing_path_is_not_cached_when_created_during_inventory(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "new.jsonl"
+            path = Path(temporary).resolve(strict=True) / "new.jsonl"
             extended = "\\\\?\\" + str(path)
             with inventory_path_identity_scope():
                 self.assertNotEqual(canonical_existing_path_key(path),
@@ -62,7 +62,7 @@ class InventoryIdentityCacheTests(unittest.TestCase):
 
     def test_cindy_shared_paths_are_proven_once_and_next_inventory_is_fresh(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             home.mkdir()
             database = root / "cindy.db"

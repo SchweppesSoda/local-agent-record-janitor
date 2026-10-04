@@ -34,7 +34,7 @@ class FrontendClosureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve(strict=True)
         self.home = self.root / "codex-home"
         self.home.mkdir()
 

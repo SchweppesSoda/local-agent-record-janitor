@@ -13,6 +13,7 @@ import json
 import os
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -290,6 +291,7 @@ def execute_claude_delete(
     results: list[ClaudeDeleteItemResult] = []
     for approved in refreshed.actions:
         mutated: list[str] = []
+        directory_handles = ExitStack()
         try:
             current = approved
             if not targeted_guards_only:
@@ -320,6 +322,17 @@ def execute_claude_delete(
                 lstat_fn=lstat_fn,
                 digest_file=digest_file,
             )
+            if os.name != "nt":
+                # Pin approved directory inodes until this action finishes.
+                # POSIX may immediately recycle an unlinked inode, so a later
+                # lstat alone cannot distinguish a newly created replacement.
+                for entry in current.manifest:
+                    if _manifest_type(entry) != "directory":
+                        continue
+                    descriptor = os.open(_manifest_path(entry), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    directory_handles.callback(os.close, descriptor)
+                    if _stat_identity(os.fstat(descriptor)) != _manifest_stat(entry):
+                        raise ClaudeDeletePlanError("Approved Claude directory was replaced before deletion")
             if action_state_callback is not None:
                 action_state_callback("mutation_started", current, None)
             files = sorted(
@@ -409,6 +422,8 @@ def execute_claude_delete(
                 remaining,
                 f"unexpected Claude deletion verification failure: {exc}",
             )
+        finally:
+            directory_handles.close()
         results.append(item)
         if action_state_callback is not None:
             action_state_callback("verified", approved, item)

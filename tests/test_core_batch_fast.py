@@ -134,7 +134,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
         for count in (1, 10, 100):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 home = root / "codex-home"
                 thread_ids, rollout_paths = self._native_fixture(home, count)
                 adapter = NativeIntegrityAdapter(codex_home=home)
@@ -215,7 +215,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
         for count in (1, 10, 100):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
+                root = Path(temporary).resolve(strict=True)
                 home = root / "codex-home"
                 thread_ids, rollout_paths = self._native_fixture(home, count)
                 findings = [
@@ -263,7 +263,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_corrupt_unselected_store_does_not_block_selected_native_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             good_home = root / "good-codex-home"
             bad_home = root / "bad-codex-home"
             thread_ids, _rollout_paths = self._native_fixture(good_home, 1)
@@ -322,7 +322,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_operation_events_append_without_replaying_journal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             plan = {
                 "schema_version": "larj.agent-plan.v1",
                 "operation_id": "fast-journal",
@@ -379,7 +379,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_known_blocker_resumes_only_unfinished_child_and_status_keeps_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             context, actions = self._recovery_context(root)
             first, second = actions
 
@@ -485,7 +485,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_unknown_child_persists_error_and_never_retries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             context, actions = self._recovery_context(root)
             first, _second = actions
 
@@ -555,7 +555,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_attempted_blocked_child_is_recovery_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             storage = root / "store"
             storage.mkdir()
             child_id = "attempted-operation-1"
@@ -671,7 +671,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_frontend_reference_batch_rejects_mixed_missing_cindy_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "renamed-cindy-profile"
+            root = Path(temporary).resolve(strict=True) / "renamed-cindy-profile"
             root.mkdir()
             database = root / "frontend.sqlite"
             evidence = {
@@ -729,7 +729,7 @@ class CoreBatchFastTests(unittest.TestCase):
     def test_unknown_session_result_stops_remaining_requests(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        home = Path(temporary.name)
+        home = Path(temporary.name).resolve(strict=True)
         actions = tuple(
             SimpleNamespace(
                 action_id=f"action-{index}",
@@ -785,7 +785,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_coordinator_unknown_skips_terminal_scan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             action = SimpleNamespace(
                 action_id="unknown-action",
                 kind="delete_pi_session",
@@ -850,7 +850,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_pre_mutation_guard_failure_is_blocked_after_prior_batch_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             first_home = root / "native"
             second_home = root / "frontend"
             first_home.mkdir()
@@ -955,7 +955,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_known_rollback_after_prior_native_success_is_blocked_not_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             native_home = root / "native"
             frontend_home = root / "frontend"
             native_home.mkdir()
@@ -1099,7 +1099,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_cross_process_unknown_child_never_reexecutes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            home = Path(temporary)
+            home = Path(temporary).resolve(strict=True)
             child_id = "unknown-operation-1"
             child_plan = {
                 "schema_version": "larj.child-operation-plan.v1",
@@ -1211,7 +1211,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_operation_id_only_status_uses_default_user_state_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            state_root = Path(temporary)
+            state_root = Path(temporary).resolve(strict=True)
             document = {
                 "schema_version": "larj.operation-plan.v1",
                 "document_type": "operation_plan",
@@ -1230,7 +1230,7 @@ class CoreBatchFastTests(unittest.TestCase):
             )
             write_new_json(plan_path, document)
 
-            with patch.dict(os.environ, {"LOCALAPPDATA": str(state_root)}):
+            with patch.dict(os.environ, {"LOCALAPPDATA": str(state_root), "XDG_STATE_HOME": str(state_root)}):
                 result = OperationCoordinator(SimpleNamespace()).status_operation(
                     operation_id="status-operation",
                 )
@@ -1303,7 +1303,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_verify_empty_successfully_scanned_store_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             coordinator, plan_path = self._verify_plan_fixture(root)
             result = coordinator.verify_operation(
                 operation_id="verify-operation",
@@ -1314,7 +1314,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_verify_reconciles_unknown_child_and_status_reads_complete_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             coordinator, plan_path = self._verify_plan_fixture(root)
             child_id = "verify-operation-1"
             storage = root / "store"
@@ -1382,7 +1382,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_verify_new_action_id_with_same_signature_is_residual(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             storage = root / "store"
             storage.mkdir()
             fresh = self._verify_action("new-action")
@@ -1400,7 +1400,7 @@ class CoreBatchFastTests(unittest.TestCase):
 
     def test_verify_non_ok_frozen_store_is_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             coordinator, plan_path = self._verify_plan_fixture(
                 root,
                 storage_status="failed",

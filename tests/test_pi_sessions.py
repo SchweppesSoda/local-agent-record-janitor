@@ -22,7 +22,7 @@ class PiSessionCatalogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
+        self.root = Path(self.temporary_directory.name).resolve(strict=True)
         self.home = self.root / "home"
         self.agent = self.home / ".pi" / "agent"
         self.sessions = self.agent / "sessions"

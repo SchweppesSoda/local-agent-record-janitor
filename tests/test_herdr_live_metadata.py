@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import unittest
 
-from local_agent_record_janitor.herdr_live_metadata import HerdrLiveMetadataError, decode_response, parse_live_snapshot, parse_pong
+from local_agent_record_janitor.herdr_live_metadata import HerdrLiveMetadataError, decode_response, parse_detached_daemon, parse_live_snapshot, parse_pong
 from tests.herdr_live_support import live_snapshot, pong, wire
 from tests.herdr_support import SENTINEL
 
 
 class HerdrLiveMetadataTests(unittest.TestCase):
+    def test_detached_startup_observation_accepts_only_bool_or_unknown(self):
+        for value in (True, False, None):
+            self.assertIs(parse_detached_daemon({"capabilities": {"detached_server_daemon": value}}), value)
+        self.assertIsNone(parse_detached_daemon({}))
+        self.assertIsNone(parse_detached_daemon({"capabilities": {}}))
+        for value in (0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(HerdrLiveMetadataError, "live_detached_daemon_invalid"):
+                parse_detached_daemon({"capabilities": {"detached_server_daemon": value}})
+        with self.assertRaisesRegex(HerdrLiveMetadataError, "live_capabilities_invalid"):
+            parse_detached_daemon({"capabilities": []})
+
     def parse(self, value):
         return parse_live_snapshot(decode_response(wire(value), "snapshot"), "0.9.3")
 

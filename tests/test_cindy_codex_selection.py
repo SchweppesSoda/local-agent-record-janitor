@@ -14,7 +14,7 @@ from tests.support import create_cindy_database, create_thread_index, write_roll
 class CindyCodexSelectionTests(unittest.TestCase):
     def test_project_cleanup_includes_orphan_evidence_and_stale_live_reference(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / "codex-home"
             parent = "33333333-3333-4333-8333-333333333333"
             child = "44444444-4444-4444-8444-444444444444"
@@ -71,7 +71,7 @@ class CindyCodexSelectionTests(unittest.TestCase):
 
     def test_inventory_record_can_be_selected_without_widening_scope(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve(strict=True)
             home = root / 'codex-home'
             ids = ('11111111-1111-4111-8111-111111111111',
                    '22222222-2222-4222-8222-222222222222')

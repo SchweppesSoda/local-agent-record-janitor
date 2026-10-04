@@ -100,7 +100,7 @@ def _readers(
 class CleanupPlanningTests(unittest.TestCase):
     def test_rollout_fingerprints_are_stable_and_track_file_state(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             record = _record(home, "fingerprinted")
             record.path.parent.mkdir(parents=True)
             record.path.write_text("initial body\n", encoding="utf-8")
@@ -175,7 +175,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_rollout_fingerprint_failure_blocks_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             record = _record(home, "fingerprint-error")
             record.path.parent.mkdir(parents=True)
             record.path.write_text("current body\n", encoding="utf-8")
@@ -218,7 +218,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_verified_duplicate_delete_is_available_high_and_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             records = [
                 _record(home, "duplicate", "one.jsonl"),
                 _record(home, "duplicate", "two.jsonl"),
@@ -268,7 +268,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             actual = _record(home, "path-mismatch", "actual.jsonl")
             actual.path.parent.mkdir(parents=True)
             actual.path.write_text("parsed by injected reader\n", encoding="utf-8")
@@ -324,7 +324,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_integrity_soft_reason_with_extra_tail_remains_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             record = _record(home, "extra-tail")
             record.path.parent.mkdir(parents=True)
             record.path.write_text("current content\n", encoding="utf-8")
@@ -366,7 +366,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             verified = _record(home, "target", "verified.jsonl")
             unverified = _record(home, "target", "unverified.jsonl")
             indexed_unknown = home / "sessions" / "indexed-unknown.jsonl"
@@ -456,7 +456,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_integrity_delete_blocks_active_reference(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             record = _record(home, "active-duplicate")
             record.path.parent.mkdir(parents=True)
             record.path.write_text("current content\n", encoding="utf-8")
@@ -488,7 +488,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_integrity_delete_blocks_conflicting_rollout_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             records = [
                 _record(
                     home,
@@ -538,7 +538,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             parent = _finding(home, "parent", "index_missing_rollout")
             child = _finding(
                 home,
@@ -607,7 +607,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             parent = _finding(home, "parent", "index_missing_rollout")
             records = [
                 _record(home, "child", "child-one.jsonl"),
@@ -672,7 +672,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             stale = _record(home, "stale-adapter")
             finding = _finding(
                 home,
@@ -718,7 +718,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             reported = _record(home, "reported-current")
             reported.path.parent.mkdir(parents=True)
             reported.path.write_text(
@@ -762,7 +762,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_known_frontend_descendant_is_available_but_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             finding = _finding(
                 home,
                 "frontend-root",
@@ -815,7 +815,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             finding = _finding(
                 home,
                 "uncoded-cascade",
@@ -898,7 +898,7 @@ class CleanupPlanningTests(unittest.TestCase):
         )
         for thread_id, details, removed_keys in cases:
             with self.subTest(case=thread_id), tempfile.TemporaryDirectory() as root:
-                home = Path(root) / "home"
+                home = Path(root).resolve(strict=True) / "home"
                 finding = _finding(
                     home,
                     thread_id,
@@ -923,7 +923,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_unavailable_frontend_descendant_graph_remains_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             finding = _finding(
                 home,
                 "frontend-root",
@@ -960,7 +960,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             finding = _finding(
                 home,
                 "frontend-root",
@@ -1076,7 +1076,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_current_rollout_metadata_changes_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             path = home / "sessions" / "same-path.jsonl"
             path.parent.mkdir(parents=True)
             path.write_text("current content\n", encoding="utf-8")
@@ -1129,7 +1129,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_indexed_damaged_rollout_path_is_content_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             damaged_path = home / "sessions" / "damaged.jsonl"
             damaged_path.parent.mkdir(parents=True)
             damaged_path.write_text(
@@ -1197,7 +1197,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_frontend_delete_blocks_indexed_path_owned_by_other_id(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             indexed_path = home / "sessions" / "indexed-other.jsonl"
             indexed_path.parent.mkdir(parents=True)
             indexed_path.write_text("current content\n", encoding="utf-8")
@@ -1260,7 +1260,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_new_frontend_residual_changes_snapshot_for_same_action(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             first_finding = _finding(
                 home,
                 "shared-thread",
@@ -1302,8 +1302,8 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_same_thread_id_in_two_storages_is_never_merged(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home_a = Path(root) / "home-a"
-            home_b = Path(root) / "home-b"
+            home_a = Path(root).resolve(strict=True) / "home-a"
+            home_b = Path(root).resolve(strict=True) / "home-b"
             findings = [
                 _finding(home_a, "same-id", "index_missing_rollout"),
                 _finding(home_b, "same-id", "index_missing_rollout"),
@@ -1327,7 +1327,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_additional_findings_expand_to_stable_independent_observations(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             finding = _finding(
                 home,
                 "thread-1",
@@ -1377,7 +1377,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "explicit-home"
+            home = Path(root).resolve(strict=True) / "explicit-home"
             parent_id = "missing-parent"
             source = {
                 "subagent": {
@@ -1437,7 +1437,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_residual_relation_delete_requires_safe_child_identity(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "explicit-home"
+            home = Path(root).resolve(strict=True) / "explicit-home"
             exact_record = _record(
                 home,
                 "conflicted-child",
@@ -1563,7 +1563,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             parent_id = "indexed-parent"
             child_id = "rollout-only-child"
             source = {
@@ -1643,7 +1643,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "explicit-home"
+            home = Path(root).resolve(strict=True) / "explicit-home"
             source_parent = "deleted-parent"
             source = {
                 "subagent": {
@@ -1773,7 +1773,7 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            explicit_home = Path(root) / "unknown-home"
+            explicit_home = Path(root).resolve(strict=True) / "unknown-home"
             finding = _finding(
                 explicit_home,
                 "explicit-thread",
@@ -1805,9 +1805,9 @@ class CleanupPlanningTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
-            first_hint = Path(root) / "bin-one" / "codex.exe"
-            second_hint = Path(root) / "bin-two" / "codex.exe"
+            home = Path(root).resolve(strict=True) / "home"
+            first_hint = Path(root).resolve(strict=True) / "bin-one" / "codex.exe"
+            second_hint = Path(root).resolve(strict=True) / "bin-two" / "codex.exe"
             conflict_findings = [
                 _finding(
                     home,
@@ -1952,7 +1952,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_integrity_findings_have_specific_structured_actions(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             records = {
                 "duplicate": [
                     _record(home, "duplicate", "one.jsonl"),
@@ -2004,7 +2004,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_impact_and_snapshot_cover_all_associated_task_conversations(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             root_record = _record(home, "root")
             child_record = _record(home, "child")
             changed_child_record = _record(home, "child", "changed.jsonl")
@@ -2078,8 +2078,8 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_failure_in_empty_storage_does_not_block_independent_storage(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            failed_home = Path(root) / "failed-home"
-            healthy_home = Path(root) / "Cindy"
+            failed_home = Path(root).resolve(strict=True) / "failed-home"
+            healthy_home = Path(root).resolve(strict=True) / "Cindy"
             finding = _finding(
                 healthy_home,
                 "healthy",
@@ -2125,7 +2125,7 @@ class CleanupPlanningTests(unittest.TestCase):
 
     def test_unassigned_scan_error_is_preserved_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root) / "home"
+            home = Path(root).resolve(strict=True) / "home"
             report = SimpleNamespace(
                 findings=[
                     _finding(home, "thread", "index_missing_rollout")

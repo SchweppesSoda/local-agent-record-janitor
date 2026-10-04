@@ -61,6 +61,19 @@ def parse_pong(result: dict[str, Any]) -> str:
     return _version(result, "pong")
 
 
+def parse_detached_daemon(result: dict[str, Any]) -> bool | None:
+    """Server's startup observation, never proof that clients or writers left."""
+    capabilities = result.get("capabilities")
+    if capabilities is None:
+        return None
+    if not isinstance(capabilities, dict):
+        raise HerdrLiveMetadataError("live_capabilities_invalid")
+    value = capabilities.get("detached_server_daemon")
+    if value is not None and type(value) is not bool:
+        raise HerdrLiveMetadataError("live_detached_daemon_invalid")
+    return value
+
+
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or len(value) > MAX_ITEMS or any(not isinstance(row, dict) for row in value):
         raise HerdrLiveMetadataError("live_collection_invalid")

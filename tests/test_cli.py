@@ -126,8 +126,8 @@ class NumberSelectionTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
             invalid_paths = (
-                Path(root) / "missing-codex.cmd",
-                Path(root),
+                Path(root).resolve(strict=True) / "missing-codex.cmd",
+                Path(root).resolve(strict=True),
             )
             for path in invalid_paths:
                 for command in ("scan", "clean"):
@@ -164,7 +164,7 @@ class NumberSelectionTests(unittest.TestCase):
         parser = build_parser()
         with tempfile.TemporaryDirectory() as root:
             for suffix in (".cmd", ".bat"):
-                path = Path(root) / f"codex{suffix}"
+                path = Path(root).resolve(strict=True) / f"codex{suffix}"
                 path.write_text("@echo off\n", encoding="utf-8")
                 for command in ("scan", "clean"):
                     with self.subTest(
@@ -514,7 +514,7 @@ class CandidateActionSelectionTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            codex_home = Path(root) / "codex-home"
+            codex_home = Path(root).resolve(strict=True) / "codex-home"
             parent_id = "existing-parent"
             child_id = "rollout-only-child"
             write_rollout(
@@ -858,7 +858,7 @@ class ActionOutputTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as root:
-            codex_home = Path(root) / "codex-home"
+            codex_home = Path(root).resolve(strict=True) / "codex-home"
             parent_id = "missing-parent"
             child_id = "source-only-child"
             write_rollout(
@@ -1075,7 +1075,7 @@ class MainFlowTests(unittest.TestCase):
     def _execution_plan(self) -> SimpleNamespace:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        return _display_plan(Path(temporary.name))
+        return _display_plan(Path(temporary.name).resolve(strict=True))
 
     def test_purge_requires_yes_and_clients_closed_before_scanning(self) -> None:
         for argv in (("purge",), ("purge", "--yes")):
@@ -1122,7 +1122,7 @@ class MainFlowTests(unittest.TestCase):
 
     def test_purge_blocked_actions_are_not_reported_as_completed(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            codex_home = Path(root) / "codex-home"
+            codex_home = Path(root).resolve(strict=True) / "codex-home"
             indexed_id = "indexed-thread"
             metadata_id = "metadata-thread"
             rollout = write_rollout(
@@ -1176,7 +1176,7 @@ class MainFlowTests(unittest.TestCase):
 
     def test_purge_repairs_all_available_codex_residuals_without_selection(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            codex_home = Path(root) / "codex-home"
+            codex_home = Path(root).resolve(strict=True) / "codex-home"
             create_thread_index(codex_home, [])
             legacy_path = codex_home / "session_index.jsonl"
             legacy_path.write_text(
@@ -1208,14 +1208,14 @@ class MainFlowTests(unittest.TestCase):
 
     def test_cindy_codex_home_override_keeps_all_sibling_namespace_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            appdata = Path(temporary_directory) / "AppData"
+            appdata = Path(temporary_directory).resolve(strict=True) / "AppData"
             root = appdata / "CindyGlobal"
             root.mkdir(parents=True)
             local = root / "cindy-local-v1.db"
             owner = root / "cindy-owner-fixture.db"
             local.touch()
             owner.touch()
-            custom_home = Path(temporary_directory) / "custom-codex-home"
+            custom_home = Path(temporary_directory).resolve(strict=True) / "custom-codex-home"
             args = build_parser().parse_args(
                 (
                     "records", "--platform", "cindy",
@@ -1231,7 +1231,7 @@ class MainFlowTests(unittest.TestCase):
 
     def test_local_clean_rediscovers_owner_namespace_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            base = Path(temporary_directory)
+            base = Path(temporary_directory).resolve(strict=True)
             appdata = base / "AppData"
             cindy_root = appdata / "CustomCindy"
             home = cindy_root / "codex-home"
@@ -1291,7 +1291,7 @@ class MainFlowTests(unittest.TestCase):
 
     def test_local_clean_rediscovers_owner_namespace_after_server_start(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            base = Path(temporary_directory)
+            base = Path(temporary_directory).resolve(strict=True)
             appdata = base / "AppData"
             cindy_root = appdata / "CustomCindy"
             home = cindy_root / "codex-home"
@@ -1480,7 +1480,7 @@ class MainFlowTests(unittest.TestCase):
 
     def test_legacy_repair_discards_temporary_backup_and_has_no_restore_command(self) -> None:
         with tempfile.TemporaryDirectory() as root:
-            codex_home = Path(root) / "codex-home"
+            codex_home = Path(root).resolve(strict=True) / "codex-home"
             create_thread_index(codex_home, [])
             legacy_path = codex_home / "session_index.jsonl"
             original = (
@@ -1645,7 +1645,7 @@ class MainFlowTests(unittest.TestCase):
         }
         for label, mutator in mutators.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as root:
-                codex_home = Path(root) / "codex-home"
+                codex_home = Path(root).resolve(strict=True) / "codex-home"
                 thread_id = f"fingerprint-{label}"
                 rollout_path = write_rollout(
                     codex_home,

@@ -11,7 +11,7 @@ class AtomicWriteJsonReplaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name)
+        self.directory = Path(self.temp.name).resolve(strict=True)
         self.path = self.directory / "state.json"
 
     @staticmethod
