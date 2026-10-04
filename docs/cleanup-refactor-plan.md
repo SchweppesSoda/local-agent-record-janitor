@@ -242,6 +242,12 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 公共 v3 plan/cold apply/cold verify TEMP 验收。品牌静态 capability 仍关闭，逐目标票据
 只开放该组合；Herdr、其他引擎/home/runtime/OS 和 frontend/remote 写入继续关闭。
 
+**暂停位置（2026-10-04）：**开发暂止于 P5 首个限定组合，实现基线为 `cb2c7a6`。
+P5 其余组合与 P6 尚未完成。恢复开发时，先为正常使用过、已有配置/凭据和启动产物的
+Orca managed home 设计可冻结的兼容边界，再用合成配置与隔离临时目录中的真实程序
+验收；不得直接放宽当前阻挡条件，也不以用户真实记录试删代替验收。其他引擎、Herdr
+和跨平台能力继续按各自证据门槛推进。
+
 #### P5 首个切片的施工与验收
 
 本次施工限定 Orca/Codex/Windows、固定 journal4/record2、本机一个明确 managed
@@ -287,7 +293,7 @@ account home 的 native-only 目标及引擎必须后代；runtime home、bridge
    新 alias、路径/marker/config/binary 替换、冻结源不可读、v1/v2 不补授权、
    apply 新引用/新链接、unknown 防重发及 status/verify。相关既有 protocol
    回归、真实双进程互斥和完整 suite 通过后，检查文档链接/diff，在既有 main
-   scoped local commit；报告固定 binary/OS 的验收范围及剩余限制，不 push。
+   scoped local commit；报告固定 binary/OS 的验收范围及剩余限制，推送按用户授权执行。
 
 上述关闭检查、冻结/复查与真实 binary 隔离验收共同决定逐目标资格，不翻转品牌
 capability。当前完成范围继续限于
