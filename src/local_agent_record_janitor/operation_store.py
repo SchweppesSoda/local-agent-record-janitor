@@ -153,8 +153,11 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
-            prefix=f".{path.name}.agent-",
-            suffix=".tmp",
+            # Keep the exclusive random sibling no longer than plan.json.
+            # Including the destination name exceeded Windows MAX_PATH for
+            # otherwise valid journals and POSIX NAME_MAX for long plan names.
+            prefix=".",
+            suffix="",
             dir=path.parent,
             delete=False,
         ) as handle:

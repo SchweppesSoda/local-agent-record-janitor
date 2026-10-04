@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,19 @@ class AtomicWriteJsonReplaceTests(unittest.TestCase):
         self.assertTrue(all(destination == self.path for _, destination in calls))
         self.assertFalse(calls[0][0].exists())
 
+    def test_valid_destination_near_host_path_limit_can_publish_and_replace(self):
+        if os.name == "nt":
+            directory = self.directory / ("d" * (228 - len(str(self.directory)) - 1))
+            directory.mkdir()
+            path = directory / "receipt.json"
+        else:
+            directory = self.directory
+            path = directory / ("r" * 245 + ".json")
+        operation_store.atomic_write_json(path, {"old": True})
+        operation_store.atomic_write_json(path, {"complete": True})
+        self.assertEqual(path.read_bytes(), b'{"complete":true}\n')
+        self.assertEqual(list(directory.iterdir()), [path])
+
     def test_exhausted_windows_retries_keep_old_file_and_encode_once(self):
         before = b'{"old":true}\n'
         self.path.write_bytes(before)
@@ -83,7 +97,7 @@ class AtomicWriteJsonReplaceTests(unittest.TestCase):
         self.assertEqual(len(calls), operation_store._ATOMIC_REPLACE_MAX_ATTEMPTS)
         self.assertEqual(len({source for source, _ in calls}), 1)
         self.assertEqual(encode.call_count, 1)
-        self.assertFalse(list(self.directory.glob(".state.json.agent-*.tmp")))
+        self.assertEqual(list(self.directory.iterdir()), [self.path])
 
     def test_unrelated_replace_error_is_not_retried(self):
         before = b'{"old":true}\n'
@@ -107,7 +121,7 @@ class AtomicWriteJsonReplaceTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(len(calls), 1)
         time_proxy.sleep.assert_not_called()
-        self.assertFalse(list(self.directory.glob(".state.json.agent-*.tmp")))
+        self.assertEqual(list(self.directory.iterdir()), [self.path])
 
     def test_windows_lock_error_is_not_retried_on_non_windows(self):
         source = self.directory / "temporary.json"
