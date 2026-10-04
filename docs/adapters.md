@@ -101,6 +101,8 @@ fresh-reference 执行契约。
 device/file ID、nlink、已知路径与错误。host/namespace 在构造 `Path` 前检查；UNC、
 foreign-OS、范围外及断链 locator 保持不透明或 incomplete。只允许范围内的 leaf
 symlink，目录链接和身份变化不能视为完整观察；不读取内容或另行发现副本。
+`readlink` 保留系统返回的原始目标；Windows 本机盘符的 `\\?\` 路径仅在 root
+两种拼写的目录身份一致时共享范围边界，UNC/设备路径仍不跟随。
 
 `collect_client_file_aliases()` 仅提取选中 native 清单项的 rollout、Pi JSONL 或 Claude
 manifest 文件。`records --client ...` 将结果作为独立 `file_aliases` 输出，不加入旧

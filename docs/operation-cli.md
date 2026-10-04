@@ -117,6 +117,9 @@ the original native IDs/rollouts/rows/edges/sidebar index directly. A terminal
 child receipt retains that original runtime evidence. An existing Job, missing
 runtime proof, bad source, linked survivor or incomplete read keeps the outcome
 unknown. Software upgrades cannot add evidence or change the original plan hash.
+Recovery inventories only the frozen native home; an ambient `CODEX_HOME` or an
+extra native adapter does not add a store to that inventory. Frozen and current
+protection sources still participate in guard checks, including source failures.
 
 Existing v1 plans keep their original fields, bytes and hash. If an unattempted
 v1 operation now requires these new protection locators, apply returns

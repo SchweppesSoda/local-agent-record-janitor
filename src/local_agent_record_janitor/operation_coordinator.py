@@ -833,7 +833,6 @@ class OperationCoordinator:
                     source = retain_guard_sources(source, validate_guard_sources(document))
                 source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
                 source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(document), *orca_roots)))
-                source = self._orca_recovery_sources(document, source)
                 self._emit_progress(
                     progress_callback,
                     "inventory",
@@ -850,6 +849,7 @@ class OperationCoordinator:
                 ) = self._build_context(
                     "native" if document.get("schema_version") == PLAN_V3 else client_name,
                     source,
+                    inventory_adapters=self._orca_recovery_sources(document, source),
                     explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(document.get("scope", {}).get("engines", ())),
                     explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
@@ -1525,6 +1525,7 @@ class OperationCoordinator:
         client: str,
         adapters: tuple[Any, ...] | None,
         *,
+        inventory_adapters: tuple[Any, ...] | None = None,
         engines: Sequence[str] = (),
         explicit_session_ids: Sequence[str] = (),
         include_action_contexts: bool = False,
@@ -1538,11 +1539,14 @@ class OperationCoordinator:
 
         explicit_session_ids = tuple(dict.fromkeys((*explicit_session_ids, *explicit_frontend_ids)))
         explicit_frontend_ids = explicit_session_ids
-        candidates = (tuple(adapters) if adapters is not None else
+        source = (tuple(adapters) if adapters is not None else
                   () if client in {"pi", "claude"} else
                   tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots,
                                                herdr_roots=herdr_roots, workbuddy_roots=workbuddy_roots)))
-        guards = self._with_current_guard_sources(candidates, client, codex_home=codex_home, orca_roots=orca_roots)
+        # Recovery inventories only its frozen stores. Ambient adapters still
+        # provide protection evidence without becoming new inventory targets.
+        candidates = source if inventory_adapters is None else inventory_adapters
+        guards = self._with_current_guard_sources(source, client, codex_home=codex_home, orca_roots=orca_roots)
         if client == "orca" and explicit_frontend_ids:
             qualified = self._qualified_orca_context(candidates, guards, explicit_frontend_ids, engines)
             if qualified is not None:
@@ -5576,7 +5580,8 @@ class OperationCoordinator:
             context, _adapters, _catalog, _manual_plan, _manual_actions, _action_contexts = (
                 self._build_context(
                     "native" if live.document.get("schema_version") == PLAN_V3 else live.client,
-                    self._orca_recovery_sources(live.document, live.adapters),
+                    live.adapters,
+                    inventory_adapters=self._orca_recovery_sources(live.document, live.adapters),
                     explicit_frontend_ids=tuple(live.document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(
                         live.document.get("scope", {}).get("engines", ())
@@ -5619,10 +5624,11 @@ class OperationCoordinator:
         if document.get("schema_version") != PLAN_V3:
             return source
         from .adapters import NativeIntegrityAdapter
-        homes = {value["frozen"]["home"]: value["frozen"]["binary"]["path"]
+        homes = {canonical_path(value["frozen"]["home"]): value["frozen"]
                  for value in document.get("target_safety_evidence", ()) if value["frozen"].get("binary")}
-        return (*source, *(NativeIntegrityAdapter(codex_home=Path(home), codex_bin_hint=Path(binary))
-                          for home, binary in homes.items()))
+        return tuple(NativeIntegrityAdapter(codex_home=Path(frozen["home"]),
+                                            codex_bin_hint=Path(frozen["binary"]["path"]))
+                     for frozen in homes.values())
 
     @staticmethod
     def _orca_runtime_recovery_errors(document):

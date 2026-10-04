@@ -48,7 +48,8 @@ class OrcaTargetSafetyTests(unittest.TestCase):
             patch("local_agent_record_janitor.orca_target_safety._windows_process_snapshot", return_value=()),
             patch("local_agent_record_janitor.orca_target_safety._system_configuration_root", return_value=self.root / "system-config"),
             patch.dict(os.environ, {"APPDATA": str(self.root / "appdata"), "ORCA_USER_DATA_PATH": "",
-                                   "LOCALAPPDATA": str(self.root / "localappdata")}),
+                                   "LOCALAPPDATA": str(self.root / "localappdata"),
+                                   "CODEX_HOME": str(self.root / "unrelated-native")}),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -96,6 +97,10 @@ class OrcaTargetSafetyTests(unittest.TestCase):
         create_native_schema(self.home)
         self.rollout = add_native_record(self.home, TARGET_ID)
         path = self.root / "cold.json"
+        unrelated = self.root / "unrelated-native"
+        unrelated.mkdir()
+        (unrelated / "state_5.sqlite").write_bytes(b"unrelated invalid database")
+        unrelated_adapter = NativeIntegrityAdapter(codex_home=unrelated)
         coordinator = OperationCoordinator(CleanupService())
         with patch("local_agent_record_janitor.orca_runtime.RUNTIME_ACCEPTED", True):
             plan = coordinator.plan_operation(client="orca", record_ids=(TARGET_ID,), engines=("codex",),
@@ -124,16 +129,34 @@ class OrcaTargetSafetyTests(unittest.TestCase):
         self.assertTrue(malformed["batches"])
         self.assertTrue(store.state_path.exists())
         index.unlink()
-        for supplied in (None, ()):
+        original_build = OperationCoordinator._build_context_sources
+
+        def bounded_build(runner, client, adapters, **kwargs):
+            self.assertEqual(client, "native")
+            self.assertEqual([adapter.codex_home for adapter in adapters], [self.home])
+            return original_build(runner, client, adapters, **kwargs)
+
+        bounded = patch.object(OperationCoordinator, "_build_context_sources", bounded_build)
+        bounded.start()
+        self.addCleanup(bounded.stop)
+        # Narrowing inventory must retain newly discovered protection sources.
+        with patch.dict(os.environ, {"ORCA_USER_DATA_PATH": str(self.root / "missing-current-profile")}):
+            guarded = OperationCoordinator(CleanupService()).verify_operation(**args, adapters=(unrelated_adapter,))
+        self.assertEqual(guarded["goal_status"], "unknown", guarded)
+        self.assertIn("guard_source_incomplete", {item["blocker_code"] for item in guarded["blockers"]})
+        self.assertTrue(guarded["mutation_started"])
+        self.assertTrue(guarded["batches"])
+        self.assertTrue(store.state_path.exists())
+        for supplied in (None, (), (unrelated_adapter,)):
             output = StringIO()
             exit_code = main(["operation", "verify", "--operation-id", plan["operation_id"], "--plan", str(path), "--json"],
                              adapters=supplied, stdout=output, stderr=StringIO(), cleanup_service=CleanupService())
             public = json.loads(output.getvalue())
-            self.assertEqual(exit_code, 3)
+            self.assertEqual(exit_code, 3, public)
             self.assertEqual(public["goal_status"], "completed_with_residuals", public)
             self.assertTrue(public["mutation_started"])
         with patch("local_agent_record_janitor.orca_runtime.runtime_instance_stopped", wraps=runtime_instance_stopped) as stopped:
-            residual = coordinator.verify_operation(**args)
+            residual = coordinator.verify_operation(**args, adapters=(self.adapter, unrelated_adapter))
             self.assertEqual(residual["goal_status"], "completed_with_residuals", residual)
             self.assertTrue(residual["mutation_started"])
             stopped.assert_called_once_with(instance)

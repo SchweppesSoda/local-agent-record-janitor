@@ -80,7 +80,8 @@ class FileAliasEvidenceTests(unittest.TestCase):
         self._link(self.file, link)
         result = probe_file_aliases((self.file, link), roots=(self.root,))
         self.assertEqual(result.entries[1].kind, "symlink")
-        self.assertEqual(result.entries[1].readlink, str(self.file))
+        self.assertEqual(result.entries[1].readlink, os.readlink(link))
+        self.assertTrue(result.entries[1].probe_complete, result.to_dict())
         self.assertEqual(result.entries[1].file_id, result.entries[0].file_id)
         self.assertEqual(len(result.entries[0].known_hardlink_paths), 1)
         self.assertFalse(result.to_dict()["alias_coverage_complete"])
@@ -96,7 +97,7 @@ class FileAliasEvidenceTests(unittest.TestCase):
             actual_lstat = Path.lstat
 
             def bounded_lstat(path, *args, **kwargs):
-                if path == external:
+                if path == external or str(path) == "\\\\?\\" + str(external):
                     raise AssertionError("Unapproved target must not be probed")
                 return actual_lstat(path, *args, **kwargs)
 
@@ -109,6 +110,91 @@ class FileAliasEvidenceTests(unittest.TestCase):
                 self.assertTrue(all(entry.readlink for entry in result.entries))
                 self.assertIn("outside_known_roots", str(result.entries[1].errors))
                 self.assertTrue(all(entry.file_id is None for entry in result.entries))
+
+    def test_relative_leaf_symlink_preserves_its_raw_target(self):
+        link = self.root / "relative.jsonl"
+        self._link(self.file.name, link)
+        result = probe_file_aliases((self.file, link), roots=(self.root,))
+        self.assertTrue(result.entries[1].probe_complete, result.to_dict())
+        self.assertEqual(result.entries[1].readlink, self.file.name)
+        self.assertEqual(result.entries[1].file_id, result.entries[0].file_id)
+
+    def test_remote_and_foreign_symlink_targets_are_rejected_before_probing(self):
+        link = self.root / "opaque.jsonl"
+        self._link(self.file, link)
+        targets = ("\\\\server\\share\\file", "//server/share/file", "ssh://host/file",
+                   "\\\\?\\UNC\\server\\share\\file", "\\\\.\\C:\\file", "C:relative")
+        targets += (("/home/foreign/file", "\\foreign\\file") if os.name == "nt"
+                    else ("C:\\foreign\\file", "\\\\?\\C:\\foreign\\file"))
+        permitted = {str(path) for path in (link, self.root, *self.root.parents)}
+        actual_lstat = Path.lstat
+
+        def bounded_lstat(path, *args, **kwargs):
+            self.assertIn(str(path), permitted, "Opaque target must not be probed")
+            return actual_lstat(path, *args, **kwargs)
+
+        for target in targets:
+            with self.subTest(target=target), patch("os.readlink", return_value=target), \
+                    patch.object(Path, "lstat", bounded_lstat):
+                result = probe_file_aliases((link,), roots=(self.root,))
+            self.assertEqual(result.entries[0].readlink, target)
+            self.assertIn("opaque_link_target", str(result.entries[0].errors))
+            self.assertIsNone(result.entries[0].file_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-path spelling only")
+    def test_extended_root_spelling_requires_matching_directory_identity(self):
+        # Win32 strips the trailing dot; the extended spelling names a
+        # distinct directory. It must not silently extend the approved root.
+        approved = self.root / "store."
+        approved.mkdir()
+        distinct = Path("\\\\?\\" + str(approved))
+        distinct.mkdir()
+        self.addCleanup(distinct.rmdir)
+        external = distinct / "unapproved.jsonl"
+        external.write_bytes(b"UNAPPROVED")
+        self.addCleanup(external.unlink)
+        self.assertFalse(os.path.samefile(approved, distinct))
+        link = approved / "link.jsonl"
+        self._link(external, link)
+        actual_lstat = Path.lstat
+
+        def bounded_lstat(path, *args, **kwargs):
+            if path == external:
+                raise AssertionError("Different root identity must not be probed")
+            return actual_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, "lstat", bounded_lstat):
+            result = probe_file_aliases((link,), roots=(approved,))
+        self.assertIn("outside_known_roots", str(result.entries[0].errors))
+        self.assertIsNone(result.entries[0].file_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-path spelling only")
+    def test_extended_spelling_cannot_hide_replacement_of_the_approved_root(self):
+        actual_lstat = Path.lstat
+        for omit_missing in (False, True):
+            with self.subTest(omit_missing=omit_missing):
+                approved = self.root / f"approved-{omit_missing}"
+                approved.mkdir()
+                extended = Path("\\\\?\\" + str(approved))
+                swapped = False
+
+                def replaced_root(path, *args, **kwargs):
+                    nonlocal swapped
+                    if path == extended and not swapped:
+                        swapped = True
+                        approved.rename(self.root / f"moved-{omit_missing}")
+                        approved.mkdir()
+                        if not omit_missing:
+                            (approved / "known.jsonl").write_bytes(b"replacement")
+                    return actual_lstat(path, *args, **kwargs)
+
+                with patch.object(Path, "lstat", replaced_root):
+                    result = probe_file_aliases((extended / "known.jsonl",), roots=(approved,),
+                                                omit_initially_missing=omit_missing)
+                self.assertTrue(swapped)
+                self.assertEqual(len(result.entries), 1)
+                self.assertIn("directory_identity_changed", str(result.entries[0].errors))
+                self.assertFalse(result.entries[0].probe_complete)
 
     def test_probe_failure_and_changed_parent_keep_unknown_identity(self):
         actual_lstat = Path.lstat

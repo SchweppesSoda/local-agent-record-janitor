@@ -64,13 +64,34 @@ def _is_link(value: os.stat_result) -> bool:
 
 
 def _within(path: Path, roots: frozenset[str]) -> bool:
-    text = os.path.normpath(os.path.abspath(os.fspath(path)))
+    text = os.path.normpath(os.fspath(path))
     while text not in roots:
         parent = os.path.dirname(text)
         if parent == text:
             return False
         text = parent
     return True
+
+
+def _root_scope_keys(roots: Iterable[Path]) -> frozenset[str]:
+    keys: set[str] = set()
+    for root in roots:
+        text = os.path.normpath(os.fspath(root))
+        keys.add(text)
+        if os.name != "nt":
+            continue
+        # readlink returns extended drive paths on Windows. Admit the other
+        # spelling only after proving the root identity; blindly stripping
+        # the prefix can change the meaning of trailing dots/spaces.
+        alternate = text[4:] if text.startswith("\\\\?\\") else "\\\\?\\" + text
+        if not _local_absolute(alternate):
+            continue
+        try:
+            if os.path.samefile(text, alternate):
+                keys.add(alternate)
+        except OSError:
+            pass
+    return frozenset(keys)
 
 
 def probe_file_aliases(
@@ -93,8 +114,10 @@ def probe_file_aliases(
     raw_paths = tuple(dict.fromkeys(os.fspath(path) for path in paths))
     # WindowsPath equality folds case even inside case-sensitive directories.
     # Lexical scope keys must not merge distinct entries before a file probe.
+    # Paths are already absolute. Windows abspath can strip trailing dots
+    # even from extended paths and thereby conflate distinct directories.
     def lexical_key(path: Path) -> str:
-        return os.path.normpath(os.path.abspath(os.fspath(path)))
+        return os.path.normpath(os.fspath(path))
 
     directories: dict[str, os.stat_result] = {}
 
@@ -142,8 +165,8 @@ def probe_file_aliases(
             resolved_roots.append(resolved)
 
     path_keys: dict[str, str] = {}
-    approved_keys = frozenset(lexical_key(root) for root in approved)
-    resolved_keys = frozenset(lexical_key(root) for root in resolved_roots)
+    approved_keys = _root_scope_keys(approved)
+    resolved_keys = _root_scope_keys(resolved_roots)
 
     def inspect(raw: str) -> FileAliasEvidence | None:
         entry = FileAliasEvidence(raw)
@@ -166,7 +189,7 @@ def probe_file_aliases(
                     value = current.lstat()
                 except FileNotFoundError:
                     if omit_initially_missing and current_key == lexical_key(path) and len(seen) == 1:
-                        recheck_directories((current.parent,))
+                        recheck_directories((*approved, current.parent))
                         return None
                     raise
                 if not _is_link(value):
@@ -175,7 +198,8 @@ def probe_file_aliases(
                     break
                 target = os.readlink(current)
                 entry = replace(entry, kind="symlink", readlink=entry.readlink or target)
-                if target.startswith(("//", "\\\\")) or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", target):
+                if ((target.startswith(("//", "\\\\")) and not _local_absolute(target))
+                        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", target)):
                     raise ValueError("opaque_link_target")
                 if os.path.isabs(target):
                     if not _local_absolute(target):
@@ -202,7 +226,9 @@ def probe_file_aliases(
             # Collapse only proven spellings of one directory entry (8.3
             # and extended-prefix aliases), never distinct hardlink names.
             path_keys[entry.lexical_path] = canonical_existing_path_key(resolved)
-            recheck_directories(candidate.parent for candidate in seen.values())
+            # An alternate root spelling must not establish a fresh baseline
+            # that conceals replacement of the originally approved directory.
+            recheck_directories((*approved, *(candidate.parent for candidate in seen.values())))
             return replace(entry, kind=entry.kind if entry.kind == "symlink" else "regular_file",
                            resolved_path=str(resolved), device_id=value.st_dev, file_id=value.st_ino, nlink=value.st_nlink)
         except (OSError, RuntimeError, ValueError) as exc:
