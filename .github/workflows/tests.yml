@@ -52,3 +52,13 @@ jobs:
           LARJ_LEVELDB_RUNTIME: ${{ runner.temp }}/larj-leveldb-runtime
           LARJ_REQUIRE_LEVELDB_TESTS: "1"
         run: python -m unittest discover -s tests -v
+
+      - name: Set up pinned Rust fingerprint oracle
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: rustup toolchain install 1.92.0 --profile minimal
+
+      - name: Compare Herdr fingerprints with upstream serializer
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        env:
+          RUSTUP_TOOLCHAIN: "1.92.0"
+        run: python -m tests.herdr_fingerprint_oracle
