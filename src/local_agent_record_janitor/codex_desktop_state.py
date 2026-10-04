@@ -769,9 +769,11 @@ def _relevant_process_ids(
             executable = executable_paths[0].resolve(strict=True)
         except (OSError, RuntimeError):
             continue
-        if not str(executable).casefold().endswith(
-            "\\programs\\cindy\\cindy.exe"
-        ):
+        if not str(executable).casefold().endswith((
+            "\\programs\\cindy\\cindy.exe",
+            "\\program files\\cindy\\cindy.exe",
+            "\\program files (x86)\\cindy\\cindy.exe",
+        )):
             continue
 
         user_data_dirs: list[Path] = []
