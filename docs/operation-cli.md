@@ -106,6 +106,16 @@ and target-scoped Windows process metadata and still requires a real
 closed before apply. Only the exact approved action/home/IDs/paths receive an
 internal execution ticket; direct/manual/GUI/legacy calls cannot mint it.
 
+An exact local structured-chat selection may also include `delete_orca_frontend`.
+Target evidence v3 binds the native cascade to the complete approved frontend
+closure. Native children retain child-plan v2 startup handling; the frontend uses
+child-plan v1 and depends on verified native child receipts. All associated native
+homes participate in root admission, including a home whose records are already
+absent. Frontend-only plans remain top-level v2. Cold continuation preserves the
+original closure, timestamp and dependencies; a started ambiguous frontend is
+never dispatched again. Read-only verification checks every approved JSON/SQLite
+after-state and current recovery-source membership before issuing a terminal receipt.
+
 The corresponding `larj.child-operation-plan.v2` records root-wide coordination
 for app-server startup. Before any startup, the durable mutation marker includes
 the original named Job and machine/Windows session identity. The root mutex stays

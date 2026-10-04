@@ -149,7 +149,7 @@ local-agent-record-janitor records --client paseo --paseo-root 'D:\profiles\pase
 绑定。未知 backend 仅显示 `unverified`/`inventory_only`，不提供删除动作。`native`
 涵盖官方本地编码存储和已验证的 Desktop 本地状态，不代表 ChatGPT 云聊天清理。
 Orca 已提供本机 Codex 多 home 与 current/history 引用的只读清单；高层 operation 的
-精确 Windows/Codex 组合按冻结证据逐目标核查删除资格，见
+精确 Windows/Codex 组合支持普通本机会话的原生链、界面和恢复副本清理，按冻结证据逐目标核查删除资格，见
 [限定组合](docs/adapters.md#orca精确原生删除的限定组合)。Herdr 已提供持久化 schema3 的 current/restore 引用清单，
 并可显式查询本机 live metadata；native root 和全部 writer 归属仍未证明，所有写入与自身终验能力关闭。关系语义、共享存储和支持边界见
 [Adapter 贡献指南](docs/adapters.md)。
@@ -181,7 +181,7 @@ OpenAI 稳定 API。
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
 | WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session` 与独立 `remove_workbuddy_ui_reference`；已证明的本地终态会话或仅置顶引用，未知归属及云同步关联阻止删除 |
-| Orca | 本机 journal 引用及已证明的 managed Codex home | 限定 Windows/Codex 组合逐目标验证删除资格；其他引擎、runtime home、桥接与远端写入关闭 |
+| Orca | 本机 journal、profile 界面及恢复副本、已证明的 managed Codex home | 限定 Windows/Codex 组合支持完整操作及冷验证；未知恢复、其他引擎、runtime home 与远端写入关闭 |
 | Herdr | 持久化 current/restore 引用及显式本机 live metadata | 只读盘点；native root 与完整 writer 归属未证明，删除及自身终验关闭 |
 | 千问办公 / QoderWork CN | 已核实 CN schema、独占 SDK 记录、界面缓存与逐会话文件 | 本地会话分 SDK/profile 两批删除并冷验证；云端、共享或未知恢复引用阻止对应目标 |
 | Paseo | 当前及旧格式 agent 注册快照、归档状态和恢复引用 | 只读盘点；不推断 provider 原生存储归属或 daemon 已停止 |
@@ -404,6 +404,10 @@ root 只提供精确保护证据，不成为 Orca native catalog 或 writer。�
 也约束同一 store 的 native 删除入口。Orca `delete plan/run` 只有
 [固定 Windows 原生组合](docs/adapters.md#orca精确原生删除的限定组合)可获得逐目标资格；
 其他组合返回 `blocked`，旧 direct/manual/GUI 入口不授予该资格。
+
+清理普通本机 structured-chat 时，选择其 frontend session ID，指定已登记的
+`--codex-bin PATH`，生成包含原生链和前端副本的同一份计划。执行顺序为原生会话、
+界面及恢复副本；中断后先运行 `operation status/verify`，不重新发送未知删除。
 
 含 Orca 保护来源的新高层计划使用顶层 v2，合格的精确 Orca 原生删除采用 v3；均将
 所需 profile locator 纳入批准 hash；

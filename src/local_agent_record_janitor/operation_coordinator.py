@@ -345,7 +345,8 @@ class OperationCoordinator:
             client_name = str(document["scope"]["client"])
             codex_home = self._bound_codex_home(document, codex_home)
             frozen_roots = validate_guard_sources(document)
-            discovery_roots = (*frozen_roots, *orca_roots) if document["schema_version"] == PLAN_V3 else orca_roots
+            has_orca_frontend = any(action.get("kind") == "delete_orca_frontend" for action in document.get("actions", ()))
+            discovery_roots = (*frozen_roots, *orca_roots) if document["schema_version"] == PLAN_V3 or has_orca_frontend else orca_roots
             live = self._live.get(operation)
             source = (tuple(adapters) if adapters is not None else live.adapters if live is not None
                       else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=discovery_roots,
@@ -413,6 +414,7 @@ class OperationCoordinator:
                 ) = self._build_context(
                     client_name,
                     source,
+                    approved_document=document,
                     explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(document.get("scope", {}).get("engines", ())),
                     explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
@@ -828,8 +830,9 @@ class OperationCoordinator:
                 from .office_cleanup import bound_adapters as office_bound_adapters
                 adapters = office_bound_adapters(document, adapters)
                 codex_home = self._bound_codex_home(document, codex_home)
+                has_orca_frontend = any(action.get("kind") == "delete_orca_frontend" for action in document.get("actions", ()))
                 discovery_roots = ((*validate_guard_sources(document), *orca_roots)
-                                   if document["schema_version"] == PLAN_V3 else orca_roots)
+                                   if document["schema_version"] == PLAN_V3 or has_orca_frontend else orca_roots)
                 source = tuple(adapters) if adapters is not None else tuple(self._default_adapters(
                     client_name, codex_home=codex_home, orca_roots=discovery_roots,
                     workbuddy_roots=self._bound_workbuddy_roots(document, workbuddy_roots)))
@@ -1162,7 +1165,9 @@ class OperationCoordinator:
         """Map terminal residuals back to the immutable plan action IDs."""
 
         if document.get("schema_version") == PLAN_V3:
-            return cls._orca_native_residual_action_ids(document)
+            return list(dict.fromkeys((*cls._orca_native_residual_action_ids(document), *cls._orca_frontend_residual_action_ids(document))))
+        if any(a.get("kind") == "delete_orca_frontend" for a in document.get("actions", ())):
+            return cls._orca_frontend_residual_action_ids(document)
 
         cls._assert_store_coverage(document, context)
         frozen = cls._frozen_action_signatures(document)
@@ -1278,6 +1283,12 @@ class OperationCoordinator:
             "target": {"codex_home": root, "storage_id": batch["storage_id"]},
             "parent_operation_id": document["operation_id"], "mutation_family": batch["mutation_family"],
             "actions": cls._metadata(approved)}
+        if document.get("schema_version") == PLAN_V3 and family == "delete_conversation":
+            from .orca_target_safety import evidence_for_actions
+            projection["schema_version"] = "larj.child-operation-plan.v2"
+            projection["startup_boundary"] = {"schema_version": "larj.orca-startup-boundary.v1",
+                "coordination_scope": "root_wide", "home": root,
+                "target_safety_evidence": evidence_for_actions(document, approved)}
         store = OperationStore(Path(root), batch["child_operation_id"])
         if not store.directory.exists() or store.lock_exists():
             return False
@@ -1306,6 +1317,28 @@ class OperationCoordinator:
             and events and events[-1].get("goal_status") == "complete"
             and events[-1].get("event") in {"batch_finished", "verification_finished"}
             and verified == set(action_ids))
+
+    @classmethod
+    def _native_action_terminal_verified(cls, document, action_id):
+        action = next((a for a in document.get("actions", ()) if a["action_id"] == action_id), None)
+        if not action or action.get("kind") != "delete_conversation":
+            return False
+        root = next(s["path"] for s in document["storages"] if s["storage_id"] == action["target"]["storage_id"])
+        return cls._workbuddy_terminal_verified(document, root, "delete_conversation")
+
+    @classmethod
+    def _orca_frontend_residual_action_ids(cls, document):
+        from .orca_cleanup import frontend_evidence, _native_absent
+        from .orca_frontend import remaining
+        residuals = []
+        for key, evidence in frontend_evidence(document).items():
+            terminal = cls._workbuddy_terminal_verified(document, evidence["root"], "delete_orca_frontend")
+            remains = remaining(evidence, terminal_verified=terminal)
+            remains += sum(not _native_absent(record["home"], record["native_ids"]) for record in evidence["records"])
+            if remains:
+                residuals.extend(a["action_id"] for a in document["actions"] if a.get("kind") == "delete_orca_frontend"
+                    and canonical_path(a["impact"]["owner_process_root"]) == key)
+        return residuals
 
     @staticmethod
     def _orca_native_residual_action_ids(document: Mapping[str, Any]) -> list[str]:
@@ -1421,7 +1454,7 @@ class OperationCoordinator:
                 # even when an interruption prevented an execution result.
                 verified_modified = bool(state.get("modified")) or bool(
                     raw_batch.get("mutation_family") in {
-                        "delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts"
+                        "delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend"
                     }
                     and state.get("mutation_started")
                     and action_ids and not child_residuals
@@ -1551,6 +1584,7 @@ class OperationCoordinator:
         herdr_roots: Sequence[str | Path] = (),
         workbuddy_roots: Sequence[str | Path] = (),
         explicit_frontend_ids: Sequence[str] = (),
+        approved_document=None,
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
 
@@ -1565,7 +1599,7 @@ class OperationCoordinator:
         candidates = source if inventory_adapters is None else inventory_adapters
         guards = self._with_current_guard_sources(source, client, codex_home=codex_home, orca_roots=orca_roots)
         if client == "orca" and explicit_frontend_ids:
-            qualified = self._qualified_orca_context(candidates, guards, explicit_frontend_ids, engines)
+            qualified = self._qualified_orca_context(candidates, guards, explicit_frontend_ids, engines, document=approved_document)
             if qualified is not None:
                 return qualified if include_action_contexts else qualified[:5]
         result = self._build_context_sources(client, candidates, engines=engines,
@@ -1584,11 +1618,15 @@ class OperationCoordinator:
             return (context, active, catalog, manual_plan, result[4], bindings)
         return (context, active, catalog, manual_plan, result[4])
 
-    def _qualified_orca_context(self, candidates, guards, selectors, engines):
-        """The first mutation family is an exact selected native-only closure."""
+    def _qualified_orca_context(self, candidates, guards, selectors, engines, *, document=None):
+        """Qualify an exact native cascade, optionally with its frontend closure."""
         from .orca_runtime import RUNTIME_ACCEPTED
         if not RUNTIME_ACCEPTED or os.name != "nt" or engines and tuple(engines) != ("codex",):
             return None
+        from .orca_cleanup import build_context as build_full_context
+        full = build_full_context(self, candidates, guards, selectors, engines, document=document)
+        if full is not None:
+            return full
         from .client_contracts import describe_adapter
         from .orca_target_safety import plan_target_evidence
         from .orca_authorization import coordinator_scope
@@ -1796,8 +1834,10 @@ class OperationCoordinator:
 
         from contextlib import nullcontext
         from .orca_authorization import coordinator_scope
-        ticket = (coordinator_scope(live.document["target_safety_evidence"])
-                  if not readonly_recovery and live.document.get("schema_version") == PLAN_V3 and live.document.get("actions") else nullcontext())
+        from .orca_cleanup import frontend_evidence
+        frontends = tuple(frontend_evidence(live.document).values())
+        ticket = (coordinator_scope(live.document.get("target_safety_evidence", ()), frontend_closures=frontends)
+                  if not readonly_recovery and live.document.get("actions") and (frontends or live.document.get("schema_version") == PLAN_V3) else nullcontext())
         with ticket:
             live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
         live.adapters = live.context.active_adapters
@@ -3111,6 +3151,11 @@ class OperationCoordinator:
         context: Any,
         scope: Mapping[str, Any],
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+        if scope.get("client") == "orca" and any(str(a.kind.value) == "delete_orca_frontend" for a in context.plan.actions):
+            blockers = [self._blocker("scan_incomplete", str(error)) for error in context.plan.errors]
+            blockers.extend(self._blocker("action_unavailable", a.unavailable_reason or "Orca closure unavailable")
+                            for a in context.plan.actions if not a.available)
+            return (tuple(context.plan.actions), []) if not blockers else ((), blockers)
         if scope.get("client") in {"qwenwork", "qoderwork"}:
             from .office_cleanup import select_candidates
             return select_candidates(context, scope, self._blocker)
@@ -3705,6 +3750,9 @@ class OperationCoordinator:
     def _classification(context: Any, action: Any, manual_record: Any = None, client: str | None = None) -> str:
         from .inventory import ManagedConversation, classify_managed_conversation
 
+        if str(getattr(action.kind, "value", action.kind)) == "delete_orca_frontend":
+            payload = action.impact.external_action_payload or {}
+            return "healthy" if payload.get("requires_action_ids") else "orphan_frontend"
         if str(getattr(action.kind, "value", action.kind)) == "delete_schedule_run":
             return "healthy"
         if str(
@@ -4523,6 +4571,14 @@ class OperationCoordinator:
         entered = False
         try:
             with mutation_roots(frozen_operation_roots(live.document)):
+                from .orca_cleanup import frontend_evidence
+                orca_frontends = frontend_evidence(live.document)
+                if orca_frontends:
+                    from .mutation_guard import check_operation_root_admission
+                    from .orca_runtime_guard import require_closed
+                    check_operation_root_admission(live.document)
+                    for closure in orca_frontends.values():
+                        require_closed(closure, client_inspector=self.service.client_inspector)
                 if live.document.get("scope", {}).get("client") in {"qwenwork", "qoderwork"}:
                     from .mutation_guard import check_operation_root_admission
                     from .office_cleanup import operation_scope
@@ -4532,7 +4588,7 @@ class OperationCoordinator:
                         return self._execute_live_locked(live, timeout=timeout,
                             app_server_factory=app_server_factory, binary_resolver=binary_resolver, progress_callback=progress_callback)
                 entered = True
-                if live.document.get("schema_version") == PLAN_V3:
+                if live.document.get("schema_version") == PLAN_V3 or orca_frontends:
                     if app_server_factory is not None or binary_resolver is not None:
                         raise OperationCoordinatorError("Orca frozen runtime does not allow factory/binary overrides")
                     from .orca_authorization import execution_scope
@@ -4934,7 +4990,7 @@ class OperationCoordinator:
                                 (),
                             )
                         }
-                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts"}
+                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend"}
                                       else typed_by_id.get(str(action.action_id), action) for action in batch.actions)
                         outcome = self.service.execute(
                             batch_context,
@@ -5548,7 +5604,7 @@ class OperationCoordinator:
             "mutation_family": batch.mutation_family,
             "actions": child_actions,
         }
-        if live.document.get("schema_version") == PLAN_V3:
+        if live.document.get("schema_version") == PLAN_V3 and batch.mutation_family == "delete_conversation":
             from .orca_target_safety import evidence_for_actions
             child_plan["schema_version"] = "larj.child-operation-plan.v2"
             child_plan["startup_boundary"] = {"schema_version": "larj.orca-startup-boundary.v1",
@@ -5691,6 +5747,8 @@ class OperationCoordinator:
         storages = {s["storage_id"]: Path(s["path"]) for s in document["storages"]}
         try:
             for batch in document.get("child_batches", ()):
+                if batch.get("mutation_family") != "delete_conversation":
+                    continue
                 store = OperationStore(storages[batch["storage_id"]], batch["child_operation_id"])
                 if not store.directory.exists():
                     continue
@@ -6029,7 +6087,7 @@ class OperationCoordinator:
         # Exact WorkBuddy evidence distinguishes a missing row/usage/sidecar
         # from a value. Preserve its explicit nulls through plan persistence;
         # continue applying the ordinary body-key filter throughout the tree.
-        _workbuddy_nulls = _workbuddy_nulls or key in {"workbuddy_session_evidence", "office_session_evidence"}
+        _workbuddy_nulls = _workbuddy_nulls or key in {"workbuddy_session_evidence", "office_session_evidence", "orca_frontend_evidence", "orca_target_evidence"}
         if key in {"title", "display_name", "thread_name", "name"}:
             from .display_metadata import display_title
             return display_title(value)

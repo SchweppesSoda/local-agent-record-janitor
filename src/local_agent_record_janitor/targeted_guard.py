@@ -161,6 +161,9 @@ class TargetedReferenceGuard:
             if not associated:
                 return  # Rootless/remote IDs do not join a local native store.
             for error in snapshot.errors:
+                from .orca_authorization import permits_error
+                if descriptor.client == "orca" and permits_error(error):
+                    continue
                 if not error.blocks_delete:
                     continue
                 if error.store is not None and (error.store.backend != "codex"
@@ -171,6 +174,9 @@ class TargetedReferenceGuard:
                 native = reference.native_record
                 if native is not None and native.store.backend == "codex" and native.store.canonical_path == target_home:
                     if native.record_id in affected:
+                        from .orca_authorization import permits_reference
+                        if permits_reference(reference, execution=True):
+                            continue
                         if (reference.evidence_complete is True and reference.lifecycle is ReferenceLifecycle.DELETED
                                 and reference.kind in {ReferenceKind.CURRENT, ReferenceKind.HISTORY}):
                             continue

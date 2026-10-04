@@ -138,13 +138,17 @@ def required_source_errors(document: Mapping[str, Any], adapters: Iterable[objec
         if root:
             targets.add((impact.get("external_engine") or "codex", canonical_path(root)))
     errors = []
+    from .orca_cleanup import frontend_evidence, covers_error
+    frontends = frontend_evidence(document)
     for descriptor, adapter in known:
         if descriptor.client != "orca" or descriptor.profile_root is None or canonical_path(descriptor.profile_root) not in roots:
             continue
         roots.discard(canonical_path(descriptor.profile_root))
         snapshot = adapter.snapshot_references()
+        closure = frontends.get(canonical_path(descriptor.profile_root))
         errors.extend(error.message for error in snapshot.errors if error.blocks_delete
-                      and (error.store is None or (error.store.backend, error.store.canonical_path) in targets))
+                      and (error.store is None or (error.store.backend, error.store.canonical_path) in targets)
+                      and not (closure is not None and covers_error(closure, error)))
     if roots:
         errors.append("frozen_guard_source_unavailable")
     return tuple(dict.fromkeys(errors))

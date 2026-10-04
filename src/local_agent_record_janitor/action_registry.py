@@ -23,6 +23,8 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "delete_orca_frontend": ActionCapability("delete_orca_frontend", True, "delete_orca_frontend", True,
+        "frozen_orca_journal_profiles_and_restore_copies_absent"),
     "delete_office_frontend": ActionCapability("delete_office_frontend", True, "delete_office_frontend", True,
         "frozen_office_database_ui_and_vault_closure_absent"),
     "delete_office_artifacts": ActionCapability("delete_office_artifacts", True, "delete_office_artifacts", True,
@@ -160,7 +162,7 @@ def capability_field_for_action(kind: object) -> str | None:
         return "native_delete"
     if family in {"remove_frontend_reference", "remove_workbuddy_ui_reference"}:
         return "frontend_reference_delete"
-    if family in {"delete_frontend_session", "delete_schedule_run", "delete_office_frontend"}:
+    if family in {"delete_frontend_session", "delete_schedule_run", "delete_office_frontend", "delete_orca_frontend"}:
         return "frontend_session_delete"
     if family in {"delete_project_item", "delete_native_project"}:
         return "frontend_project_delete"

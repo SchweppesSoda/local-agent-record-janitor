@@ -163,7 +163,7 @@ def _mutation_resource_key(action: Any, family: str) -> tuple[str, ...]:
     if family == "remove_frontend_reference":
         attributes = ("frontend_database_paths", "owner_process_root")
     elif family in {"delete_schedule_run", "delete_workbuddy_session", "remove_workbuddy_ui_reference",
-                    "delete_office_frontend", "delete_office_artifacts"}:
+                    "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend"}:
         attributes = ("resource_path", "owner_process_root")
     elif family == "delete_frontend_session":
         attributes = (
@@ -730,6 +730,8 @@ def _typed_action(
 
 
 def _record_kind_for_action(candidate: Any, kind: MutationKind) -> RecordKind:
+    if kind is MutationKind.DELETE_ORCA_FRONTEND:
+        return RecordKind.ORCA_SESSION
     if kind in {MutationKind.DELETE_OFFICE_FRONTEND, MutationKind.DELETE_OFFICE_ARTIFACTS}:
         return RecordKind.OFFICE_SESSION
     if kind is MutationKind.REMOVE_WORKBUDDY_UI_REFERENCE:

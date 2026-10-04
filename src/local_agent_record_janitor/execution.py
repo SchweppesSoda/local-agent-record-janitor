@@ -98,9 +98,12 @@ class ExecutionOutcome:
     schedule_cleanup: Any | None = None
     workbuddy_cleanup: Any | None = None
     office_cleanup: Any | None = None
+    orca_cleanup: Any | None = None
 
     @property
     def ok(self) -> bool:
+        if self.orca_cleanup is not None:
+            return True
         if self.office_cleanup is not None:
             return True
         if self.workbuddy_cleanup is not None:
@@ -125,6 +128,8 @@ class ExecutionOutcome:
 
     @property
     def modified(self) -> bool:
+        if self.orca_cleanup is not None:
+            return bool(self.orca_cleanup.deleted_ids)
         if self.office_cleanup is not None:
             return bool(self.office_cleanup.deleted_ids)
         if self.workbuddy_cleanup is not None:
@@ -143,6 +148,8 @@ class ExecutionOutcome:
 
     @property
     def results(self) -> tuple[Any, ...]:
+        if self.orca_cleanup is not None:
+            return (self.orca_cleanup,)
         if self.office_cleanup is not None:
             return (self.office_cleanup,)
         if self.workbuddy_cleanup is not None:
@@ -161,6 +168,11 @@ class ExecutionOutcome:
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
+
+        if self.orca_cleanup is not None:
+            return {"command": "delete", "mutation_kind": self.mutation_kind,
+                    "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
+                    "result": self.orca_cleanup.to_dict(), "plan_fingerprint": str(self.plan.plan_fingerprint)}
 
         if self.office_cleanup is not None:
             return {"command": "delete", "mutation_kind": self.mutation_kind,
@@ -745,6 +757,21 @@ def _execute_prevalidated_actions_locked(
             plan=plan,
             frontend_session_cleanup=result,
         )
+
+    if mutation_kind == "delete_orca_frontend":
+        from .orca_cleanup import execute
+        evidence = actions[0].impact.external_action_payload["orca_frontend_evidence"]
+        if ({a.target.thread_id for a in actions} != set(evidence["session_ids"])
+                or any(a.impact.external_action_payload.get("orca_frontend_evidence") != evidence
+                    or a.impact.owner_client != "orca" or a.impact.external_storage_root != evidence["root"]
+                    or a.impact.owner_process_root != evidence["root"] for a in actions)):
+            raise ExecutionError("Orca frontend action scope mismatch")
+        def forward_orca_phase(phase):
+            if action_state_callback is not None:
+                for action in actions:
+                    action_state_callback(phase, action, None)
+        result = execute(evidence, client_inspector=client_inspector, phase_callback=forward_orca_phase)
+        return ExecutionOutcome(mutation_kind=mutation_kind, selected_actions=tuple(actions), plan=plan, orca_cleanup=result)
 
     if mutation_kind in {"delete_office_frontend", "delete_office_artifacts"}:
         from .office_cleanup import execute as execute_office, KINDS

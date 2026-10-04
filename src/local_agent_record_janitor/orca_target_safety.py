@@ -28,6 +28,7 @@ from .record_identity import canonical_path
 
 LEGACY_EVIDENCE_SCHEMA = "larj.orca-target-safety.v1"
 EVIDENCE_SCHEMA = "larj.orca-target-safety.v2"
+FRONTEND_EVIDENCE_SCHEMA = "larj.orca-target-safety.v3"
 _DATABASES = ("state_5.sqlite", "logs_2.sqlite", "memories_1.sqlite", "queue_1.sqlite", "goals_1.sqlite")
 _FAMILY = tuple(name + suffix for name in _DATABASES for suffix in ("", "-wal", "-shm", "-journal")) + ("session_index.jsonl",)
 _SIDECARS = frozenset(name for name in _FAMILY if name.endswith(("-wal", "-shm", "-journal")))
@@ -405,7 +406,7 @@ def freeze_orca_target(adapter: Any, home: Path, record_id: str, *,
                        affected_ids: Iterable[str], rollout_paths: Iterable[str | Path],
                        binary: Path | None, process_records: Iterable[Mapping[str, Any]] | None = None,
                        after_start: bool = False, readonly_recovery: bool = False,
-                       evidence_schema: str = EVIDENCE_SCHEMA) -> dict[str, Any]:
+                       evidence_schema: str = EVIDENCE_SCHEMA, frontend_evidence=None) -> dict[str, Any]:
     """Collect body-free boundaries only from the already selected scope."""
     home = local_orca_path(home)
     root = adapter.profile_root
@@ -416,6 +417,16 @@ def freeze_orca_target(adapter: Any, home: Path, record_id: str, *,
     frozen: dict[str, Any] = {"profile_root": str(root), "home": str(home), "record_id": record_id,
                               "affected_thread_ids": list(affected), "rollout_paths": list(rollouts)}
     try:
+        if evidence_schema == FRONTEND_EVIDENCE_SCHEMA:
+            from . import orca_frontend
+            if frontend_evidence is None or canonical_path(frontend_evidence["root"]) != canonical_path(root):
+                raise ValueError("orca_frontend_evidence_invalid")
+            if not readonly_recovery and orca_frontend.freeze(root, frontend_evidence["session_ids"],
+                    timestamp=frontend_evidence["timestamp"]) != frontend_evidence:
+                raise ValueError("orca_frontend_evidence_changed")
+            frozen["frontend"] = frontend_evidence
+        elif frontend_evidence is not None:
+            raise ValueError("orca_frontend_evidence_requires_new_schema")
         if os.name != "nt":
             blockers.append("orca_target_platform_unsupported")
         prove_account_home(root, home)
@@ -423,9 +434,11 @@ def freeze_orca_target(adapter: Any, home: Path, record_id: str, *,
                                    "file_id": info.st_ino} for path in (root, home, home / "sessions")]
         frozen["marker"] = _identity(home / ".orca-managed-home", digest=True)
         snapshot = adapter.snapshot_references(refresh=True)
+        from .orca_cleanup import covers_error, covers_reference
         relevant_errors = [error.message for error in snapshot.errors if error.blocks_delete and
                            (error.store is None or error.store.backend == "codex" and
-                            error.store.canonical_path == canonical_path(home))]
+                            error.store.canonical_path == canonical_path(home))
+                           and not (frontend_evidence is not None and covers_error(frontend_evidence, error))]
         blockers.extend(relevant_errors)
         frozen["sources"] = [_optional_identity(path) for path in snapshot.descriptor.sources]
         references = [reference.to_dict() for reference in snapshot.references
@@ -433,7 +446,11 @@ def freeze_orca_target(adapter: Any, home: Path, record_id: str, *,
                       reference.native_record.store.canonical_path == canonical_path(home) and
                       reference.native_record.record_id in affected]
         frozen["references"] = references
-        if references:
+        uncovered = [reference for reference in snapshot.references if reference.native_record is not None
+            and reference.native_record.store.canonical_path == canonical_path(home)
+            and reference.native_record.record_id in affected
+            and not (frontend_evidence is not None and covers_reference(frontend_evidence, reference))]
+        if uncovered:
             blockers.append("orca_target_retains_reference")
         if not rollouts:
             blockers.append("orca_target_rollout_scope_incomplete")
@@ -552,7 +569,7 @@ def recheck_orca_target(evidence: Mapping[str, Any], adapter: Any, *,
     survivor. Current software write qualification is irrelevant to recovery.
     """
     schema = evidence.get("schema_version")
-    if schema not in {EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA} or phase not in {"before_start", "post_start", "readonly_recovery"}:
+    if schema not in {EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA, FRONTEND_EVIDENCE_SCHEMA} or phase not in {"before_start", "post_start", "readonly_recovery"}:
         return ("orca_target_evidence_invalid",)
     if schema == LEGACY_EVIDENCE_SCHEMA and phase != "readonly_recovery":
         return ("orca_runtime_policy_replan_required",)
@@ -565,7 +582,7 @@ def recheck_orca_target(evidence: Mapping[str, Any], adapter: Any, *,
                                     affected_ids=frozen["affected_thread_ids"], rollout_paths=frozen["rollout_paths"],
                                     binary=Path(binary["path"]) if binary else None, process_records=process_records,
                                     after_start=phase != "before_start", readonly_recovery=phase == "readonly_recovery",
-                                    evidence_schema=schema)
+                                    evidence_schema=schema, frontend_evidence=frozen.get("frontend"))
         old, new = dict(frozen), dict(current["frozen"])
         if phase == "readonly_recovery":
             for data in (old, new):
@@ -573,6 +590,11 @@ def recheck_orca_target(evidence: Mapping[str, Any], adapter: Any, *,
                 data.pop("binary", None)
                 data.pop("startup_control", None)
                 data.pop("package_context", None)
+                if schema == FRONTEND_EVIDENCE_SCHEMA:
+                    # Each frontend family has its own exact read-only
+                    # residual verifier and immutable child receipt.
+                    data.pop("references", None)
+                    data.pop("sources", None)
         # The lease is checked for current closed/released state, so an owner
         # disappearing or a claim becoming released is not identity drift.
         old.pop("leases", None)
@@ -664,13 +686,17 @@ def plan_target_evidence(context: Any, scope: Mapping[str, Any], adapters: Itera
             requests.append((home, root_id, affected, tuple(Path(path) for path in action.impact.rollout_paths), storage.codex_bin_hint))
     result = []
     seen = set()
+    candidate_storages = {str(storage.storage_id): canonical_path(storage.path) for storage in context.plan.storages}
     for home, root_id, affected, paths, binary in requests:
         key = canonical_path(home)
         if key not in owners or (key, root_id) in seen:
             continue
         seen.add((key, root_id))
-        result.append(freeze_orca_target(owners[key], home, root_id, affected_ids=affected,
-                                        rollout_paths=paths, binary=binary))
+        action = next((a for a in candidates if a.target.thread_id == root_id
+            and candidate_storages.get(str(a.target.storage_id)) == key), None)
+        approved = (action.impact.external_action_payload or {}).get("orca_target_evidence") if action else None
+        result.append(approved if approved is not None else freeze_orca_target(owners[key], home, root_id,
+            affected_ids=affected, rollout_paths=paths, binary=binary))
     return result
 
 
@@ -688,7 +714,7 @@ def validate_document_targets(document: Mapping[str, Any]) -> None:
     profiles = {canonical_path(root) for root in validate_guard_sources(document)}
     seen = set()
     for value in values:
-        if (not isinstance(value, Mapping) or value.get("schema_version") not in {EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA}
+        if (not isinstance(value, Mapping) or value.get("schema_version") not in {EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA, FRONTEND_EVIDENCE_SCHEMA}
                 or not isinstance(value.get("native_delete"), bool)
                 or value.get("api_boundary") not in {"not_validated", "validated_fixed_runtime"}
                 or not isinstance(value.get("frozen"), Mapping)):
@@ -718,6 +744,11 @@ def evidence_for_actions(document, actions):
     result = []
     frozen_actions = {value["action_id"]: value for value in document.get("actions", ())}
     for action in actions:
+        kind = action.get("kind") if isinstance(action, Mapping) else str(getattr(action.kind, "value", action.kind))
+        if kind == "delete_orca_frontend":
+            from .orca_cleanup import validate_action
+            validate_action(document, action)
+            continue
         if isinstance(action, Mapping):
             action_id = action.get("action_id")
             target, impact = action.get("target", {}), action.get("impact", {})
@@ -760,5 +791,10 @@ def recheck_document_targets(document: Mapping[str, Any], *, phase: str = "befor
         root = evidence["frozen"]["profile_root"]
         key = canonical_path(root)
         adapter = adapters.setdefault(key, OrcaAdapter(profile_root=root))
-        errors.extend(recheck_orca_target(evidence, adapter, phase=phase))
+        selected_phase = phase
+        if phase == "before_start" and evidence.get("schema_version") == FRONTEND_EVIDENCE_SCHEMA:
+            from .operation_coordinator import OperationCoordinator
+            if OperationCoordinator._native_action_terminal_verified(document, evidence["action_id"]):
+                selected_phase = "readonly_recovery"
+        errors.extend(recheck_orca_target(evidence, adapter, phase=selected_phase))
     return tuple(sorted(set(errors)))

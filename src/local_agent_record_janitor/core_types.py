@@ -40,6 +40,7 @@ class RecordKind(str, Enum):
     WORKBUDDY_SESSION = "workbuddy_session"
     WORKBUDDY_UI_REFERENCE = "workbuddy_ui_reference"
     OFFICE_SESSION = "office_session"
+    ORCA_SESSION = "orca_session"
 
 
 class MutationKind(str, Enum):
@@ -59,6 +60,7 @@ class MutationKind(str, Enum):
     DELETE_WORKBUDDY_SESSION = "delete_workbuddy_session"
     REMOVE_WORKBUDDY_UI_REFERENCE = "remove_workbuddy_ui_reference"
     DELETE_OFFICE_FRONTEND = "delete_office_frontend"
+    DELETE_ORCA_FRONTEND = "delete_orca_frontend"
     DELETE_OFFICE_ARTIFACTS = "delete_office_artifacts"
     KEEP = "keep"
 

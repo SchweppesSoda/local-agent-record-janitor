@@ -381,11 +381,32 @@ voice history 和全局日志不属于单条记录清理范围。支持依据是
 
 ### Orca：精确原生删除的限定组合
 
-首个已验收组合限 Windows、本机 journal4/record2、一个明确 managed account home、
-显式选择的 Codex 原生记录及其必须后代。目标闭包不能保留已知 current/history/restore
-引用或 bridge；runtime home、跨账号批次、Claude/Pi、frontend 字段和远端写入继续阻挡。
+原生删除组合限 Windows、本机 journal4/record2、明确 managed account home、
+显式选择的 Codex 原生记录及其必须后代。未被完整前端操作覆盖的 current/history/restore
+引用或 bridge 仍阻挡；runtime home、Claude/Pi、远端写入继续关闭。
 调用 `delete plan --client orca --record-id ID --engine codex` 时，协调器逐目标冻结并核查
 资格；品牌、目录名和 marker 不独立授予写权限。
+
+选择普通本机 structured-chat 的 frontend session ID（可加 `orca:` 前缀），并显式
+指定 `--codex-bin` 后，可生成包含原生链及 `delete_orca_frontend` 的完整计划。
+适配依据为 Orca 固定源码
+[`efbf651c`](https://github.com/stablyai/orca/tree/efbf651c7bb2eec778daf1844f8228e70809ec9f)。
+完整操作先删除 current/history 对应的原生会话，再清理共享 journal、旧 JSON
+records/tabs、根及各 profile 的 `orca-data.json`、bak/export、profile-state v3
+数据库和已识别 backup、属于所选会话的旧单会话 journal。界面分组、选中项、pane
+引用同步调整；设置、自动化、无关会话和远端命名空间保留。操作防重放 ledger 保留
+已消费身份，所选成功结果转为不含会话内容的 unknown tombstone。
+
+计划冻结完整文件集合、身份、前后哈希、profile ID、版本及原生依赖；native child
+均经同一操作的持久回执验收后才派发前端 child。原生已完成、前端未开始时可冷续接，
+不重启已完成的原生子批次；前端写入中断后只允许只读复核全部批准 after 状态。
+只有前端残留时也必须锁定并检查其原生 home 的未决操作和完整残留，不能借空数据库
+跳过 rollout 或旧 index。
+
+hooks 根、已知生产/开发 namespace、status、authority、spool 和临时写入副本全部
+核查并冻结；与所选会话有关的 TUI 数据、未知 recovery/schema、无法证明的归属
+保持阻挡。runtime metadata 与 daemon lock 只作进程身份输入，不能凭文件不存在
+认定停止。前端需要关闭 Orca 及相关后台进程；探测失败阻挡，执行中每次写入前重查。
 
 固定 API 为真实 `codex-cli 0.160.0` Windows 原生 exe，SHA-256 为
 `fdda5fa3cf3fb3d000b876720742857676293e4315e4b045fae6f8bd7e866d1d`。
@@ -442,6 +463,8 @@ binary。协议版本与 unknown 占用见 [operation 协议](operation-cli.md)�
 $env:PYTHONPATH = 'src'
 python -m tests.orca_binary_acceptance --binary 'C:\absolute\pinned\codex.exe'
 python -m tests.orca_configured_acceptance --binary 'C:\absolute\pinned\codex.exe'
+python -m tests.orca_fullflow_acceptance --binary 'C:\absolute\pinned\codex.exe'
+python -m tests.orca_fullflow_acceptance --binary 'C:\absolute\pinned\codex.exe' --scenario cold-continue
 # 独立检查延迟后台维护，不发送删除请求：
 python -m tests.orca_configured_acceptance --binary 'C:\absolute\pinned\codex.exe' --maintenance-warm-seconds 65
 ```

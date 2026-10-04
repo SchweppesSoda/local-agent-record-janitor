@@ -1,8 +1,9 @@
 # 多客户端记录清理施工方案
 
 状态：P0–P4 的限定功能已落地；后续完整删除流程继续开发。办公版已接入本地
-SQLite、SDK 文件和 Chromium 界面状态的双根删除及冷验证；Herdr、Paseo 和 Orca
-前端恢复状态的完整删除仍待补齐。此前 P5 的 Orca/Codex/Windows 原生组合与 P6
+SQLite、SDK 文件和 Chromium 界面状态的双根删除及冷验证；Orca 的限定 Windows/Codex
+组合已补齐普通 structured-chat 的原生链、前端及恢复副本操作。Herdr、Paseo 的
+完整删除仍待补齐。此前 P5 的 Orca/Codex/Windows 原生组合与 P6
 平台验收仅代表当时范围，不能替代新增全流程的验收。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公、QoderWork 与 Paseo 的独立适配。
 当前功能以 [设计与安全边界](design.md)、
