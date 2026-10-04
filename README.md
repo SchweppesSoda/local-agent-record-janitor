@@ -179,6 +179,10 @@ OpenAI 稳定 API。
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
 | WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session` 与独立 `remove_workbuddy_ui_reference`；已证明的本地终态会话或仅置顶引用，未知归属及云同步关联阻止删除 |
+| Orca | 本机 journal 引用及已证明的 managed Codex home | 限定 Windows/Codex 组合逐目标验证删除资格；其他引擎、runtime home、桥接与远端写入关闭 |
+| Herdr | 持久化 current/restore 引用及显式本机 live metadata | 只读盘点；native root 与完整 writer 归属未证明，删除及自身终验关闭 |
+| 千问办公 / QoderWork CN | 已核实 CN schema 的主/子会话元数据和已知 SDK 文件位置 | 只读盘点；草稿、恢复副本和共享 SDK 的完整清理范围未证明 |
+| Paseo | 当前及旧格式 agent 注册快照、归档状态和恢复引用 | 只读盘点；不推断 provider 原生存储归属或 daemon 已停止 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
 | Codex：rollout-only | rollout 内容文件存在，但 thread 列表记录不存在 | 删除整个 thread，属于 `high`，必须明确选择 |
 | Codex：重复内容文件 | 同一 thread ID 有多份可验证 rollout 内容文件 | 保留，或把全部已确认副本作为整条 thread 的 `high` 风险删除范围；不提供隔离动作 |
@@ -426,9 +430,12 @@ local-agent-record-janitor records --client herdr --herdr-root 'D:\HerdrConfig' 
 查询仅发送 `ping` 和 `session.snapshot`，不启动、attach 或恢复 Herdr。live 引用与
 current/restore 来源分别展示；公共 pane ID 不等于持久化 pane ID。`client_ownership`
 复用同次盘点缓存，`reference_values_match` 只比较 session 级观察值，不证明同代实例。
-响应端点可使 `clients_closed=false`，不可达或失败保持 unknown；全部 writer 的
-`coverage_complete` 始终 false。清单保留有效引用，同时因未完成运行覆盖返回退出码
-`1` 和 `goal_status=blocked`，不表示零记录。API 请求可能触发 server 自身日志或已有事件处理，
+有效 Pong 即使后续 snapshot 失败也保留 `clients_closed=false`；没有有效响应时
+保持 unknown。全部 writer 的
+`coverage_complete` 始终 false。完整读取所请求的已支持元数据时，清单返回退出码
+`0` 和 `goal_status=complete`，同时保留禁止删除的覆盖限制。读取、格式、transport
+或 live/persisted 冲突仍返回退出码 `1` 和 `goal_status=blocked`，不表示零记录。
+API 请求可能触发 server 自身日志或已有事件处理，
 不承诺产品文件系统零写。
 损坏或未知版本来源也保留独立错误。`delete plan/run` 选择 Herdr 返回只读 capability
 blocker；无授权动作的 blocked 计划经 apply/status/verify 仍保持 blocked。
@@ -696,7 +703,7 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 
 ## 重要限制
 
-- 当前只识别有明确证据的 AionUI/Cindy/Codex/Pi/Claude 状态；数据库 schema 或 session 格式变化可能导致来源暂时不可用。
+- 仅对已验证的客户端、schema 和 runtime 组合提供对应能力；数据库或 session 格式变化可能使来源暂时不可用。各客户端的只读与删除范围见上方支持表及 Adapter 契约。
 - Codex Desktop 的 catalog/全局状态是未公开的宿主实现细节。存在但结构不兼容、发现多个候选 catalog、非 `local` host、原生证据重新出现或快照漂移时一律阻止修改；没有探测到该层不代表 OpenAI 承诺它不存在。
 - Finding 是 adapter 证据格式，不等于删除目标。计划生成器会把它聚合为 Observation，并根据完整当前状态生成 CandidateAction。
 - 兼容期仍读取 adapter 的能力证据，但它们不是 CLI 的唯一分区依据；冲突、活跃引用、范围不明或状态读取失败都会阻止动作。

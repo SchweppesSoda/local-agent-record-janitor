@@ -112,18 +112,24 @@ JSON 保留；当前决定只有“保留”或“删除整条已验证记录”
 
 ## 精确写入器
 
-Orca 的本机 journal schema4 / record schema2 接入仅提供清单和保护证据，不注册写入器。
-候选 adapter 与保护 adapter 分开；保护来源不能扩大被选客户端的 catalog、目标或批准
-范围。含这些来源的新顶层 operation v2 冻结所有已知 profile locator，执行前恢复并合并
-当前来源；child/agent writer v1 的证据与 hash 语义保持不变。旧 unknown 始终先进入
-只读恢复。具体来源与版本边界见 [Adapter 契约](adapters.md#orca-与-herdr-的接入边界)。
+Orca 的本机 journal schema4 / record schema2 提供清单和保护证据，品牌静态能力默认
+关闭。候选 adapter 与保护 adapter 分开；保护来源不能扩大被选客户端的 catalog、目标
+或批准范围。普通保护来源由顶层 operation v2 冻结已知 profile locator，执行前恢复并
+合并当前来源。限定的 Windows/Codex managed-account-home 原生删除采用顶层 v3，按
+目标冻结并复查 runtime/配置/副作用证据，复用 native writer；startup 子批次采用
+child v2 的 root-wide 协调和持久状态。未受影响的旧 writer 及 v1/v2 证据保持原 hash，
+旧 unknown 只读恢复，不补授权或重发 mutation。其他组合不继承删除资格，见
+[限定组合](adapters.md#orca精确原生删除的限定组合)与
+[协议版本](operation-cli.md)。
 
 Herdr 的持久化 snapshot schema3 只提供 current/restore 引用。来源不含 native root，
 因此不自动加入原生 catalog、父子关系或 mutation 范围；同 ID 不用于跨 store 绑定。
 明确选择 Herdr 的 records 可用 `--inspect-clients` 附加有界本机 protocol22 metadata，
 与持久化 current/restore 独立保留；公共 pane ID 不充当持久化 identity，不据相同引用
 值证明同代实例或全部 writer 已停止。API 和运行投影复用同次缓存，后者不参与旧审批。
-即使端点响应，完整 writer 归属仍未知，records 保留 incomplete/blocked 及有效引用。
+完整读取请求范围内的已支持 metadata 时，records 可返回 complete；writer 归属未知
+仅保留删除限制，不把成功的只读盘点标为失败。读取、schema、transport 或引用冲突
+仍使清单 incomplete/blocked，并保留已观察到的有效引用。
 全部 Herdr 写入与自身 verify 关闭；无授权动作的只读计划保持 blocked，旧 native
 operation 仍可按冻结证据执行只读恢复。
 

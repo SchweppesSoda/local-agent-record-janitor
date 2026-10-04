@@ -2,7 +2,8 @@
 
 状态：P0–P4 的限定功能已落地；Herdr 持久化与显式本机 live metadata 保持只读，
 全部 writer 归属仍未知。P5 已扩展 Orca/Codex/Windows 精确原生组合至有界配置、
-凭据和已有启动产物；P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
+凭据和已有启动产物；P6 已完成六组实际平台 CI 与 Windows 隔离发行包验收。
+本轮限定交付范围完成，未证明的删除组合继续关闭。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公、QoderWork 与 Paseo 的独立适配。
 当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
@@ -15,7 +16,7 @@ plan/apply、直接入口、执行前刷新和恢复保留同一存储的只读�
 reader 已接入同一公共清单和保护链；含新保护来源的顶层计划采用条件 v2 冻结 locator，
 旧 v1 不补字段或重 hash。Herdr schema3 的 current/restore reader 已接入公共清单，
 所有引用保持 rootless；明确选择 Herdr 的 records 可显式探测 protocol22 metadata，
-运行投影复用同次缓存，未完成 writer 覆盖仍保留 incomplete。当前不承诺发现任意
+运行投影复用同次缓存，metadata 完整性与 writer 覆盖分别报告，删除限制保留。当前不承诺发现任意
 自定义或未证明关联的存储。
 
 ## 目标与已完成基线
@@ -230,8 +231,9 @@ deadline、响应预算、父链/endpoint 身份变化、版本变化和 partial
 成功而 snapshot 失败时保留 server_active；附着客户端数量、全部 agent/后台 writer
 归属及原子实例一致仍未知。请求范围内的 metadata 清单与 writer 证明分别报告，
 完整读取支持的持久化/显式 live 来源可完成 records，写入限制仍保留且无法生成动作。
-只读实现已覆盖原 P4 的负例，跨平台验收纳入 P6。当前实测为 Windows 合成临时
-named pipe，macOS/Linux 及产品实机验收未完成。
+只读实现已覆盖原 P4 的负例，并通过 P6 的实际平台 CI：Windows 使用合成临时
+named pipe，macOS/Linux 使用合成临时 Unix socket。产品实机与全部 writer 归属
+验收仍未完成，这些测试不开放 Herdr 删除能力。
 
 **依赖：**P1、P2；研究可与 P3 并行，代码按单写者顺序提交。
 **改动范围：**新增 Herdr adapter/引用提取器、运行归属探测和临时样本测试。
@@ -352,9 +354,12 @@ writer 已停时，对应 native 删除继续阻止。删除前端引用与删�
 
 ### P6：发布收口
 
-**当前状态：**本地验证使用 Windows 合成临时存储。已审阅既有六格 CI 的失败证据并
-修正跨平台路径、权限及环境夹具；当前源码的 macOS/Linux 实际矩阵尚待执行，
-不以语法检查、源码复核或平台 skip 代替验收。
+**当前状态：**限定交付范围已完成。Windows/macOS/Linux × Python 3.10/3.12 的
+[实际六组 CI](https://github.com/SchweppesSoda/local-agent-record-janitor/actions/runs/37208590014)
+全部通过；已修正 macOS 大小写目录别名重复发现及临时目录物理路径差异。
+构建的 wheel 已在 Windows 独立 Python 3.10/3.12 环境安装，命令入口与运行期 JSON
+资源可用。当前功能、只读限制与 CLI 文档已同步；这些结果来自合成临时存储，
+不代替新增客户端的产品实机验收或未开放组合的写入证明。
 
 沿用 Windows/macOS/Linux × Python 3.10/3.12 的既有 CI 矩阵。链接、文件身份和
 进程归属等平台相关能力，须在实际支持平台执行对应测试；skip 不作为该能力通过的

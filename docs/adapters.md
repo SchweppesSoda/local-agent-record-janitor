@@ -37,6 +37,9 @@
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
 | Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore；显式 live metadata | rootless；全部 writer 归属未知，全部写入及自身 verify 关闭 |
 | WorkBuddy / WorkBuddy | 独立 SQLite、精确会话 artifacts 和 UI 引用 | 仅支持已识别 5.6.2 本地终态范围，Windows writer 覆盖及完整冻结证据；未知副本只读 |
+| 千问办公 / QwenWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 1.2.5 CN schema；草稿/恢复/共享 SDK 范围未闭合，写入和 verify 关闭 |
+| QoderWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 0.9.18 CN schema；不与 Qoder IDE/CLI 混用，写入和 verify 关闭 |
+| Paseo / 内置及未知 provider | 当前/旧格式 agent 快照、归档与恢复引用 | 固定源码的只读注册清单；无 native root/完整 writer 证明，写入和 verify 关闭 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -518,8 +521,9 @@ JSON 中的 private 字段可能被读取，但不投影或执行；server 自�
 所有 native/frontend/remote 写入及 Herdr 自身 verify 关闭；选择
 Herdr 的 delete plan/run 结构化 blocked，无授权动作的 apply/status/verify 保留该结果。
 rootless Herdr 不进入 Orca `guard_sources`，也不改变旧 v1 hash 或只读恢复契约。
-当前验证限于合成临时来源和 Windows 临时 named pipe；全部 runtime writer 归属及
-macOS/Linux 实机或 CI 验收仍未完成。
+合成临时来源已通过 Windows/macOS/Linux × Python 3.10/3.12 的实际 CI，包含
+Windows 临时 named pipe 与 macOS/Linux 临时 Unix socket。全部 runtime writer
+归属及产品实机验收仍未完成，平台测试通过不授予删除能力。
 
 后续改造的阶段、模块范围与验收门槛见[多客户端施工方案](cleanup-refactor-plan.md)。
 该方案中的待实施能力不改变本页的当前支持边界。

@@ -21,7 +21,7 @@ through the independent `delete_native_project` family. See
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
-records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr|workbuddy|qwenwork|qoderwork> [--project <selector> ...]
+records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr|workbuddy|qwenwork|qoderwork|paseo> [--project <selector> ...]
 delete plan --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
