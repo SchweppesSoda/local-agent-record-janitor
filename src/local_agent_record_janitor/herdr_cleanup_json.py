@@ -180,7 +180,7 @@ def _serde_json(value):
             return fixed if "." in fixed else fixed + ".0"
         if "e" in raw:
             mantissa, exponent = raw.split("e")
-            return mantissa.removesuffix(".0") + "e" + str(int(exponent))
+            return mantissa.removesuffix(".0") + "e" + format(int(exponent), "+d")
         return raw
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
