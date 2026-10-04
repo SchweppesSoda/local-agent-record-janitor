@@ -179,6 +179,10 @@ def action_location(plan: Any, action: Any) -> tuple[str, Path | str | None, tup
     # existing native approval payload; no frontend rescan is needed here.
     payload = getattr(impact, "external_action_payload", None)
     if isinstance(payload, dict):
+        if kind == "delete_schedule_run":
+            evidence = payload.get("schedule_run_evidence")
+            if isinstance(evidence, dict) and evidence.get("database"):
+                sources.append(evidence["database"])
         if engine == "pi" and payload.get("session_root"):
             root = payload["session_root"]
         for name in ("frontend_references", "cindy_references"):

@@ -53,6 +53,7 @@ from .discovery import (
 from .models import Finding
 from .inventory import ManagedConversation, classify_managed_conversation
 from .path_identity import canonical_existing_path_key
+from .progress import ProgressReporter
 from .record_identity import RecordClassification
 from .rendering import safe_single_line
 from .execution import ExecutionError
@@ -499,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
             "不会启动 app-server，也不会修改任何数据库或文件。"
         ),
     )
-    _add_common_arguments(records)
+    _add_common_arguments(records, progress=True)
     _add_operation_scope_arguments(records)
     records.add_argument("--inspect-clients", action="store_true", help="附带只读运行证据；Herdr 查询已知本机 session 的 metadata API，其他客户端检查进程归属")
 
@@ -523,7 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("plan", "apply", "run"),
         help="operation API：生成计划、应用计划或直接运行一次删除操作",
     )
-    _add_common_arguments(delete)
+    _add_common_arguments(delete, progress=True)
     _add_operation_scope_arguments(delete)
     delete.add_argument(
         "--yes",
@@ -678,6 +679,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="显式传入 delete plan --out 生成的顶层 operation 计划",
     )
     operation_status.add_argument("--json", action="store_true")
+    operation_status.add_argument(
+        "--progress",
+        action="store_true",
+        help="将盘点/查询阶段的元数据进度以 JSONL 写入 stderr",
+    )
 
     operation_verify = operation_subparsers.add_parser(
         "verify",
@@ -706,6 +712,11 @@ def build_parser() -> argparse.ArgumentParser:
     operation_verify.add_argument("--json", action="store_true")
     operation_verify.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
                                   help="Herdr persisted config root; readonly blocked plans retain their frozen result.")
+    operation_verify.add_argument(
+        "--progress",
+        action="store_true",
+        help="将盘点/验证阶段的元数据进度以 JSONL 写入 stderr",
+    )
 
     clean = subparsers.add_parser(
         "clean",
@@ -944,6 +955,7 @@ def _add_common_arguments(
     *,
     codex_only: bool = False,
     allow_thread_selector: bool = True,
+    progress: bool = False,
 ) -> None:
     parser.add_argument(
         "--platform",
@@ -982,6 +994,12 @@ def _add_common_arguments(
             f"（默认：{DEFAULT_HUMAN_LIMIT}；JSON 不受限制）"
         ),
     )
+    if progress:
+        parser.add_argument(
+            "--progress",
+            action="store_true",
+            help="将盘点/计划/执行阶段的元数据进度以 JSONL 写入 stderr",
+        )
     parser.add_argument("--appdata", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--codex-home",
@@ -1425,79 +1443,102 @@ def _run_operation_backend(
             stderr=stderr,
         )
 
+    progress_callback = (
+        ProgressReporter(stderr)
+        if bool(getattr(args, "progress", False))
+        else None
+    )
+
     try:
         if verb == "plan":
-            result = coordinator.plan_operation(
-                client=str((scope or {}).get("client") or ""),
-                projects=tuple((scope or {}).get("projects", ())),
-                all_projects=bool((scope or {}).get("all_projects", False)),
-                record_ids=tuple((scope or {}).get("record_ids", ())),
-                engines=tuple((scope or {}).get("engines", ())),
-                plan_path=getattr(args, "out", None),
-                operation_home=getattr(args, "operation_home", None),
-                codex_home=getattr(args, "codex_home", None),
-                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
-                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
-                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
-                adapters=supplied_adapters,
-                app_server_factory=app_server_factory,
-                binary_resolver=binary_resolver,
-            )
+            operation_kwargs: dict[str, Any] = {
+                "client": str((scope or {}).get("client") or ""),
+                "projects": tuple((scope or {}).get("projects", ())),
+                "all_projects": bool((scope or {}).get("all_projects", False)),
+                "record_ids": tuple((scope or {}).get("record_ids", ())),
+                "engines": tuple((scope or {}).get("engines", ())),
+                "plan_path": getattr(args, "out", None),
+                "operation_home": getattr(args, "operation_home", None),
+                "codex_home": getattr(args, "codex_home", None),
+                **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                "timeout": float(getattr(args, "timeout", 30.0) or 30.0),
+                "adapters": supplied_adapters,
+                "app_server_factory": app_server_factory,
+                "binary_resolver": binary_resolver,
+            }
+            if progress_callback is not None:
+                operation_kwargs["progress_callback"] = progress_callback
+            result = coordinator.plan_operation(**operation_kwargs)
         elif verb == "apply":
-            result = coordinator.apply_operation(
-                scope=scope,
-                operation_id=str(getattr(args, "operation_id", "")),
-                plan_path=getattr(args, "plan", None),
-                operation_home=getattr(args, "operation_home", None),
-                codex_home=getattr(args, "codex_home", None),
-                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
-                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
-                plan_sha256=(
+            operation_kwargs = {
+                "scope": scope,
+                "operation_id": str(getattr(args, "operation_id", "")),
+                "plan_path": getattr(args, "plan", None),
+                "operation_home": getattr(args, "operation_home", None),
+                "codex_home": getattr(args, "codex_home", None),
+                **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                "plan_sha256": (
                     getattr(args, "authorized_plan_sha256", None)
                     or getattr(args, "plan_fingerprint", None)
                 ),
-                clients_closed=bool(getattr(args, "clients_closed", False)),
-                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
-                adapters=supplied_adapters,
-                app_server_factory=app_server_factory,
-                binary_resolver=binary_resolver,
-            )
+                "clients_closed": bool(getattr(args, "clients_closed", False)),
+                "timeout": float(getattr(args, "timeout", 30.0) or 30.0),
+                "adapters": supplied_adapters,
+                "app_server_factory": app_server_factory,
+                "binary_resolver": binary_resolver,
+            }
+            if progress_callback is not None:
+                operation_kwargs["progress_callback"] = progress_callback
+            result = coordinator.apply_operation(**operation_kwargs)
         elif verb == "run":
-            result = coordinator.run_operation(
-                client=str((scope or {}).get("client") or ""),
-                projects=tuple((scope or {}).get("projects", ())),
-                all_projects=bool((scope or {}).get("all_projects", False)),
-                record_ids=tuple((scope or {}).get("record_ids", ())),
-                engines=tuple((scope or {}).get("engines", ())),
-                plan_path=getattr(args, "out", None),
-                operation_home=getattr(args, "operation_home", None),
-                codex_home=getattr(args, "codex_home", None),
-                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
-                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
-                clients_closed=bool(getattr(args, "clients_closed", False)),
-                timeout=float(getattr(args, "timeout", 30.0) or 30.0),
-                adapters=supplied_adapters,
-                app_server_factory=app_server_factory,
-                binary_resolver=binary_resolver,
-            )
+            operation_kwargs = {
+                "client": str((scope or {}).get("client") or ""),
+                "projects": tuple((scope or {}).get("projects", ())),
+                "all_projects": bool((scope or {}).get("all_projects", False)),
+                "record_ids": tuple((scope or {}).get("record_ids", ())),
+                "engines": tuple((scope or {}).get("engines", ())),
+                "plan_path": getattr(args, "out", None),
+                "operation_home": getattr(args, "operation_home", None),
+                "codex_home": getattr(args, "codex_home", None),
+                **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                "clients_closed": bool(getattr(args, "clients_closed", False)),
+                "timeout": float(getattr(args, "timeout", 30.0) or 30.0),
+                "adapters": supplied_adapters,
+                "app_server_factory": app_server_factory,
+                "binary_resolver": binary_resolver,
+            }
+            if progress_callback is not None:
+                operation_kwargs["progress_callback"] = progress_callback
+            result = coordinator.run_operation(**operation_kwargs)
         elif verb == "status":
-            result = coordinator.status_operation(
-                operation_id=str(getattr(args, "operation_id", "")),
-                plan_path=getattr(args, "plan", None),
-                operation_home=getattr(args, "operation_home", None),
-                codex_home=getattr(args, "codex_home", None),
-            )
+            operation_kwargs = {
+                "operation_id": str(getattr(args, "operation_id", "")),
+                "plan_path": getattr(args, "plan", None),
+                "operation_home": getattr(args, "operation_home", None),
+                "codex_home": getattr(args, "codex_home", None),
+                **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+            }
+            if progress_callback is not None:
+                operation_kwargs["progress_callback"] = progress_callback
+            result = coordinator.status_operation(**operation_kwargs)
         elif verb == "verify":
-            result = coordinator.verify_operation(
-                operation_id=str(getattr(args, "operation_id", "")),
-                plan_path=getattr(args, "plan", None),
-                operation_home=getattr(args, "operation_home", None),
-                codex_home=getattr(args, "codex_home", None),
-                orca_roots=tuple(getattr(args, "orca_root", ()) or ()),
-                herdr_roots=tuple(getattr(args, "herdr_root", ()) or ()),
-                adapters=supplied_adapters,
-                verify_timeout=int(getattr(args, "verify_timeout", 180) or 0),
-            )
+            operation_kwargs = {
+                "operation_id": str(getattr(args, "operation_id", "")),
+                "plan_path": getattr(args, "plan", None),
+                "operation_home": getattr(args, "operation_home", None),
+                "codex_home": getattr(args, "codex_home", None),
+                **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                "adapters": supplied_adapters,
+                "verify_timeout": int(getattr(args, "verify_timeout", 180) or 0),
+            }
+            if progress_callback is not None:
+                operation_kwargs["progress_callback"] = progress_callback
+            result = coordinator.verify_operation(**operation_kwargs)
         else:
             raise ValueError(f"不支持的 operation 子命令：{verb}")
         payload = _operation_payload(
@@ -2601,6 +2642,13 @@ def _run_client_records(
 
     client = _normalize_client_name(getattr(args, "client", None))
     engines = tuple(getattr(args, "engine", ()) or ())
+    progress = (
+        ProgressReporter(stderr)
+        if bool(getattr(args, "progress", False))
+        else None
+    )
+    if progress is not None:
+        progress({"stage": "inventory", "status": "started"})
     try:
         from .client_contracts import describe_adapter
         if client in {"pi", "claude"} and not any(describe_adapter(adapter).client == client for adapter in active_adapters):
@@ -2654,7 +2702,22 @@ def _run_client_records(
                     str(value).strip().casefold() for value in engines
                 }
             )
+        if progress is not None:
+            progress(
+                {
+                    "stage": "inventory",
+                    "status": "completed",
+                    "counts": {
+                        "target_count": len(inventory.targets),
+                        "selected_count": len(selected),
+                        "project_count": len(inventory.projects),
+                        "error_count": len(inventory.errors),
+                    },
+                }
+            )
     except ClientInventoryError as exc:
+        if progress is not None:
+            progress({"stage": "inventory", "status": "failed"})
         message = str(exc) or repr(exc)
         code = (
             "ambiguous_project"
@@ -2690,6 +2753,8 @@ def _run_client_records(
             stderr.write(f"错误：{_human_message(message)}\n")
         return EXIT_ERROR
     except Exception as exc:
+        if progress is not None:
+            progress({"stage": "inventory", "status": "failed"})
         return _emit_fatal_error(
             "records",
             exc,
@@ -3057,6 +3122,13 @@ def _run_records(
 ) -> int:
     """Build and render the full read-only session catalog."""
 
+    progress = (
+        ProgressReporter(stderr)
+        if bool(getattr(args, "progress", False))
+        else None
+    )
+    if progress is not None:
+        progress({"stage": "inventory", "status": "started"})
     try:
         catalog: Any | None = None
         conversations: tuple[Any, ...] = ()
@@ -3100,7 +3172,22 @@ def _run_records(
             if include_claude
             else None
         )
+        if progress is not None:
+            progress(
+                {
+                    "stage": "inventory",
+                    "status": "completed",
+                    "counts": {
+                        "record_count": len(conversations),
+                        "unmapped_frontend_count": len(unmapped_sessions),
+                        "pi_count": len(getattr(pi_catalog, "records", ()) or ()) if pi_catalog is not None else 0,
+                        "claude_count": len(getattr(claude_catalog, "records", ()) or ()) if claude_catalog is not None else 0,
+                    },
+                }
+            )
     except Exception as exc:
+        if progress is not None:
+            progress({"stage": "inventory", "status": "failed"})
         return _emit_fatal_error(
             "records",
             exc,

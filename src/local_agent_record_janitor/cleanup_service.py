@@ -120,6 +120,8 @@ def _mutation_family_rank(family: str) -> int:
     """Return the explicit native → frontend → relation/index → project rank."""
 
     normalized = str(family).strip().casefold()
+    if normalized == "delete_schedule_run":
+        return 4
     if normalized in {
         "remove_frontend_reference",
     } or "frontend" in normalized or "reference" in normalized:
@@ -160,6 +162,8 @@ def _mutation_resource_key(action: Any, family: str) -> tuple[str, ...]:
     attributes: tuple[str, ...]
     if family == "remove_frontend_reference":
         attributes = ("frontend_database_paths", "owner_process_root")
+    elif family == "delete_schedule_run":
+        attributes = ("resource_path", "owner_process_root")
     elif family == "delete_frontend_session":
         attributes = (
             "frontend_session_database_paths",
@@ -725,6 +729,8 @@ def _typed_action(
 
 
 def _record_kind_for_action(candidate: Any, kind: MutationKind) -> RecordKind:
+    if kind is MutationKind.DELETE_SCHEDULE_RUN:
+        return RecordKind.SCHEDULE_RUN
     if getattr(candidate, "resource_kind", "conversation") == "legacy_index":
         return RecordKind.LEGACY_INDEX
     if kind is MutationKind.REMOVE_BROKEN_RELATION:

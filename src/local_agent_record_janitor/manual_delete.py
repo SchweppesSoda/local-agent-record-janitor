@@ -625,7 +625,8 @@ def execute_manual_delete(
 
     def validate_frontend_snapshot(finding: Finding) -> None:
         expected = action_by_key[finding_key(finding)]
-        reference_guard.check(finding)
+        reference_guard.check(finding, approved_references=(
+            expected.frontend_reference_evidence if expected.frontend_closure_eligible else ()))
         if targeted_guard is not None:
             targeted_guard(expected)
         if targeted_guards_only:
@@ -1201,23 +1202,49 @@ def _select_action(
 def _reject_overlapping_actions(
     actions: Sequence[ManualDeleteAction],
 ) -> None:
-    affected = [
-        (item, set(item.affected_thread_ids))
-        for item in actions
-    ]
-    for index, (left, left_ids) in enumerate(affected):
-        for right, right_ids in affected[index + 1 :]:
-            if _normalize_home(left.codex_home) != _normalize_home(
-                right.codex_home
-            ):
-                continue
-            shared = sorted(left_ids & right_ids)
-            if shared:
-                raise ManualDeletePlanError(
-                    "Selected manual deletion roots overlap or contain one "
-                    f"another ({left.thread_id} / {right.thread_id}: "
-                    f"{', '.join(shared)})"
-                )
+    # Keep the identity proof local to this selection validation phase.  The
+    # exact raw spelling is the cache key, so distinct Windows aliases still
+    # go through _normalize_home and its physical-identity proof separately.
+    home_keys: dict[str, str] = {}
+    affected: list[tuple[ManualDeleteAction, str, set[str]]] = []
+    for item in actions:
+        raw_home = os.fspath(item.codex_home)
+        if raw_home not in home_keys:
+            home_keys[raw_home] = _normalize_home(item.codex_home)
+        affected.append(
+            (item, home_keys[raw_home], set(item.affected_thread_ids))
+        )
+
+    # For each storage-qualified thread, retain only the nearest later
+    # action.  Walking backwards then yields the same first (left, right)
+    # conflict as the original nested loop, while checking membership in
+    # linear time in the number of affected thread IDs.
+    nearest_later: dict[tuple[str, str], int] = {}
+    first_later: list[int | None] = [None] * len(affected)
+    for index in range(len(affected) - 1, -1, -1):
+        _left, home, left_ids = affected[index]
+        first_later[index] = min(
+            (
+                nearest_later[(home, thread_id)]
+                for thread_id in left_ids
+                if (home, thread_id) in nearest_later
+            ),
+            default=None,
+        )
+        for thread_id in left_ids:
+            nearest_later[(home, thread_id)] = index
+
+    for index, right_index in enumerate(first_later):
+        if right_index is None:
+            continue
+        left, _left_home, left_ids = affected[index]
+        right, _right_home, right_ids = affected[right_index]
+        shared = sorted(left_ids & right_ids)
+        raise ManualDeletePlanError(
+            "Selected manual deletion roots overlap or contain one "
+            f"another ({left.thread_id} / {right.thread_id}: "
+            f"{', '.join(shared)})"
+        )
 
 
 def _catalog_records(catalog: Any) -> tuple[tuple[Any, ...], list[str]]:

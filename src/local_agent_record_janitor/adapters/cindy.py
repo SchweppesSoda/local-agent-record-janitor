@@ -191,7 +191,7 @@ class CindyAdapter(FrontendAdapter):
                 reason=(
                     "Native "
                     + engine
-                    + " writer, exact Cindy reference cleanup, and soft-deleted "
+                    + " writer, exact Cindy reference cleanup, and terminal or explicitly selected "
                     "session-row cleanup are registered; project-item deletion "
                     "is not registered"
                 ),

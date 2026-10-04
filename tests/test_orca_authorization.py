@@ -147,6 +147,54 @@ class OrcaAuthorizationTests(unittest.TestCase):
             else:
                 self.assertEqual(server.deleted_thread_ids, ["first"])
 
+    def test_deferred_startup_scope_drift_closes_and_stays_unknown_without_rpc(self):
+        from contextlib import closing
+        import sqlite3
+        from unittest.mock import Mock
+        from tests.test_cleaner import CleanupExecutionTests, FakeAppServer
+        from tests.support import create_thread_index
+        from local_agent_record_janitor.cleaner import clean_findings
+
+        fixture = CleanupExecutionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        first, second = fixture.finding("first"), fixture.finding("second")
+        create_thread_index(fixture.codex_home, [
+            {"id": finding.thread_id, "rollout_path": str(finding.rollout.path)}
+            for finding in (first, second)])
+        lifecycle = []
+        phases = []
+
+        class StartupDrift(FakeAppServer):
+            def __enter__(self):
+                lifecycle.append("startup")
+                with closing(sqlite3.connect(fixture.codex_home / "state_5.sqlite")) as connection:
+                    connection.execute("INSERT INTO thread_spawn_edges(parent_thread_id,child_thread_id,status) "
+                                       "VALUES('first','startup-child','open')")
+                    connection.commit()
+                return self
+
+            def __exit__(self, *_args):
+                lifecycle.append("closed")
+
+        server = StartupDrift()
+        verifier = Mock(side_effect=AssertionError("No deletion was attempted"))
+        report = clean_findings([first, second], app_server_factory=lambda **_: server,
+            binary_resolver=lambda _: Path("codex"), verifier=verifier,
+            verification_attempts=1, verification_interval=0, defer_verification_until_close=True,
+            post_close_validator=lambda: lifecycle.append("post_close_verified"),
+            action_state_callback=lambda phase, *_: phases.append(phase))
+        self.assertEqual(lifecycle, ["startup", "closed", "post_close_verified"])
+        self.assertEqual(server.deleted_thread_ids, [])
+        self.assertEqual(len(report.results), 2)
+        self.assertTrue(all(result.status == "unknown" and not result.preflight_blocked
+                            for result in report.results))
+        self.assertTrue(all("after app-server startup" in result.error for result in report.results))
+        self.assertNotIn("verified", phases)
+        self.assertTrue(first.rollout.path.is_file())
+        self.assertTrue(second.rollout.path.is_file())
+        verifier.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

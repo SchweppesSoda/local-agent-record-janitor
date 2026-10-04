@@ -63,12 +63,14 @@ class NativeIntegrityAdapter(FrontendAdapter):
         *,
         codex_home: Path,
         codex_bin_hint: Path | None = None,
+        desktop_thread_ids: tuple[str, ...] = (),
     ) -> None:
         super().__init__(
             database=codex_home.expanduser() / "state_5.sqlite",
             codex_home=codex_home,
         )
         self.codex_bin_hint = codex_bin_hint or discover_path_codex()
+        self.desktop_thread_ids = desktop_thread_ids
 
     @property
     def available(self) -> bool:
@@ -177,20 +179,29 @@ class NativeIntegrityAdapter(FrontendAdapter):
         rollouts: dict[str, list[RolloutRecord]],
     ) -> list[Finding]:
         snapshot = read_desktop_state(self.codex_home)
+        if self.desktop_thread_ids:
+            snapshot = read_desktop_state(
+                self.codex_home, set(snapshot.threads) | set(self.desktop_thread_ids)
+            )
         if snapshot.database is None:
             return []
 
         findings: list[Finding] = []
         native_ids = set(threads) | set(rollouts)
         for thread_id, state in sorted(snapshot.threads.items()):
-            if thread_id in native_ids or not state.catalog_records:
+            if thread_id in native_ids or not state.present:
                 continue
             local_records = tuple(
                 record
                 for record in state.catalog_records
                 if record.host_id == "local"
             )
-            if not local_records:
+            explicit_json_only = (
+                thread_id in self.desktop_thread_ids
+                and not state.catalog_records
+                and state.exact_reference_count > 0
+            )
+            if not local_records and not explicit_json_only:
                 continue
             titles = sorted(
                 {
@@ -205,7 +216,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                     platform_session_id=f"local:{thread_id}",
                     thread_id=thread_id,
                     reason=(
-                        "Codex Desktop host catalog remains after the native "
+                        "Codex Desktop host state remains after the native "
                         "thread row and rollout were deleted"
                     ),
                     platform_db=snapshot.database,
@@ -219,6 +230,7 @@ class NativeIntegrityAdapter(FrontendAdapter):
                         "desktop_database": str(snapshot.database),
                         "desktop_host_id": "local",
                         "desktop_catalog_record_count": len(local_records),
+                        "desktop_explicit_json_only": explicit_json_only,
                         "desktop_catalog_titles": titles,
                         "desktop_global_state_paths": sorted(
                             state.global_state_references

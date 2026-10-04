@@ -23,6 +23,7 @@ from .client_contracts import (
 )
 from .display_metadata import display_title
 from .file_alias_evidence import FileAliasSnapshot, probe_file_aliases
+from .path_identity import inventory_path_identity_scope
 from .inventory import (
     FrontendSessionRecord,
     InventoryFailure,
@@ -152,6 +153,7 @@ class ClientInventory:
     project_items: tuple[Any, ...] = ()
     scanned_databases: tuple[Path, ...] = ()
     scanned_resources: tuple[tuple[str, str], ...] = ()
+    scanned_native_homes: tuple[Path, ...] = ()
     descriptors: tuple[ClientDescriptor, ...] = ()
     references: tuple[ClientReference, ...] = ()
     _reference_sources: Mapping[str, tuple[Path, ...]] = field(init=False, repr=False, compare=False)
@@ -168,6 +170,7 @@ class ClientInventory:
             records=self.records,
             unmapped_frontend_sessions=self.unmapped_frontend_sessions,
             errors=self.errors,
+            scanned_native_homes=self.scanned_native_homes,
         )
 
     @property
@@ -1154,6 +1157,8 @@ def _constrain_capability(
             return _capability_for(client, engine)
     return capability
 
+
+@inventory_path_identity_scope()
 def build_client_inventory(
     adapters: Iterable[object],
     *,
@@ -1361,6 +1366,7 @@ def build_client_inventory(
         scanned_resources=tuple(sorted(scanned_resources)),
         descriptors=tuple(descriptors),
         references=tuple(references),
+        scanned_native_homes=catalog.scanned_native_homes,
     )
     inventory = replace(inventory, targets=tuple(restrict_client_target(target, inventory) for target in inventory.targets))
     inventory = replace(inventory, capabilities={engine: aggregate_capabilities(tuple(

@@ -139,6 +139,32 @@ class CindyOperationRecoveryTests(unittest.TestCase):
         )
         return context, session, reference
 
+    def test_branch_specific_selection_flags_rebind_without_expanding_old_scope(self):
+        from local_agent_record_janitor.agent_operations import action_binding
+        import copy
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database, session_id = self._database(root, None)
+            base = build_cindy_session_delete_evidence(({
+                "database": str(database), "session_id": session_id, "expected_status": "deleted",
+            },))[0].to_dict()
+            for status, old_flags in (("deleted", {}), ("active", {"explicit_unbound_active": True}),
+                                      ("archived", {"explicitly_selected": True})):
+                frozen = {k: v for k, v in base.items() if k not in {"explicit_unbound_active", "explicitly_selected"}}
+                frozen.update(expected_status=status, **old_flags)
+                fresh = {**frozen, "explicit_unbound_active": False, "explicitly_selected": True}
+                _, old, _ = self._context(database, root, session_id, evidence=(frozen,), include_reference=False)
+                _, new, _ = self._context(database, root, session_id, evidence=(fresh,), include_reference=False)
+                before = copy.deepcopy(action_binding(old))
+                self.assertTrue(OperationCoordinator._frontend_session_transition_allowed(before, action_binding(new)))
+                self.assertEqual(before, action_binding(old))
+                if status != "deleted":
+                    unapproved = copy.deepcopy(before)
+                    evidence = unapproved["impact"]["frontend_session_evidence"][0]
+                    evidence.pop("explicit_unbound_active", None)
+                    evidence.pop("explicitly_selected", None)
+                    self.assertFalse(OperationCoordinator._frontend_session_transition_allowed(unapproved, action_binding(new)))
+
     def _prepare_operation(
         self,
         root: Path,

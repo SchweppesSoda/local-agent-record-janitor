@@ -195,7 +195,7 @@ class CoreBatchFastTests(unittest.TestCase):
                         binary_resolver=lambda _hint: Path("codex"),
                     )
 
-                self.assertEqual(result.get("goal_status"), "complete")
+                self.assertEqual(result.get("goal_status"), "complete", result)
                 self.assertTrue(result.get("modified"))
                 self.assertEqual(catalog_builder.call_count, 2)
                 self.assertEqual(anomaly_scan.call_count, 0)

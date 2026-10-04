@@ -224,7 +224,7 @@ class NativeProjectCleanupTests(unittest.TestCase):
 
     def test_verify_checks_loose_markers_and_missing_frozen_files(self):
         adapter = NativeIntegrityAdapter(codex_home=self.home)
-        coordinator = OperationCoordinator(CleanupService())
+        coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
         plan = coordinator.plan_operation(client="native", record_ids=(self.project_id,), adapters=(adapter,), plan_path=Path(self.temp.name) / "verify.json")
         self.run_cleanup()
         data = json.loads((self.home / STATE_FILES[0]).read_bytes())

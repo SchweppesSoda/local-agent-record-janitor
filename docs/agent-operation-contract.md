@@ -1,119 +1,59 @@
 # Agent record operation contract
 
-This repository provides a non-interactive cleanup protocol specifically for
-software agents. Use it instead of driving the human `clean`/`purge` prompts.
-The high-level `records`/`delete`/`operation` commands are the preferred
-multi-project surface; the older `agent` commands remain a one-store,
-one-mutation-family compatibility surface.
+Use the non-interactive `records`/`delete`/`operation` surface for live records.
+Do not drive human `clean`/`purge` prompts or use legacy `agent` commands as a
+fallback when the operation API is unavailable.
+For long inventory, deletion or verification commands, add `--progress` and
+surface its stderr phase/count events while keeping stdout as the JSON result.
+
+## Read for the selected task
+
+- High-level inventory or deletion: [Commands](operation-cli.md#commands) and
+  [Output](operation-cli.md#output), including its linked result contract.
+  For official native stores, also read
+  [Official Desktop inventory and completion](operation-cli.md#official-desktop-inventory-and-completion).
+- Native local-environment registrations: also read
+  [native project cleanup](native-project-cleanup.md); project IDs are not thread IDs.
+- Existing legacy `agent` integrations: read [Commands](agent-automation.md#commands)
+  and [Result contract](agent-automation.md#result-contract) instead of the high-level route.
+- Recovery evidence or rollback copies: read
+  [Operation evidence and receipts](agent-automation.md#operation-evidence-and-receipts)
+  and [Temporary rollback copies](agent-automation.md#temporary-rollback-copies).
 
 ## Required agent workflow
 
-Explicitly requested deletion of an unbound `active` Cindy frontend session
-uses its full frontend ID with `delete plan --client cindy --record-id ID`.
-The plan freezes the NULL native binding and explicit-selection evidence;
-project-wide selection does not authorize this exception. See
-[operation-cli.md](operation-cli.md) for the exact guards.
+1. Select one exact client and its physical stores. Official Codex/ChatGPT
+   Desktop uses `native`/`codex-native` with the official native `CODEX_HOME`,
+   never a Cindy/AionUI substitute. Inventory and reports expose metadata only;
+   do not read or expose chat bodies.
+2. Review plan targets, counts, blockers, progress groups and `plan_sha256`.
+   Each immutable child batch owns one physical store and mutation family.
+   `delete plan/run` performs preflight; `agent doctor` is optional. Structured
+   blockers must be resolved; unsupported backends or unproven schemas remain inventory-only.
+3. Apply only within the user's frozen authorization after the owning clients
+   are closed. Never invent a hash or `--clients-closed` acknowledgement.
+   Repeated scope selectors must match the full frozen scope. Within unchanged
+   authorization, proceed without a second confirmation. Exact frontend-reference
+   and relation writes require supported schemas, immutable row evidence,
+   exact affected-row counts and post-write verification.
+4. Cindy retained chat-row deletion requires explicit Cindy session IDs via
+   `--record-id`; native SDK IDs do not authorize it. Project/all-projects
+   cleanup retains its soft-deleted-only default.
+5. Decide from `goal_status`, `goal_satisfied`, structured blockers and exit
+   codes, never human message text. Only verified `complete` satisfies the goal.
+6. If a mutation result is `unknown`, never repeat it: run `operation status`,
+   then `operation verify` (legacy integrations use `agent status/verify`).
+   Preserve the exact plan/state location. Never edit a frozen plan or journal,
+   delete/bypass `apply.lock`, or discard unresolved recovery evidence.
+7. Further work after verification needs a fresh plan and must remain within
+   the user's authorized scope. Newly discovered actions are not authorized by
+   an old plan. Report residuals only from authoritative discovery evidence;
+   otherwise report the capability boundary. `remote_delete=false` permits no remote writes.
 
-1. Work on one exact client selection at a time. For official OpenAI Codex and
-   ChatGPT Desktop, use client `native`/`codex-native` and the official native
-   `CODEX_HOME`; do not substitute a Cindy or AionUI store.
-2. `delete plan` and `delete run` perform their own read-only preflight.
-   `agent doctor` is an optional diagnostic and is not a prerequisite for the
-   high-level operation path. If a diagnostic or preflight reports a
-   structured blocker, the operation remains blocked until that blocker is
-   resolved.
-3. A high-level plan covers one selected client and may contain multiple
-   immutable child batches. Each child batch still targets exactly one
-   physical store and one mutation family. Review target, counts, blockers,
-   progress groups, and `plan_sha256` without reading or exposing chat bodies.
-4. Apply only within the user's frozen authorization and after the owning
-   clients are closed. The operation store binds the plan hash internally;
-   callers must not invent a hash or a `--clients-closed` acknowledgement.
-   If an apply request repeats a client/project/engine/record scope, the core
-   must compare it with the frozen plan in full; a mismatched selector blocks
-   the operation rather than silently narrowing or widening it.
-5. Treat `goal_status`, `goal_satisfied`, structured blockers, and the exit code
-   as authoritative. Do not decide from human message text.
-6. If any mutation result is `unknown`, never repeat it. Run
-   `operation status`, then `operation verify`. A repeated apply is
-   intentionally prevented from sending a second deletion. A new operation ID
-   or plan path cannot bypass an overlapping unknown legacy/child journal
-   within the same trusted physical store root.
-7. After verification reaches a known result, create a fresh plan for any
-   approved residuals. A proven blocked operation that has not attempted a
-   mutation may resume after its blocker is resolved. Newly discovered
-   actions are never absorbed into an old authorization. Continue only while
-   the user's authorized client/project scope still covers the new operation.
-
-The legacy `agent` workflow below keeps its stricter one-store contract for
-existing integrations. Its `doctor`/`plan`/`apply` commands are not an
-additional execution path for the high-level operation API.
-
-```powershell
-local-agent-record-janitor records --client native [--project SELECTOR]
-
-local-agent-record-janitor delete plan --client native --all-projects `
-  --out .\operation-plan.json
-local-agent-record-janitor delete apply --operation-id '<operation-id>' `
-  --plan .\operation-plan.json --clients-closed
-local-agent-record-janitor delete run --client cindy --project '<project-id>' `
-  --clients-closed
-
-local-agent-record-janitor operation status --operation-id '<operation-id>'
-local-agent-record-janitor operation verify --operation-id '<operation-id>'
-```
-
-The high-level operation output is grouped by project, engine, and physical
-location and contains metadata only. It uses the stable classifications
-`healthy`, `orphan_native`, `orphan_frontend`, `orphan_project`,
-`broken_relation`, `stale_index`, `partial_remote`, `corrupt_unreadable`, and
-`unknown_operation`, and `unverified`. `unverified` reports an unsupported backend
-or unproven native ownership and never grants deletion capability. These are
-inventory classifications, not a promise that
-every adapter discovers or deletes every class. Unsupported backends and
-unproven schemas are inventory-only. AionUI orphan project/conversations rows
-are executable only when the adapter proves the supported schema, immutable
-row evidence, and zero `acp_session` references; all other schemas remain
-inventory-only. When an adapter supplies authoritative remote discovery
-evidence, `remote_delete=false` reports those residuals without performing
-remote writes; without that evidence, report the capability boundary only and
-make no residual claim.
-
-```powershell
-local-agent-record-janitor agent doctor `
-  --platform native --codex-home 'D:\exact\CODEX_HOME'
-
-local-agent-record-janitor agent plan --operation purge `
-  --platform native --codex-home 'D:\exact\CODEX_HOME'
-
-local-agent-record-janitor agent apply `
-  --plan '.\janitor-plan.json' `
-  --authorized-plan-sha256 '<exact-plan-sha256>' `
-  --clients-closed
-
-local-agent-record-janitor agent status `
-  --operation-id '<operation-id>' --codex-home 'D:\exact\CODEX_HOME'
-
-local-agent-record-janitor agent verify `
-  --operation-id '<operation-id>' --codex-home 'D:\exact\CODEX_HOME' `
-  --verify-timeout 180
-```
-
-All agent subcommands emit JSON only and never read stdin. Exit codes are:
-
-- `0`: the read-only command succeeded, or the frozen cleanup goal is verified
-  complete;
-- `1`: the result is unknown or could not be trusted;
-- `3`: the goal is blocked or completed with residuals;
-- `2` is reserved for human confirmation flows and is never an agent result.
-
-Operation evidence is stored under
-`<CODEX_HOME>/.local-agent-record-janitor/operations/<operation-id>/`. Do not
-delete an `apply.lock`, edit a plan, or repair an operation journal in place.
-An `unknown` result retains the detailed recovery evidence. A known terminal
-result is compacted to a body-free `receipt.json`; the receipt expires after at
-most seven days and must never be treated as a backup. See
-[agent-automation.md](agent-automation.md) for the JSON and verification contract.
+Keep the record, or delete the whole verified record and every approved copy;
+never offer `repair_index_path` or `quarantine_artifacts`. Shared-file rollback
+copies are temporary and removed immediately after successful verification; receipts are
+not backups. Recovery must prove the frozen state before completion or evidence removal.
 
 The permanent `operations/.mutation.lock` serializes cooperating processes for
 one trusted local root, from journal admission through mutation and result
@@ -134,19 +74,3 @@ operation journal themselves; durable recovery of a new direct-call timeout is
 not provided by this gate. Use the journaled operation surface for that
 guarantee. There is no global lock or replay guarantee across different native
 roots, unproven bridges, or older versions that do not use the root mutex.
-
-Shared SQLite/JSON mutations use temporary rollback copies only. Exact frontend
-reference and relation-edge actions require a closed owning client, a supported
-schema, immutable row evidence, an exact affected-row count, and post-write
-verification. Successful verification deletes the temporary copy immediately.
-Never offer `repair_index_path` or `quarantine_artifacts`: keep the record, or
-delete the whole verified record and every approved copy.
-
-Official native local-environment registrations are supported through the
-high-level `delete_native_project` family only when the exact JSON schema,
-missing local roots and absence of native project/thread references are proven.
-The main global-state file and its existing `.bak` form one frozen batch. Keep
-existing project directories and unknown references inventory-only. Use exact
-project IDs for selective cleanup; do not call `thread/delete` on a project ID.
-Recovery verification must prove the frozen before/after state before deleting
-temporary evidence or declaring completion. See [native-project-cleanup.md](native-project-cleanup.md).

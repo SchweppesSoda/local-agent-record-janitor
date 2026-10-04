@@ -2,7 +2,33 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Iterator
+
+
+_inventory_path_keys: ContextVar[dict[str, str] | None] = ContextVar(
+    "inventory_path_keys", default=None
+)
+
+
+@contextmanager
+def inventory_path_identity_scope() -> Iterator[None]:
+    """Reuse proven identities while assembling one read-only inventory/context.
+
+    Nested catalog builders share this scope. Nothing survives the outer
+    builder, so deletion guards and subsequent inventories obtain fresh proof.
+    Exact spellings are separate keys; missing/unproven aliases are never cached.
+    """
+    if _inventory_path_keys.get() is not None:
+        yield
+        return
+    token = _inventory_path_keys.set({})
+    try:
+        yield
+    finally:
+        _inventory_path_keys.reset(token)
 
 
 def is_local_absolute_locator(value: str) -> bool:
@@ -29,6 +55,15 @@ def canonical_existing_path_key(path: str | os.PathLike[str]) -> str:
     if os.name != "nt":
         return os.path.normcase(raw)
 
+    cache = _inventory_path_keys.get()
+    if cache is not None and raw in cache:
+        return cache[raw]
+
+    def proven(value: str) -> str:
+        if cache is not None:
+            cache[raw] = value
+        return value
+
     try:
         resolved = os.path.normpath(os.fspath(Path(raw).resolve(strict=True)))
         if not os.path.samefile(raw, resolved):
@@ -47,15 +82,15 @@ def canonical_existing_path_key(path: str | os.PathLike[str]) -> str:
         if len(tail) >= 3 and tail[1] == ":" and tail[2] in "\\/":
             candidate = tail
     if candidate is None:
-        return resolved
+        return proven(resolved)
 
     candidate_key = os.path.normpath(os.path.abspath(candidate))
     try:
         if os.path.samefile(raw, candidate_key):
-            return candidate_key
+            return proven(candidate_key)
     except OSError:
         pass
     return raw
 
 
-__all__ = ["canonical_existing_path_key", "is_local_absolute_locator"]
+__all__ = ["canonical_existing_path_key", "is_local_absolute_locator", "inventory_path_identity_scope"]

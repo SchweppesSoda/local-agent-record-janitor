@@ -115,7 +115,7 @@ OpenAI 稳定 API。
 |---|---|---|
 | AionUI | 前端对话已不存在，但 `acp_session` reference 仍在；并要求 Codex backend/originator 证据 | Codex thread 与精确映射分成独立动作；映射仅以主键或重验证的 `rowid + 完整行指纹` 删除 |
 | AionUI：orphan project/conversations row | 已探测支持 schema，`conversations` 行存在且没有任何 `acp_session` reference，并冻结完整行证据 | 仅满足上述证明时按数据库集合精确删除；其他 schema 只读列入 `orphan_project` / `inventory_only` |
-| Cindy | `status=deleted` 的软删除会话行及其精确依赖；已失效的当前 `sdk_session_id` 或历史 `agent_switch` 引用 | 同一数据库内批量物理删除已批准的软删除会话、消息、索引和支持的依赖；引用清理仍使用精确字段/JSON 写入 |
+| Cindy | 软删除会话，或通过完整 Cindy 会话 ID 明确选择的保留会话；已失效的当前 `sdk_session_id` 或历史 `agent_switch` 引用 | 同一数据库内批量物理删除已批准的会话、消息、索引和支持的依赖；项目范围默认只选软删除行；引用清理仍使用精确字段/JSON 写入 |
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
@@ -286,8 +286,9 @@ local-agent-record-janitor agent verify --operation-id '<operation-id>' `
 Agent 命令只输出 JSON、不读取 stdin；计划只授权一个不可变动作批次。省略 `--out`
 时，计划写入用户状态目录而不是项目根目录；显式指定的计划文件由调用方管理。`apply`
 在触发修改前持久化 mutation gate，结果为 `unknown` 时会拒绝重复发送删除，只能通过
-`status`/`verify` 收口。已知终态只保留最长 7 天、无正文的最小回执。维护入口见 [AGENTS.md](AGENTS.md)，实际清理约定见 [operation contract](docs/agent-operation-contract.md) 和
-[Agent automation protocol](docs/agent-automation.md)。
+`status`/`verify` 收口。已知终态只保留最长 7 天、无正文的最小回执。维护入口见
+[AGENTS.md](AGENTS.md)；实际清理先读 [operation contract](docs/agent-operation-contract.md)，
+再按任务选择新版接口、旧版协议或恢复章节。
 
 列出当前支持适配器可见的正常/异常 Codex thread 及 Cindy/AionUI frontend reference：
 
@@ -645,7 +646,10 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 - 扫描失败按 Codex 数据目录归属，只阻止受影响位置；无法归属到保存位置的错误按 fail closed 处理。
 - Cindy `status=deleted` 的软删除会话可作为独立 `delete_frontend_session` 批次物理删除；
   同一数据库内对全部目标 ID 做集合 guard 和单个事务，删除精确会话行、消息、FTS、
-  embedding/vector 及已支持的会话专属依赖。`active`、`archived` 和 schema 未证明的行不删。
+  embedding/vector 及已支持的会话专属依赖。完整 Cindy 会话 ID 的显式 `--record-id` 选择也支持
+  `active`、`archived`；原生 SDK ID 不授权删除前端会话。未选择的保留行和 schema 未证明的行不删。
+  任务运行历史使用独立的 `--record-id schedule-run:<完整运行 ID>` 选择，保留任务定义与会话；
+  具体范围和恢复要求见 [operation 协议](docs/operation-cli.md)。
   独立引用清理仍只清空精确 `sdk_session_id`，或从绑定消息 ID 和内容哈希的
   `agent_switch` JSON 中移除 `fromSdkSessionId`。AionUI orphan project/
   conversations row 仅在已证明支持 schema、完整行证据且无 session 引用时删除；其他 schema
@@ -661,6 +665,8 @@ Pi 没有对应的 Codex app-server 删除 API。Pi 上游将会话保存为 `se
 - [全量记录与选择性删除设计及 review](docs/selective-record-management-design.md)
 - [Pi Agent 支持设计](docs/pi-agent-support-design.md)
 - [多引擎本地 Agent 记录清理设计](docs/multi-engine-record-cleanup-design.md)
+- [Codex / Cindy 性能优化方案](docs/performance-optimization-plan.md)
+- [性能基线与复测方法](docs/performance-baseline.md)
 - [安全政策与操作清单](SECURITY.md)
 
 ## 开发

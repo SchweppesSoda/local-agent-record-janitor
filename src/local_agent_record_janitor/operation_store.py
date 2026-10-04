@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,13 @@ _STATE_SCHEMA = "larj.agent-state.v1"
 _RESULT_SCHEMA = "larj.agent-result.v1"
 _RECEIPT_SCHEMA = "larj.agent-receipt.v1"
 _RECEIPT_RETENTION = timedelta(days=7)
+_ATOMIC_REPLACE_RETRYABLE_WINERRORS = frozenset({5, 32, 33})
+# A replace failure leaves the durable temporary file and the destination
+# untouched.  Keep retrying that exact pair briefly for a transient Windows
+# sharing/lock failure, with both a hard attempt limit and a time budget.
+_ATOMIC_REPLACE_MAX_ATTEMPTS = 5
+_ATOMIC_REPLACE_MAX_SECONDS = 0.1
+_ATOMIC_REPLACE_RETRY_DELAY_SECONDS = 0.01
 _GOAL_STATUSES = frozenset(
     {"unknown", "blocked", "complete", "completed_with_residuals"}
 )
@@ -105,6 +113,40 @@ def write_new_json(path: Path, value: Mapping[str, Any]) -> None:
         raise OperationStoreError(f"Could not write {path}: {exc}") from exc
 
 
+def _atomic_replace_with_retry(source: Path, destination: Path) -> None:
+    """Replace *destination* with one durable temporary file.
+
+    Windows can reject an otherwise valid atomic replacement while another
+    process briefly holds either path open.  Retrying the same source is safe:
+    the source was closed and fsynced before this function is called, and a
+    failed ``os.replace`` has not changed the destination.  No temporary file
+    is recreated and no caller-side mutation is repeated.
+    """
+
+    deadline = time.monotonic() + _ATOMIC_REPLACE_MAX_SECONDS
+    failures = 0
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            failures += 1
+            if (
+                os.name != "nt"
+                or getattr(exc, "winerror", None)
+                not in _ATOMIC_REPLACE_RETRYABLE_WINERRORS
+                or failures >= _ATOMIC_REPLACE_MAX_ATTEMPTS
+            ):
+                raise
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(_ATOMIC_REPLACE_RETRY_DELAY_SECONDS, remaining))
+            if time.monotonic() >= deadline:
+                raise
+
+
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
@@ -120,7 +162,7 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
             handle.write(canonical_json_bytes(value) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _atomic_replace_with_retry(temporary, path)
         temporary = None
         _fsync_directory(path.parent)
     except OSError as exc:

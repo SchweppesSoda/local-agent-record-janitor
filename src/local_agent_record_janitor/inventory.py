@@ -14,7 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .codex_state import parse_thread_source, read_native_lineage
 from .conversation_metadata import read_conversation_summaries
 from .models import ConversationSummary, RolloutRecord
-from .path_identity import canonical_existing_path_key
+from .path_identity import canonical_existing_path_key, inventory_path_identity_scope
 from .record_identity import RecordClassification, classify_record_state
 from .sqlite_utils import connect_readonly, table_exists
 
@@ -228,6 +228,7 @@ class SessionCatalog:
     scanned_session_databases: tuple[Path, ...] = ()
     # Runtime guard providers are not native discovery inputs or hash fields.
     active_adapters: tuple[Any, ...] = field(default=(), repr=False, compare=False)
+    scanned_native_homes: tuple[Path, ...] = ()
 
     @property
     def conversations(self) -> tuple[ManagedConversation, ...]:
@@ -264,6 +265,7 @@ class InventorySelectionError(ValueError):
     pass
 
 
+@inventory_path_identity_scope()
 def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterable[object] = (), plain_native_paths: bool = False) -> SessionCatalog:
     """Build a read-only union of native artifacts and frontend mappings.
 
@@ -284,6 +286,7 @@ def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterabl
     frontend_by_home: dict[str, list[FrontendSessionRecord]] = defaultdict(list)
     errors: list[InventoryFailure] = []
     scanned_session_databases: set[Path] = set()
+    scanned_native_homes: set[Path] = set()
     candidate_ids = {id(adapter) for adapter in adapter_list}
     candidate_homes = {_normalized_path(_absolute_path(home)) for adapter in adapter_list
                        if isinstance(home := getattr(adapter, "codex_home", None), Path)}
@@ -441,6 +444,13 @@ def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterabl
             )
 
         cascade_unknown = not state_edge_complete or bool(rollout_errors)
+        # A successful empty scan is evidence too. Do not infer coverage from
+        # the remaining records: the final native row may just have been deleted.
+        state_file = home / "state_5.sqlite"
+        if (home.is_dir() and not cascade_unknown
+                and not any(failure.blocks_delete for failure in home_errors)
+                and state_file.is_file() and not state_file.is_symlink()):
+            scanned_native_homes.add(home)
         blocking_messages = tuple(
             sorted(
                 {
@@ -634,6 +644,7 @@ def build_session_catalog(adapters: Iterable[object], *, guard_adapters: Iterabl
         records=tuple(restricted_records),
         active_adapters=active,
         scanned_session_databases=tuple(sorted(scanned_session_databases, key=str)),
+        scanned_native_homes=tuple(sorted(scanned_native_homes, key=str)),
         unmapped_frontend_sessions=tuple(
             sorted(
                 _deduplicate_frontend(unmapped),

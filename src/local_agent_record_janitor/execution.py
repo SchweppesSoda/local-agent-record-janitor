@@ -95,9 +95,12 @@ class ExecutionOutcome:
     relation_cleanup: RelationCleanupResult | None = None
     session_engine: str | None = None
     session_cleanup: Any | None = None
+    schedule_cleanup: Any | None = None
 
     @property
     def ok(self) -> bool:
+        if self.schedule_cleanup is not None:
+            return True
         if self.cleanup_report is not None:
             return self.cleanup_report.ok
         if self.session_cleanup is not None:
@@ -116,6 +119,8 @@ class ExecutionOutcome:
 
     @property
     def modified(self) -> bool:
+        if self.schedule_cleanup is not None:
+            return bool(self.schedule_cleanup.deleted_ids)
         if self.native_project_cleanup is not None:
             return bool(self.native_project_cleanup.entries_removed)
         if self.frontend_session_cleanup is not None:
@@ -128,6 +133,8 @@ class ExecutionOutcome:
 
     @property
     def results(self) -> tuple[Any, ...]:
+        if self.schedule_cleanup is not None:
+            return (self.schedule_cleanup,)
         if self.native_project_cleanup is not None:
             return (self.native_project_cleanup,)
         if self.frontend_session_cleanup is not None:
@@ -140,6 +147,12 @@ class ExecutionOutcome:
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
+
+        if self.schedule_cleanup is not None:
+            return {"command": "delete", "mutation_kind": "delete_schedule_run",
+                    "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
+                    "result": self.schedule_cleanup.to_dict(),
+                    "plan_fingerprint": str(self.plan.plan_fingerprint)}
 
         if self.native_project_cleanup is not None:
             return {
@@ -708,6 +721,24 @@ def _execute_prevalidated_actions_locked(
             plan=plan,
             frontend_session_cleanup=result,
         )
+
+    if mutation_kind == "delete_schedule_run":
+        from .cindy_schedule_cleanup import execute as execute_schedule_cleanup
+        evidence = tuple(a.impact.external_action_payload["schedule_run_evidence"] for a in actions)
+        if any(a.impact.owner_client != "cindy" or
+               a.impact.owner_process_root != e["owner_process_root"] or
+               a.impact.resource_path != e["database"] for a, e in zip(actions, evidence)):
+            raise ExecutionError("Schedule owner/store binding mismatch")
+
+        def forward_schedule_phase(phase: str) -> None:
+            if action_state_callback is not None:
+                for action in actions:
+                    action_state_callback(phase, action, None)
+
+        result = execute_schedule_cleanup(evidence, client_inspector=client_inspector,
+                                          phase_callback=forward_schedule_phase)
+        return ExecutionOutcome(mutation_kind=mutation_kind, selected_actions=actions,
+                                plan=plan, schedule_cleanup=result)
 
     if mutation_kind == "delete_native_project":
         evidence = tuple(a.impact.external_action_payload["native_project_evidence"] for a in actions)

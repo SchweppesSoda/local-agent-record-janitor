@@ -26,8 +26,21 @@ delete plan --client <client> (--project <selector> ... | --all-projects | --rec
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 operation status --operation-id <id> [--operation-home <path>] [--plan <plan.json>]
-operation verify --operation-id <id> [--operation-home <path>] [--plan <plan.json>] [--verify-timeout <seconds>]
+operation verify --operation-id <id> [--operation-home <path>] [--plan <plan.json>] [--verify-timeout <seconds>] [--progress]
 ```
+
+Add `--progress` to `records`, `delete plan/apply/run`, or
+`operation status/verify` when a live diagnostic stream is useful. The option
+writes metadata-only JSONL events to stderr as inventory, planning, child-batch
+execution, and verification phases start and report completion, failure, or a
+recovery boundary. Events include the phase, status, elapsed seconds, and
+bounded counts; they never include message bodies or alter the one-document
+JSON result on stdout. It is opt-in and has no effect on the default output
+contract. During execution, verified successful actions advance
+`counts.completed_action_count` toward `counts.total_action_count`; failed,
+partial, or unknown checks do not count as completed actions. These are phase
+and action events, not a periodic heartbeat during a blocked call. Always use
+the final operation result to determine whether the whole goal is complete.
 
 `--engine` may further limit a client scope. A project selector is resolved by
 the core using a normalized working directory, authoritative project ID, or a
@@ -137,12 +150,42 @@ apply/status/verify preserve a blocked plan with no authorized actions instead
 of interpreting the empty action set as successful cleanup. See
 [the source and coverage limits](adapters.md#herdr已接入持久化只读引用).
 
+Cindy Codex plans include ordinary native conversations from the same
+client-qualified inventory used by `records`, together with their frozen
+frontend reference closure. Project selection carries the native project's
+metadata to the paired reference actions. When selected roots include both a
+parent and its descendants, the plan retains one encompassing native cascade
+and its complete reference closure; it does not send overlapping deletion
+requests. Descendant references remain bound to their own native IDs. A
+child-only selection never implicitly selects its parent and remains subject
+to the existing lineage guards.
+
+If a verified native deletion leaves Cindy references, a fresh plan can clear
+those exact references only when a complete inventory proves the native index,
+rollouts, legacy index and descendants absent. Incomplete catalogs and unproven
+row ownership remain blocked. Reappearing native records invalidate the plan.
+Reference actions remove SDK references only. Deleting retained chat rows requires
+explicit Cindy session IDs as described below.
+Missing-parent subagents use the existing native orphan evidence and guards for
+the same Cindy store rather than a synthetic manual-delete finding.
+
+Cindy frontend references are checked during planning against the supported
+upstream FTS trigger definitions and index layouts. Unknown triggers return a
+`frontend_preflight_blocked` blocker before any native deletion is attempted.
+See [Cindy storage contract](cindy-storage-contract.md) for pinned upstream
+sources, the closed-client CJK fallback, and regression fixtures.
+
 ## Output
 
 JSON output and human summaries contain metadata only: IDs, stores, paths,
 counts, classifications, blockers, and progress grouped by project, engine,
 and physical location. Chat messages, prompts, transcripts, and response
 content are not read into the report or saved in operation evidence.
+
+For structured goal fields, see [Result contract](agent-automation.md#result-contract).
+Evidence retention and rollback behavior are documented in
+[Operation evidence and receipts](agent-automation.md#operation-evidence-and-receipts)
+and [Temporary rollback copies](agent-automation.md#temporary-rollback-copies).
 
 The stable classification vocabulary is:
 
@@ -206,26 +249,40 @@ boundary without claiming residuals, and nothing is deleted. Stale-index and bro
 anomaly scan and is not guaranteed to appear as a uniformly executable
 `records` target for every client.
 
-Cindy frontend-session deletion defaults to `sessions.status='deleted'` rows.
-The narrow explicit-selection exception is an `active` row whose
-`sdk_session_id` is SQL NULL: a full frontend session ID supplied through
-`--record-id` may freeze it with `explicit_unbound_active=true`. Project-wide
-and all-project scans do not opt into this exception. Apply and recovery bind
-the exact status, row, dependencies and NULL native binding; a new binding or
-status change blocks deletion.
+Cindy frontend-session deletion is deliberately narrower than "not active":
+project/all-projects cleanup selects only `sessions.status='deleted'` rows.
+An explicit `--record-id <Cindy-session-id>` selection also supports `active` and
+`archived` rows when the user requests their permanent deletion. This selection
+is frozen in the operation scope and in each row's `explicitly_selected` evidence;
+a native SDK thread ID does not authorize deleting its Cindy chat row.
 All approved IDs in one Cindy database are guarded as a set and deleted in one
 transaction together with their supported message, FTS, embedding/vector, and
-session-owned dependency rows. Other `active` rows, `archived`, and unproven schemas are
-inventory/protection evidence, not deletion candidates.
+session-owned dependency rows. Status changes invalidate the frozen evidence.
+Unselected retained rows and unproven schemas remain protected.
+
+Cindy automation run history can be selected separately with exact
+`--record-id schedule-run:<full-run-id>` values. This uses the independent
+`delete_schedule_run` family; project scopes and ID prefixes never select run
+history. It deletes terminal `schedule_runs` rows and maintains the supported
+`schedule_session_latest_runs` dependencies. Task definitions and conversations
+are preserved. Deleting conversations alone only clears their run references.
+To remove both, first delete explicitly selected conversations, then freeze a
+fresh run-history plan because conversation deletion changes the run metadata.
+The writer requires the probed schedule schema and complete trigger definitions,
+closed owning clients, unchanged metadata, exact row counts and verification.
+Unknown schemas remain inventory-only. Interrupted verification keeps a temporary
+rollback copy; `operation verify` removes it only after proving the frozen
+before/after state. Evidence contains IDs, statuses, timestamps and hashes, never
+prompts, error text, hook output or run results.
 
 ## Official Desktop inventory and completion
 
 Select the official native `CODEX_HOME` explicitly when the caller itself runs
 inside Cindy. `records --inspect-clients` adds read-only process ownership
 evidence (PID, parent PID, executable and store relation); process names alone
-do not identify which store is open. Herdr's explicit inspection instead uses
-the metadata API described above; a native command does not enable Herdr live
-queries merely because default discovery found a Herdr profile. Apply and verify restore the frozen native
+do not identify which store is open. On Windows, the read-only CIM process
+probe is bounded and uses a hidden PowerShell window; a timeout or launch error
+is reported as an inability to prove that clients are closed. Apply and verify restore the frozen native
 store when a plan is supplied and reject a conflicting explicit home.
 
 Record output contains the Desktop catalog's UI display title when available,
@@ -252,6 +309,14 @@ the entire original scope. Partial native results remain residuals, and exact
 global-state references count even when the Desktop catalog row is gone.
 An empty scan proves completion only for the exact successfully scanned store;
 frontend databases additionally require the matching discovery family.
+
+For a full explicit native thread ID, planning also probes exact JSON UI
+references when both the native record and Desktop catalog row are absent.
+These use `remove_desktop_state` with zero catalog rows and the same frozen
+state fingerprints, closed-client guard, rollback and verification. A compatible
+Desktop database is still required. Prefix, project and all-projects selectors
+do not discover these catalog-free references; verification checks every frozen
+descendant ID even if ordinary `records` output no longer lists it.
 
 ## Legacy commands
 

@@ -34,16 +34,33 @@ class TargetedReferenceGuard:
     affected_thread_ids: Mapping[TargetKey, frozenset[str]]
     adapter_builder: AdapterBuilder | None = None
 
-    def check(self, finding: Finding) -> None:
+    def check(self, finding: Finding, *, approved_references: Sequence[Mapping[str, Any]] = ()) -> None:
         target_key = finding_key(finding)
         affected = self.affected_thread_ids.get(target_key)
         if affected is None:
             raise TargetedGuardError(
                 "the action has no authorized targeted-reference scope"
             )
-        self._check_home(finding.codex_home, affected)
+        self._check_home(finding.codex_home, affected, approved_references=approved_references)
 
-    def _check_home(self, home: Path, affected: frozenset[str]) -> None:
+    def _check_home(self, home: Path, affected: frozenset[str], *,
+                    approved_references: Sequence[Mapping[str, Any]] = ()) -> None:
+        from .frontend_reference_cleanup import guard_frontend_reference_closure
+
+        collections: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+        for row in approved_references:
+            platform, database = str(row.get("platform") or ""), row.get("database")
+            if platform not in {"cindy", "aionui"} or not database:
+                raise TargetedGuardError("approved frontend collection has no supported source")
+            key = (platform, canonical_existing_path_key(Path(database)))
+            collections.setdefault(key, []).append(row)
+        approved_ids: dict[tuple[str, str], frozenset[str]] = {}
+        for key, rows in collections.items():
+            checked = guard_frontend_reference_closure(rows)
+            ids = frozenset(checked.checked_native_ids)
+            if not ids <= affected:
+                raise TargetedGuardError("approved frontend collection exceeds native scope")
+            approved_ids[key] = ids
         adapters = (
             tuple(self.adapter_builder())
             if self.adapter_builder is not None
@@ -79,14 +96,19 @@ class TargetedReferenceGuard:
                     continue
 
             probe = getattr(adapter, "live_thread_ids_for", None)
+            pending = affected
+            database = getattr(adapter, "database", None)
+            if database is not None:
+                pending = affected - approved_ids.get(
+                    (name_key, canonical_existing_path_key(Path(database))), frozenset())
             try:
                 if callable(probe):
-                    current = probe(set(affected))
+                    current = probe(set(pending))
                 else:
                     current = {
                         value
                         for value in getattr(adapter, "live_thread_ids", ())
-                        if value in affected
+                        if value in pending
                     }
             except Exception as exc:
                 raise TargetedGuardError(
@@ -96,7 +118,7 @@ class TargetedReferenceGuard:
             matching = {
                 value
                 for value in current
-                if isinstance(value, str) and value in affected
+                if isinstance(value, str) and value in pending
             }
             if matching:
                 live_by_source.setdefault(name, set()).update(matching)

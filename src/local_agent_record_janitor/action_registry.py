@@ -23,6 +23,11 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "delete_schedule_run": ActionCapability(
+        kind="delete_schedule_run", implemented=True,
+        mutation_family="delete_schedule_run", requires_clients_closed=True,
+        verifies_by="approved_schedule_runs_and_latest_links_absent",
+    ),
     "delete_conversation": ActionCapability(
         kind="delete_conversation",
         implemented=True,
@@ -140,7 +145,7 @@ def capability_field_for_action(kind: object) -> str | None:
         return "native_delete"
     if family == "remove_frontend_reference":
         return "frontend_reference_delete"
-    if family == "delete_frontend_session":
+    if family in {"delete_frontend_session", "delete_schedule_run"}:
         return "frontend_session_delete"
     if family in {"delete_project_item", "delete_native_project"}:
         return "frontend_project_delete"

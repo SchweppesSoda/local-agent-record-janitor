@@ -25,6 +25,7 @@ from .codex_state import (
     find_thread_rollouts,
     iter_rollouts,
     read_rollouts_at_paths,
+    read_native_lineage_snapshot,
     read_spawn_edge_records,
     read_spawn_edges,
     read_spawn_descendants,
@@ -140,6 +141,7 @@ class CleanupResult:
     remaining_artifacts: tuple[str, ...] = ()
     request_error: str | None = None
     impacted_thread_ids: tuple[str, ...] = ()
+    preflight_blocked: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -162,6 +164,7 @@ class CleanupResult:
             "status": self.status,
             "error": self.error,
             "request_error": self.request_error,
+            "preflight_blocked": self.preflight_blocked,
             "remaining_artifacts": list(self.remaining_artifacts),
             "impacted_thread_ids": list(self.impacted_thread_ids),
         }
@@ -1192,9 +1195,9 @@ def _clean_group(
         with context as server:
             if post_start_validator is not None:
                 post_start_validator()
-            # Build native rollout/source identity once for the whole batch.
-            # Individual actions below re-read only their approved paths and
-            # targeted database rows.
+            # Build one native lineage snapshot for the whole post-start
+            # capture phase.  It is only reused before the first mutation;
+            # each immediate pre-delete check creates a fresh snapshot.
             post_start_rollouts = tuple(iter_rollouts(codex_home))
             post_start_rollouts_by_thread: dict[
                 str,
@@ -1202,11 +1205,23 @@ def _clean_group(
             ] = defaultdict(list)
             for record in post_start_rollouts:
                 post_start_rollouts_by_thread[record.thread_id].append(record)
-            post_start_descendants = read_spawn_descendants(
+            post_start_lineage = read_native_lineage_snapshot(
                 codex_home,
-                (finding.thread_id for finding, _ in cascade_safe),
-                strict=True,
                 rollout_records=post_start_rollouts,
+                strict=True,
+            )
+            post_start_roots = tuple(
+                finding.thread_id for finding, _ in cascade_safe
+            )
+            post_start_descendants = post_start_lineage.descendants(
+                post_start_roots
+            )
+            post_start_edges = post_start_lineage.edges(
+                {
+                    thread_id
+                    for finding, descendants in cascade_safe
+                    for thread_id in (finding.thread_id, *descendants)
+                }
             )
             captured_scopes: list[
                 tuple[Finding, set[str], Finding]
@@ -1245,6 +1260,8 @@ def _clean_group(
                             finding.thread_id,
                             set(),
                         ),
+                        current_edges=post_start_edges,
+                        current_lineage=post_start_lineage.lineage,
                     )
                 except Exception as exc:
                     capture_issues.append(
@@ -1285,6 +1302,7 @@ def _clean_group(
                     CleanupResult(
                         finding=finding,
                         status="unknown",
+                        preflight_blocked=not defer_verification_until_close,
                         error=error,
                         impacted_thread_ids=tuple(
                             sorted({finding.thread_id, *descendants})
@@ -1292,7 +1310,11 @@ def _clean_group(
                     )
                     for finding, descendants in cascade_safe
                 )
-                return
+                if not defer_verification_until_close:
+                    return
+                # Isolated startup already mutated shared state. Close and
+                # validate that boundary, retaining unknown without any RPC.
+                captured_scopes = []
 
             for capture_index, (
                 finding,
@@ -1324,11 +1346,13 @@ def _clean_group(
                             immediate_rollouts_by_thread[
                                 record.thread_id
                             ].append(record)
-                        immediate_descendants = read_spawn_descendants(
+                        immediate_lineage = read_native_lineage_snapshot(
                             finding.codex_home,
-                            [finding.thread_id],
                             strict=True,
                             rollout_records=immediate_rollouts,
+                        )
+                        immediate_descendants = immediate_lineage.descendants(
+                            [finding.thread_id]
                         ).get(finding.thread_id, set())
                         immediate_finding = _with_verification_scope(
                             finding,
@@ -1351,6 +1375,10 @@ def _clean_group(
                                 immediate_rollouts_by_thread
                             ),
                             current_descendants=immediate_descendants,
+                            current_edges=immediate_lineage.edges(
+                                {finding.thread_id, *descendants}
+                            ),
+                            current_lineage=immediate_lineage.lineage,
                         )
                         immediate_scope = _captured_deletion_scope(
                             immediate_finding,
@@ -1992,6 +2020,8 @@ def _with_verification_scope(
     ]
     | None = None,
     current_descendants: set[str] | None = None,
+    current_edges: set[tuple[str, str]] | None = None,
+    current_lineage: Mapping[str, Any] | None = None,
 ) -> Finding:
     details = dict(finding.details)
     thread_ids = {
@@ -2052,6 +2082,7 @@ def _with_verification_scope(
                 thread_ids,
             ),
             strict=True,
+            native_lineage=current_lineage,
         )
         details[
             "captured_conversation_metadata_fingerprints"
@@ -2281,9 +2312,8 @@ def _with_verification_scope(
         _index_artifact_marker(finding, thread_id)
         for thread_id in indexed
     )
-    expected_artifacts.update(
-        _edge_artifact_marker(parent, child)
-        for parent, child in read_spawn_edges(
+    if current_edges is None:
+        current_edges = read_spawn_edges(
             finding.codex_home,
             thread_ids,
             strict=True,
@@ -2293,6 +2323,18 @@ def _with_verification_scope(
                 for record in records
             ),
         )
+    else:
+        # A batch snapshot may contain edges for several roots.  Preserve the
+        # old per-finding boundary by retaining only relations touching this
+        # finding's affected scope.
+        current_edges = {
+            (parent, child)
+            for parent, child in current_edges
+            if parent in thread_ids or child in thread_ids
+        }
+    expected_artifacts.update(
+        _edge_artifact_marker(parent, child)
+        for parent, child in current_edges
     )
     details["planned_expected_artifacts"] = sorted(expected_artifacts)
     return replace(finding, details=details)

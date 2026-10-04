@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -24,6 +25,11 @@ from .sqlite_utils import connect_readonly, table_exists
 
 class DesktopStateError(RuntimeError):
     """Codex Desktop host state could not be inspected or changed safely."""
+
+
+# Process inspection is a safety guard.  A hung CIM query must fail closed
+# within a bounded interval instead of holding a cleanup operation forever.
+PROCESS_INSPECTION_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -273,9 +279,9 @@ def execute_desktop_state_cleanup(
         raise DesktopStateError("No compatible Codex Desktop catalog was found")
     for thread_id in targets:
         current = snapshot.threads.get(thread_id)
-        if current is None or not current.catalog_records:
+        if current is None or not current.present:
             raise DesktopStateError(
-                f"The approved local Desktop catalog row disappeared: {thread_id}"
+                f"The approved local Desktop state disappeared: {thread_id}"
             )
         if any(record.host_id != "local" for record in current.catalog_records):
             raise DesktopStateError(
@@ -312,7 +318,12 @@ def execute_desktop_state_cleanup(
     deleted_rows = 0
     removed_references = 0
     try:
-        deleted_rows = _delete_catalog_rows(snapshot.database, targets)
+        catalog_targets = tuple(
+            thread_id for thread_id in targets
+            if snapshot.threads[thread_id].catalog_records
+        )
+        if catalog_targets:
+            deleted_rows = _delete_catalog_rows(snapshot.database, catalog_targets)
         for path in snapshot.state_paths:
             expected_hash = manifest["state_files_before"][str(path)]
             if sha256_file(path) != expected_hash:
@@ -463,7 +474,20 @@ def running_related_clients(
     )
 
 
-def _running_related_process_records() -> tuple[dict[str, Any], ...]:
+def _running_related_process_records(
+    *,
+    timeout: float = PROCESS_INSPECTION_TIMEOUT_SECONDS,
+) -> tuple[dict[str, Any], ...]:
+    try:
+        effective_timeout = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        ) from exc
+    if not math.isfinite(effective_timeout) or effective_timeout <= 0:
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        )
     powershell = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
     if powershell is None:
         raise DesktopStateError(
@@ -478,22 +502,36 @@ def _running_related_process_records() -> tuple[dict[str, Any], ...]:
         "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine); "
         "$items | ConvertTo-Json -Compress -Depth 3"
     )
-    completed = subprocess.run(
-        [
-            powershell,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=effective_timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A timeout or launch failure is an inability to prove that clients
+        # are closed.  Keep the existing fail-closed blocker surface.
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed: "
+            "process inspection timed out"
+        ) from exc
+    except OSError as exc:
+        raise DesktopStateError(
+            "Could not verify whether Codex Desktop clients are closed"
+        ) from exc
     if completed.returncode != 0:
         raise DesktopStateError(
             "Could not verify whether Codex Desktop clients are closed"

@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from copy import copy
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any
 
 from .action_registry import action_capability
 from .agent_operations import action_binding
+from .path_identity import inventory_path_identity_scope
 from .operation_store import OperationStore, plan_sha256, strict_json_load, write_new_json
 from .operation_guard_sources import (
     PLAN_V1, PLAN_V2, PLAN_V3, guard_sources_for, refresh_guard_sources,
@@ -28,6 +30,7 @@ from .record_identity import (
     canonical_path,
     normalize_client,
     normalize_engine,
+    project_selector_matches,
 )
 
 _BODY_KEYS = frozenset({
@@ -80,6 +83,64 @@ class OperationCoordinator:
         self.service = service
         self._live: dict[str, _LiveOperation] = {}
 
+    @staticmethod
+    def _emit_progress(
+        callback: Callable[[Mapping[str, Any]], None] | None,
+        stage: str,
+        status: str,
+        *,
+        operation_id: str | None = None,
+        counts: Mapping[str, Any] | None = None,
+        **metadata: Any,
+    ) -> None:
+        """Report a safe live phase without making callbacks part of results."""
+
+        if not callable(callback):
+            return
+        try:
+            event: dict[str, Any] = {
+                "stage": str(stage),
+                "status": str(status),
+            }
+            if operation_id:
+                event["operation_id"] = str(operation_id)
+            if isinstance(counts, Mapping):
+                event["counts"] = {
+                    str(key): value
+                    for key, value in counts.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                }
+            for key, value in metadata.items():
+                if key.casefold() in _BODY_KEYS:
+                    continue
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    event[str(key)] = value
+            callback(event)
+        except Exception:
+            # Diagnostics are strictly best effort and cannot alter a safe
+            # operation result if the caller's output stream is unavailable.
+            return
+
+    @staticmethod
+    def _progress_counts(context: Any) -> dict[str, int]:
+        plan = getattr(context, "plan", None)
+        snapshot = getattr(context, "snapshot", None)
+        report = getattr(snapshot, "report", None)
+
+        def count(value: Any) -> int:
+            try:
+                return len(value or ())
+            except TypeError:
+                return 0
+
+        return {
+            "storage_count": count(getattr(plan, "storages", ())),
+            "observation_count": count(getattr(plan, "observations", ())),
+            "action_count": count(getattr(plan, "actions", ())),
+            "finding_count": count(getattr(report, "findings", ())),
+            "error_count": count(getattr(plan, "errors", ())),
+        }
+
     def plan_operation(
         self,
         *,
@@ -96,6 +157,7 @@ class OperationCoordinator:
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
         adapters: Iterable[Any] | None = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -110,6 +172,7 @@ class OperationCoordinator:
             self._validate_scope(normalized_scope, require_selection=True)
             client_name = str(normalized_scope["client"])
             source = None if adapters is None else tuple(adapters)
+            self._emit_progress(progress_callback, "inventory", "started")
             (
                 context,
                 active_adapters,
@@ -122,12 +185,24 @@ class OperationCoordinator:
                 source,
                 explicit_frontend_ids=tuple(normalized_scope.get("record_ids", ())),
                 engines=tuple(normalized_scope.get("engines", ())),
+                explicit_session_ids=tuple(normalized_scope.get("record_ids", ())),
                 include_action_contexts=True,
                 codex_home=codex_home,
                 orca_roots=orca_roots,
                 herdr_roots=herdr_roots,
             )
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "completed",
+                counts=self._progress_counts(context),
+            )
+            self._emit_progress(progress_callback, "plan", "started")
             candidates, blockers = self._select_candidates(context, normalized_scope)
+            candidates = self._coalesce_manual_candidates(candidates, manual_actions)
+            if client_name == "cindy":
+                from .cindy_operations import preflight_frontend_actions
+                blockers.extend(preflight_frontend_actions(candidates))
             operation = str(operation_id or self._new_operation_id(client_name))
             document = self._make_plan_document(
                 operation,
@@ -144,6 +219,13 @@ class OperationCoordinator:
                 manual_catalog=manual_catalog,
             )
             write_new_json(Path(str(document["plan_path"])), document)
+            self._emit_progress(
+                progress_callback,
+                "plan",
+                "completed",
+                operation_id=operation,
+                counts=document.get("counts"),
+            )
             self._live[operation] = _LiveOperation(
                 operation_id=operation,
                 document=document,
@@ -158,6 +240,7 @@ class OperationCoordinator:
             )
             return document
         except Exception as exc:
+            self._emit_progress(progress_callback, "plan", "failed")
             return self._error_document(
                 "plan", normalized_scope, str(exc) or repr(exc), operation_id=operation_id
             )
@@ -182,6 +265,7 @@ class OperationCoordinator:
         timeout: float = 30.0,
         app_server_factory: Any = None,
         binary_resolver: Any = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -211,7 +295,13 @@ class OperationCoordinator:
             self._validate_apply_scope(document, normalized_scope)
             child_inspection = self._inspect_child_states(document)
             if child_inspection.blockers:
-                return self._result_document(
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "started",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                )
+                result = self._result_document(
                     document,
                     normalized_scope,
                     goal_status="unknown",
@@ -220,6 +310,15 @@ class OperationCoordinator:
                     modified=child_inspection.modified,
                     mutation_started=child_inspection.mutation_started,
                 )
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "completed",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                    counts={"batch_count": len(child_inspection.batches)},
+                    goal_status="unknown",
+                )
+                return result
             if document["schema_version"] == PLAN_V3:
                 # Even a closed capability can expose a concrete preflight.
                 # Refresh process/reference/file evidence on apply; planning
@@ -291,6 +390,12 @@ class OperationCoordinator:
                     ):
                         return dict(live.result)
             else:
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "started",
+                    operation_id=operation,
+                )
                 (
                     context,
                     active_adapters,
@@ -302,9 +407,17 @@ class OperationCoordinator:
                     client_name,
                     source,
                     explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
-                    engines=tuple(normalized_scope.get("engines", ())),
+                    engines=tuple(document.get("scope", {}).get("engines", ())),
+                    explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
+                )
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "completed",
+                    operation_id=operation,
+                    counts=self._progress_counts(context),
                 )
                 candidates, blockers = self._bind_fresh_candidates(
                     document,
@@ -336,8 +449,15 @@ class OperationCoordinator:
                 timeout=float(timeout),
                 app_server_factory=app_server_factory,
                 binary_resolver=binary_resolver,
+                progress_callback=progress_callback,
             )
         except Exception as exc:
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "failed",
+                operation_id=operation_id,
+            )
             if document is not None:
                 if child_inspection is None:
                     child_inspection = self._inspect_child_states(document)
@@ -374,6 +494,7 @@ class OperationCoordinator:
         timeout: float = 30.0,
         app_server_factory: Any = None,
         binary_resolver: Any = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         normalized_scope = self._scope(
@@ -398,6 +519,7 @@ class OperationCoordinator:
             orca_roots=orca_roots,
             herdr_roots=herdr_roots,
             adapters=adapters,
+            progress_callback=progress_callback,
         )
         if planned.get("goal_status") != "ready":
             return planned
@@ -412,9 +534,11 @@ class OperationCoordinator:
             timeout=float(timeout),
             app_server_factory=app_server_factory,
             binary_resolver=binary_resolver,
+            progress_callback=progress_callback,
         )
         return self._finish_native_run(live, result, timeout=float(timeout),
-            app_server_factory=app_server_factory, binary_resolver=binary_resolver)
+            app_server_factory=app_server_factory, binary_resolver=binary_resolver,
+            progress_callback=progress_callback)
 
     def _finish_native_run(self, initial: _LiveOperation, result: dict[str, Any], **execution: Any) -> dict[str, Any]:
         """Fresh, bounded residual plans; never retry a native deletion request."""
@@ -503,15 +627,33 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         scope: Mapping[str, Any] | None = None,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
+        self._emit_progress(
+            progress_callback,
+            "status",
+            "started",
+            operation_id=operation_id,
+        )
         live = self._live.get(str(operation_id or ""))
         if live is not None:
-            if self._blocked_without_mutation(live.document):
-                return self._status_for_document(live.document)
-            return dict(live.result) if live.result is not None else self._status_for_document(live.document)
+            result = (
+                self._status_for_document(live.document)
+                if self._blocked_without_mutation(live.document) else dict(live.result)
+                if live.result is not None
+                else self._status_for_document(live.document)
+            )
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "completed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"batch_count": len(result.get("batches", ()) or ())},
+            )
+            return result
         try:
-            return self._status_for_document(
+            result = self._status_for_document(
                 self._load_plan(
                     operation_id,
                     plan_path,
@@ -520,7 +662,21 @@ class OperationCoordinator:
                     codex_home=codex_home,
                 )
             )
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "completed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"batch_count": len(result.get("batches", ()) or ())},
+            )
+            return result
         except Exception as exc:
+            self._emit_progress(
+                progress_callback,
+                "status",
+                "failed",
+                operation_id=operation_id,
+            )
             return self._error_document(
                 "status", dict(scope or {}), str(exc) or repr(exc),
                 operation_id=operation_id, blocker_code="operation_query_unavailable",
@@ -537,6 +693,7 @@ class OperationCoordinator:
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         document: Mapping[str, Any] | None = None
@@ -554,6 +711,7 @@ class OperationCoordinator:
                     operation_id=operation_id, plan_path=plan_path,
                     operation_home=operation_home, codex_home=codex_home,
                     scope=scope, adapters=adapters, orca_roots=orca_roots, verify_timeout=verify_timeout,
+                    progress_callback=progress_callback,
                 )
             return dict(computed)
         except Exception as exc:
@@ -587,9 +745,36 @@ class OperationCoordinator:
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
     ) -> dict[str, Any]:
         del verify_timeout
+        self._emit_progress(
+            progress_callback,
+            "verify",
+            "started",
+            operation_id=operation_id,
+        )
+
+        def finish(result: dict[str, Any]) -> dict[str, Any]:
+            residuals = result.get("residuals", ())
+            try:
+                residual_count = len(residuals or ())
+            except TypeError:
+                residual_count = 0
+            goal_status = str(result.get("goal_status") or "unknown")
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "completed" if goal_status in {
+                    "complete", "completed_with_residuals"
+                } else "failed",
+                operation_id=str(result.get("operation_id") or operation_id or ""),
+                counts={"residual_count": residual_count},
+                goal_status=goal_status,
+            )
+            return result
+
         live = self._live.get(str(operation_id or ""))
         terminal: Any | None = None
         error: str | None = None
@@ -608,10 +793,10 @@ class OperationCoordinator:
                                      *recheck_document_targets(document, phase="readonly_recovery"))
                     if safety_errors:
                         inspection = self._inspect_child_states(document)
-                        return self._result_document(document, dict(scope or {}), goal_status="unknown",
+                        return finish(self._result_document(document, dict(scope or {}), goal_status="unknown",
                             blockers=[self._blocker(code, code, scope="target_safety") for code in safety_errors],
                             batches=inspection.batches, modified=inspection.modified,
-                            mutation_started=inspection.mutation_started)
+                            mutation_started=inspection.mutation_started))
                 client_name = str(document["scope"]["client"])
                 codex_home = self._bound_codex_home(document, codex_home)
                 discovery_roots = ((*validate_guard_sources(document), *orca_roots)
@@ -623,6 +808,12 @@ class OperationCoordinator:
                 source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
                 source = refresh_guard_sources(retain_guard_sources(source, (*validate_guard_sources(document), *orca_roots)))
                 source = self._orca_recovery_sources(document, source)
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "started",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                )
                 (
                     context,
                     active_adapters,
@@ -635,15 +826,23 @@ class OperationCoordinator:
                     source,
                     explicit_frontend_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     engines=tuple(document.get("scope", {}).get("engines", ())),
+                    explicit_session_ids=tuple(document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=codex_home,
                 )
+                self._emit_progress(
+                    progress_callback,
+                    "inventory",
+                    "completed",
+                    operation_id=str(document.get("operation_id") or operation_id or ""),
+                    counts=self._progress_counts(context),
+                )
                 storage_blockers = self._frozen_store_blockers(document)
                 if storage_blockers:
-                    return self._result_document(
+                    return finish(self._result_document(
                         document, dict(scope or {}), goal_status="unknown",
                         blockers=storage_blockers, batches=(),
-                    )
+                    ))
                 live = _LiveOperation(
                     operation_id=str(document["operation_id"]),
                     document=document,
@@ -671,10 +870,10 @@ class OperationCoordinator:
                                  *recheck_document_targets(live.document, phase="readonly_recovery"))
                 if safety_errors:
                     inspection = self._inspect_child_states(live.document)
-                    return self._result_document(live.document, dict(scope or {}), goal_status="unknown",
+                    return finish(self._result_document(live.document, dict(scope or {}), goal_status="unknown",
                         blockers=[self._blocker(code, code, scope="target_safety") for code in safety_errors],
                         batches=inspection.batches, modified=inspection.modified,
-                        mutation_started=inspection.mutation_started)
+                        mutation_started=inspection.mutation_started))
             source = tuple(adapters) if adapters is not None else live.adapters
             if live.document["schema_version"] == PLAN_V3:
                 source = retain_guard_sources(source, validate_guard_sources(live.document))
@@ -684,48 +883,48 @@ class OperationCoordinator:
             try:
                 self._bound_codex_home(live.document, codex_home)
             except OperationCoordinatorError as exc:
-                return self._result_document(live.document, dict(scope or {}), goal_status="blocked",
-                    blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=())
+                return finish(self._result_document(live.document, dict(scope or {}), goal_status="blocked",
+                    blockers=[self._blocker("frozen_store_mismatch", str(exc))], batches=()))
             terminal, error = self._terminal_context(live, readonly_recovery=True)
         if error is not None:
             inspection = self._inspect_child_states(live.document)
-            return self._result_document(
+            return finish(self._result_document(
                 live.document, dict(scope or {}), goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", error)], batches=inspection.batches,
                 modified=inspection.modified, mutation_started=inspection.mutation_started,
-            )
+            ))
         source_errors = required_source_errors(live.document, live.adapters)
         if source_errors:
             inspection = self._inspect_child_states(live.document)
-            return self._result_document(live.document, dict(scope or {}), goal_status="unknown",
+            return finish(self._result_document(live.document, dict(scope or {}), goal_status="unknown",
                 blockers=[self._blocker("guard_source_incomplete", "; ".join(source_errors))],
-                batches=inspection.batches, modified=inspection.modified, mutation_started=inspection.mutation_started)
+                batches=inspection.batches, modified=inspection.modified, mutation_started=inspection.mutation_started))
         if not bool(getattr(getattr(terminal, "plan", None), "scan_complete", True)):
             errors = getattr(getattr(terminal, "plan", None), "errors", ())
             message = "; ".join(str(value) for value in errors)
             if not message:
                 message = "terminal verification scan is incomplete"
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", message)],
                 batches=(),
-            )
+            ))
         try:
             residuals = self._residual_action_ids(live.document, terminal)
         except Exception as exc:
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
                 blockers=[self._blocker("terminal_scan_incomplete", str(exc))],
                 batches=(),
-            )
+            ))
         try:
             self._persist_verified_child_journals(live.document, residuals)
         except Exception as exc:
-            return self._result_document(
+            return finish(self._result_document(
                 live.document,
                 live.document.get("scope", {}),
                 goal_status="unknown",
@@ -734,8 +933,8 @@ class OperationCoordinator:
                 )],
                 batches=(),
                 residuals=residuals,
-            )
-        return self._result_document(
+            ))
+        result = self._result_document(
             live.document, dict(scope or {}),
             goal_status="completed_with_residuals" if residuals else "complete",
             blockers=[self._blocker("residual_records", "approved records remain")] if residuals else [],
@@ -743,6 +942,7 @@ class OperationCoordinator:
             modified=bool(self._status_for_document(live.document).get("modified")),
             mutation_started=bool(self._status_for_document(live.document).get("mutation_started")),
         )
+        return finish(result)
 
     @staticmethod
     def _frozen_store_blockers(
@@ -992,6 +1192,17 @@ class OperationCoordinator:
                 mapped_ids=tuple(evidence["mapped_ids"]),
             ):
                 residuals.append(str(action["action_id"]))
+        from .cindy_schedule_cleanup import remaining as remaining_schedule_runs
+        schedule_groups: dict[str, list[Mapping[str, Any]]] = {}
+        schedule_actions: dict[tuple[str, str], str] = {}
+        for action in document.get("actions", ()):
+            if action.get("kind") == "delete_schedule_run":
+                evidence = action["impact"]["external_action_payload"]["schedule_run_evidence"]
+                schedule_groups.setdefault(evidence["database"], []).append(evidence)
+                schedule_actions[(evidence["database"], evidence["run_id"])] = action["action_id"]
+        for database, evidence in schedule_groups.items():
+            for run_id in remaining_schedule_runs(evidence):
+                residuals.append(schedule_actions[(database, run_id)])
         return list(dict.fromkeys(residuals))
 
     @staticmethod
@@ -1211,12 +1422,14 @@ class OperationCoordinator:
         if not require_selection and selected > 1:
             raise OperationCoordinatorError("operation scope selectors conflict")
 
+    @inventory_path_identity_scope()
     def _build_context(
         self,
         client: str,
         adapters: tuple[Any, ...] | None,
         *,
         engines: Sequence[str] = (),
+        explicit_session_ids: Sequence[str] = (),
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
@@ -1225,6 +1438,8 @@ class OperationCoordinator:
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
 
+        explicit_session_ids = tuple(dict.fromkeys((*explicit_session_ids, *explicit_frontend_ids)))
+        explicit_frontend_ids = explicit_session_ids
         candidates = (tuple(adapters) if adapters is not None else
                   () if client in {"pi", "claude"} else
                   tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)))
@@ -1235,7 +1450,7 @@ class OperationCoordinator:
                 return qualified if include_action_contexts else qualified[:5]
         result = self._build_context_sources(client, candidates, engines=engines,
             include_action_contexts=include_action_contexts, codex_home=codex_home,
-            explicit_frontend_ids=explicit_frontend_ids)
+            explicit_session_ids=explicit_session_ids)
         context = restrict_cleanup_context(result[0], guards, self.service.typed_actions)
         active = context.active_adapters
         catalog, manual_plan = result[2:4]
@@ -1293,7 +1508,7 @@ class OperationCoordinator:
         engines: Sequence[str] = (),
         include_action_contexts: bool = False,
         codex_home: Path | None = None,
-        explicit_frontend_ids: Sequence[str] = (),
+        explicit_session_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
         if client in {"pi", "claude"}:
             args = self._default_catalog_args(client, codex_home=codex_home)
@@ -1342,7 +1557,29 @@ class OperationCoordinator:
 
             catalog = build_session_catalog(selected)
             manual_plan = build_manual_delete_plan(catalog)
-            if self._native_catalog_is_healthy(catalog, manual_plan):
+            # Exact IDs can outlive both the native record and Desktop catalog
+            # as JSON-only UI references. Keep this discovery explicitly scoped;
+            # project/all-projects selection must not absorb arbitrary JSON IDs.
+            from .adapters import NativeIntegrityAdapter
+            from .codex_desktop_state import read_desktop_state
+
+            catalog_ids = {record.thread_id for record in catalog.records}
+            desktop_ids = tuple(
+                value for value in explicit_session_ids
+                if value not in catalog_ids and self._is_full_thread_id(value)
+            )
+            scoped = []
+            has_desktop_residuals = False
+            for adapter in selected:
+                if isinstance(adapter, NativeIntegrityAdapter):
+                    if adapter.desktop_thread_ids != desktop_ids:
+                        adapter = copy(adapter)
+                        adapter.desktop_thread_ids = desktop_ids
+                    if desktop_ids:
+                        desktop = read_desktop_state(adapter.codex_home, desktop_ids)
+                        has_desktop_residuals |= any(state.present for state in desktop.threads.values())
+                scoped.append(adapter)
+            if not has_desktop_residuals and self._native_catalog_is_healthy(catalog, manual_plan):
                 result = self._native_manual_context(
                     selected,
                     catalog,
@@ -1353,9 +1590,13 @@ class OperationCoordinator:
                     (canonical_path(path), "sessions") for path in catalog.scanned_session_databases)), *result[1:])
                 return (*result, {}) if include_action_contexts else result
             context = self.service.prepare(
-                selected,
+                tuple(scoped),
                 platforms=("native" if client == "codex-desktop" else client,),
             )
+            # The explicit Desktop IDs belong to this scan, not to a new
+            # protection source. Retain the original adapters and their exact
+            # capability ceilings, so later scans observe each source once.
+            context = replace(context, snapshot=replace(context.snapshot, active_adapters=selected))
             result = self._merge_native_manual_records(
                 context,
                 selected,
@@ -1393,14 +1634,11 @@ class OperationCoordinator:
             selected,
             client=client,
             engines=engines,
-            explicit_frontend_ids=explicit_frontend_ids,
+            explicit_session_ids=explicit_session_ids,
         )
-        if client == "cindy" and (not engines or "codex" in engines):
-            # Cindy's anomaly scanner only sees frontend-backed findings.
-            # Include the dedicated Codex catalog so exact record selectors
-            # also reach native records with no remaining frontend reference.
-            merged = self._merge_native_manual_records(result[0], selected)
-            result = (*merged, result[5])
+        if client == "cindy":
+            from .cindy_schedule_cleanup import merge_context
+            result = (merge_context(result[0], selected, self.service, explicit_session_ids), *result[1:])
         return result if include_action_contexts else result[:5]
 
     def _readonly_client_context(self, adapters: tuple[Any, ...], client: str, engines: Sequence[str]) -> tuple[Any, Any]:
@@ -1440,6 +1678,13 @@ class OperationCoordinator:
         if live.manual_plan is not None:
             live.manual_plan = replace(live.manual_plan, active_adapters=live.adapters)
 
+    @staticmethod
+    def _is_full_thread_id(value: str) -> bool:
+        try:
+            return str(uuid.UUID(value)) == value
+        except (ValueError, AttributeError, TypeError):
+            return False
+
     def _merge_client_engine_contexts(
         self,
         context: Any,
@@ -1447,7 +1692,7 @@ class OperationCoordinator:
         *,
         client: str,
         engines: Sequence[str],
-        explicit_frontend_ids: Sequence[str] = (),
+        explicit_session_ids: Sequence[str] = (),
     ) -> tuple[Any, tuple[Any, ...], None, None, Mapping[str, Any], Mapping[str, Any]]:
         """Add verified native child contexts to one frontend operation.
 
@@ -1477,7 +1722,7 @@ class OperationCoordinator:
             context,
             inventory,
             client=client,
-            explicit_frontend_ids=explicit_frontend_ids,
+            explicit_session_ids=explicit_session_ids,
         )
         # Successful scans remain evidence when their last actionable row is gone.
         from .planning import StorageLocation, ScanStatus, storage_id_for_path
@@ -1490,15 +1735,69 @@ class OperationCoordinator:
                 storages.append(StorageLocation(storage_id=key, label="Frontend database directory",
                     path=root, scan_status=ScanStatus.OK))
                 known.add(key)
+        for home in inventory.catalog.scanned_native_homes:
+            key = storage_id_for_path(home)
+            if key not in known:
+                storages.append(StorageLocation(storage_id=key, label="Native record store",
+                    path=home, scan_status=ScanStatus.OK))
+                known.add(key)
         context = replace(context, plan=replace(context.plan, storages=tuple(storages)),
                           frontend_scan_coverage=inventory.scanned_resources)
+        # Cindy's anomaly scan does not propose ordinary Codex conversations.
+        # Reuse the same client-qualified inventory that records exposes and
+        # retain its manual execution map through apply/recovery. Do not build
+        # another catalog or substitute the official native store.
+        manual_catalog = manual_plan = None
+        manual_actions: Mapping[str, Any] = {}
+        action_contexts: dict[str, Any] = {}
+        if client == "cindy" and (not engines or "codex" in engines):
+            # A partial server cascade can leave children whose parents are
+            # gone. Their native orphan proof must reach execution; a synthetic
+            # manual finding cannot authorize that missing-parent exception.
+            from .adapters import NativeIntegrityAdapter
+
+            record_keys = {
+                (canonical_path(record.codex_home), record.thread_id)
+                for record in inventory.records
+                if record.indexed or record.rollouts
+            }
+            orphan_homes = {
+                canonical_path(record.codex_home)
+                for record in inventory.records
+                if any(
+                    (canonical_path(record.codex_home), parent) not in record_keys
+                    for parent in getattr(record.summary, "parent_thread_ids", ())
+                )
+            }
+            native_stores = {
+                canonical_path(adapter.codex_home): adapter for adapter in adapters
+                if getattr(adapter, "codex_home", None) is not None
+                and canonical_path(adapter.codex_home) in orphan_homes
+            }
+            if native_stores:
+                native_adapters = tuple(
+                    NativeIntegrityAdapter(
+                        codex_home=Path(adapter.codex_home),
+                        codex_bin_hint=getattr(adapter, "codex_bin_hint", None),
+                    )
+                    for adapter in native_stores.values()
+                )
+                native_context = self.service.prepare(native_adapters, platforms=("native",))
+                context = self._merge_cleanup_contexts(context, (native_context,))
+                for action in native_context.plan.actions:
+                    action_contexts[str(action.action_id)] = native_context
+            context, _, manual_catalog, manual_plan, manual_actions = (
+                self._merge_native_manual_records(
+                    context, adapters, catalog=inventory.catalog
+                )
+            )
+        context = self._merge_cindy_orphan_references(context, inventory, client=client)
         engine_contexts = build_client_engine_contexts(
             adapters,
             client=client,
             engines=engines,
             inventory=inventory,
         )
-        action_contexts: dict[str, Any] = {}
         native_contexts: list[Any] = []
         for engine_context in engine_contexts:
             engine = normalize_engine(engine_context.engine)
@@ -1556,15 +1855,133 @@ class OperationCoordinator:
                 action_contexts[str(action.action_id)] = native_context
 
         if not native_contexts:
-            return context, adapters, None, None, {}, action_contexts
+            return context, adapters, manual_catalog, manual_plan, manual_actions, action_contexts
         return (
             self._merge_cleanup_contexts(context, tuple(native_contexts)),
             adapters,
-            None,
-            None,
-            {},
+            manual_catalog,
+            manual_plan,
+            manual_actions,
             action_contexts,
         )
+
+    @staticmethod
+    def _coalesce_manual_candidates(
+        candidates: Sequence[Any], manual_actions: Mapping[str, Any]
+    ) -> tuple[Any, ...]:
+        """Freeze each selected cascade once, retaining its full reference closure."""
+        from .manual_delete import build_manual_delete_closure
+
+        selected = {
+            str(action.action_id): manual_actions[str(action.action_id)]
+            for action in candidates if str(action.action_id) in manual_actions
+        }
+
+        # A selected action can only be covered by a parent in the same
+        # physical Codex store whose cascade explicitly names that child's
+        # thread.  Index that relation by the storage-qualified descendant
+        # key so a large flat selection does not compare every pair.  The
+        # path identity is deliberately scoped to this planning phase: it
+        # avoids a global security-identity cache while still reusing the
+        # proof for each action below.
+        home_keys: dict[str, str] = {}
+        storage_by_action: dict[str, str] = {}
+        affected_by_action: dict[str, set[str]] = {}
+
+        def storage_key(action_id: str, action: Any) -> str:
+            raw_home = os.fspath(action.codex_home)
+            if raw_home not in home_keys:
+                home_keys[raw_home] = canonical_path(action.codex_home)
+            storage_by_action[action_id] = home_keys[raw_home]
+            return home_keys[raw_home]
+
+        for action_id, action in selected.items():
+            storage_key(action_id, action)
+            affected_by_action[action_id] = set(action.affected_thread_ids)
+
+        parents_by_descendant: dict[tuple[str, str], list[tuple[str, set[str]]]] = {}
+        for parent_id, parent in selected.items():
+            key = storage_by_action[parent_id]
+            parent_affected = affected_by_action[parent_id]
+            for descendant_id in parent.descendants:
+                parents_by_descendant.setdefault((key, descendant_id), []).append(
+                    (parent_id, parent_affected)
+                )
+
+        covered: set[str] = set()
+        for action_id, child in selected.items():
+            key = (storage_by_action[action_id], child.thread_id)
+            child_affected = affected_by_action[action_id]
+            if any(
+                parent_id != action_id
+                and child_affected.issubset(parent_affected)
+                for parent_id, parent_affected in parents_by_descendant.get(key, ())
+            ):
+                covered.add(action_id)
+        covered_references: set[str] = set()
+        retained_references: set[str] = set()
+        for action_id, manual in selected.items():
+            destination = covered_references if action_id in covered else retained_references
+            destination.update(str(action.action_id) for action in
+                               build_manual_delete_closure(manual).frontend_actions)
+        omitted = covered | (covered_references - retained_references)
+        return tuple(action for action in candidates if str(action.action_id) not in omitted)
+
+    def _merge_cindy_orphan_references(self, context: Any, inventory: Any, *, client: str) -> Any:
+        """Plan exact references only after a complete native absence proof."""
+        if client != "cindy" or inventory.errors:
+            return context
+        from .planning import ActionImpact, ActionKind, CandidateAction, RiskLevel, TargetRef, storage_id_for_path
+
+        actions = list(context.plan.actions)
+        existing = {
+            (a.target.storage_id, a.target.thread_id, canonical_path(path))
+            for a in actions if a.kind == ActionKind.REMOVE_FRONTEND_REFERENCE
+            for path in a.impact.frontend_database_paths
+        }
+        for record in inventory.records:
+            if (record.indexed or record.legacy_indexed or record.artifact_present or record.rollouts
+                    or record.descendant_thread_ids or record.cascade_unknown):
+                continue
+            grouped: dict[str, list[Any]] = {}
+            for session in record.frontend_sessions:
+                if session.platform != "cindy" or session.database is None:
+                    continue
+                grouped.setdefault(canonical_path(session.database), []).append(session)
+            storage_id = storage_id_for_path(record.codex_home)
+            for database, sessions in grouped.items():
+                if (storage_id, record.thread_id, database) in existing:
+                    continue
+                evidence = tuple(s.details.get("frontend_reference") for s in sessions)
+                owners = {str(s.owner_process_root) for s in sessions if s.owner_process_root}
+                if (len(owners) != 1 or any(s.owner_client != "cindy" or not s.owner_process_root for s in sessions)
+                        or any(not isinstance(e, Mapping) or e.get("exact") is not True
+                               or e.get("platform") != "cindy"
+                               or canonical_path(str(e.get("database") or "")) != database
+                               or e.get("expected", {}).get("agent_kind") != "codex"
+                               or e.get("expected", {}).get("native_session_id") != record.thread_id
+                               for e in evidence)):
+                    continue
+                owner = next(iter(owners))
+                binding = {"store": canonical_path(record.codex_home), "thread": record.thread_id,
+                           "database": database, "owner": owner, "references": self._metadata(evidence)}
+                fingerprint = hashlib.sha256(json.dumps(binding, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+                impact = ActionImpact(
+                    affected_thread_ids=(record.thread_id,), frontend_reference_count=len(evidence),
+                    frontend_residual_count=len(evidence), frontend_references_preserved=False,
+                    frontend_database_paths=(database,), frontend_reference_evidence=evidence,
+                    owner_client="cindy", owner_process_root=owner, resource_path=database,
+                    external_engine="codex", external_action_payload={"cwd": record.summary.cwd},
+                )
+                actions.append(CandidateAction(
+                    action_id="orphan-reference:" + fingerprint, kind=ActionKind.REMOVE_FRONTEND_REFERENCE,
+                    target=TargetRef(storage_id, record.thread_id), risk=RiskLevel.REVIEW,
+                    available=True, unavailable_reason=None, impact=impact,
+                    snapshot_fingerprint=fingerprint, requires_explicit_selection=True,
+                    resource_kind="frontend_reference",
+                ))
+        plan = replace(context.plan, actions=tuple(actions))
+        return replace(context, plan=plan, actions=self.service.typed_actions(plan))
 
     def _merge_cindy_terminal_sessions(
         self,
@@ -1572,9 +1989,9 @@ class OperationCoordinator:
         inventory: Any,
         *,
         client: str,
-        explicit_frontend_ids: Sequence[str] = (),
+        explicit_session_ids: Sequence[str] = (),
     ) -> Any:
-        """Project exact soft-deleted Cindy rows into cleanup batches."""
+        """Project terminal or explicitly selected Cindy rows into cleanup batches."""
 
         if client != "cindy":
             return context
@@ -1599,11 +2016,8 @@ class OperationCoordinator:
                 continue
             status = str(getattr(session, "status", "") or "").casefold()
             details = getattr(session, "details", {})
-            explicit_active = (
-                status == "active" and session.thread_id is None
-                and str(session.platform_session_id) in explicit_frontend_ids
-            )
-            if (status != "deleted" and not explicit_active) or not isinstance(
+            explicitly_selected = session.platform_session_id in explicit_session_ids
+            if (status != "deleted" and not (explicitly_selected and status in {"active", "archived"})) or not isinstance(
                 details, Mapping
             ):
                 continue
@@ -1664,7 +2078,7 @@ class OperationCoordinator:
                     "database": str(database),
                     "session_id": session.platform_session_id,
                     "expected_status": session.status,
-                    "explicit_unbound_active": session.status == "active",
+                    "explicitly_selected": session.platform_session_id in explicit_session_ids,
                     "session_schema_fingerprint": reference.get(
                         "session_schema_fingerprint"
                     ),
@@ -2347,6 +2761,24 @@ class OperationCoordinator:
                 manual_candidates.append(frontend_action)
                 existing_frontend_keys.add(frontend_key)
 
+        # Paired frontend actions need the same project evidence as their
+        # native root when selection is by project rather than record ID.
+        from .planning import ConversationCatalogEntry, TargetRef
+
+        catalog_summaries = {
+            (storage_id_for_path(record.codex_home), str(record.thread_id)): record.summary
+            for record in getattr(catalog, "records", ())
+        }
+        conversations = [
+            replace(entry, summary=catalog_summaries.get(
+                (str(entry.target.storage_id), str(entry.target.thread_id)), entry.summary))
+            for entry in getattr(context.plan, "conversations", ())
+        ]
+        conversation_keys = {(str(entry.target.storage_id), str(entry.target.thread_id))
+                             for entry in conversations}
+        for key, summary in catalog_summaries.items():
+            if key not in conversation_keys:
+                conversations.append(ConversationCatalogEntry(target=TargetRef(*key), summary=summary))
         merged_actions = tuple((*existing_actions, *manual_candidates))
         # ``ManualDeletePlan.errors`` may contain failures from several
         # physical homes. A failure that names one catalog/source must not
@@ -2366,6 +2798,7 @@ class OperationCoordinator:
         merged_plan = replace(
             context.plan,
             actions=merged_actions,
+            conversations=tuple(conversations),
             storages=tuple(storage_locations),
             errors=merged_errors,
         )
@@ -2580,10 +3013,23 @@ class OperationCoordinator:
         if scope.get("record_ids"):
             wanted = set(scope["record_ids"])
 
-            def matches_record(action: Any, selector: str) -> bool:
-                identifiers = {str(action.target.thread_id)}
-                if kind_value(action) == "delete_native_project":
-                    return selector in identifiers  # No partial project IDs.
+            # Build the storage-local selector index once.  Record selection
+            # is a read-only operation, so retaining action positions here is
+            # enough to preserve the original action order (and also keeps
+            # duplicate action objects behaving as before).  Native project
+            # IDs deliberately use their exact-only index; every other
+            # action participates in the same prefix namespace as its native
+            # thread ID and optional frontend aliases.
+            from bisect import bisect_left
+
+            project_ids: dict[str, list[int]] = {}
+            identifier_actions: dict[str, list[int]] = {}
+            for index, action in enumerate(actions):
+                thread_id = str(action.target.thread_id)
+                if kind_value(action) in {"delete_native_project", "delete_schedule_run"}:
+                    project_ids.setdefault(thread_id, []).append(index)
+                    continue
+                identifiers = {thread_id}
                 payload = getattr(
                     getattr(action, "impact", None),
                     "external_action_payload",
@@ -2594,18 +3040,47 @@ class OperationCoordinator:
                     if isinstance(frontend_id, str) and frontend_id:
                         identifiers.add(frontend_id)
                         identifiers.add(f"{scope['client']}:{frontend_id}")
-                return selector in identifiers or any(
-                    value.startswith(selector) for value in identifiers
-                )
+                for identifier in identifiers:
+                    identifier_actions.setdefault(identifier, []).append(index)
 
-            found = {
-                selector
-                for selector in wanted
-                if any(matches_record(action, selector) for action in actions)
-            }
+            sorted_identifiers = sorted(identifier_actions)
+
+            def prefix_end(prefix: str) -> str | None:
+                """Return the exclusive lexicographic bound for one prefix."""
+
+                for index in range(len(prefix) - 1, -1, -1):
+                    codepoint = ord(prefix[index])
+                    if codepoint < 0x10FFFF:
+                        return prefix[:index] + chr(codepoint + 1)
+                return None
+
+            selected_indexes: set[int] = set()
+            found: set[str] = set()
+            for selector in wanted:
+                exact_project = project_ids.get(selector)
+                if exact_project:
+                    found.add(selector)
+                    selected_indexes.update(exact_project)
+
+                start = bisect_left(sorted_identifiers, selector)
+                upper = prefix_end(selector)
+                end = (
+                    len(sorted_identifiers)
+                    if upper is None
+                    else bisect_left(sorted_identifiers, upper)
+                )
+                for identifier in sorted_identifiers[start:end]:
+                    # The bounds above are exact for Unicode strings; retain
+                    # this check as a cheap guard if the identifier format is
+                    # extended by a future action family.
+                    if not identifier.startswith(selector):
+                        continue
+                    found.add(selector)
+                    selected_indexes.update(identifier_actions[identifier])
+
             actions = tuple(
-                action for action in actions
-                if any(matches_record(action, selector) for selector in wanted)
+                action for index, action in enumerate(actions)
+                if index in selected_indexes
             )
             for missing in sorted(wanted - found):
                 blockers.append(self._blocker(
@@ -2781,6 +3256,8 @@ class OperationCoordinator:
             target = getattr(entry, "target", None)
             if (
                 target is None
+                or str(getattr(target, "storage_id", ""))
+                != str(action.target.storage_id)
                 or str(getattr(target, "thread_id", ""))
                 != str(action.target.thread_id)
             ):
@@ -2810,7 +3287,7 @@ class OperationCoordinator:
         if str(getattr(action.kind, "value", action.kind)) == "delete_native_project":
             return values
         path_values = tuple(
-            value for value in values if _looks_like_project_path(value)
+            value for value in values if _looks_like_project_path(value) and "://" not in value
         )
         # A display label is useful for selection, but once a path is present
         # it must not become a second project identity for the same action.
@@ -2818,21 +3295,7 @@ class OperationCoordinator:
 
     @staticmethod
     def _selector_matches(selector: str, value: str) -> bool:
-        raw, candidate = str(selector).strip(), str(value).strip()
-        if not raw or not candidate:
-            return False
-        if raw.casefold() == candidate.casefold():
-            return True
-        if (
-            candidate.casefold().startswith(raw.casefold())
-            and "/" not in raw
-            and "\\" not in raw
-        ):
-            return True
-        try:
-            return Path(candidate).name.casefold() == raw.casefold()
-        except (OSError, ValueError):
-            return False
+        return project_selector_matches(selector, value)
 
     @staticmethod
     def _project_identity(value: str) -> str:
@@ -3102,6 +3565,8 @@ class OperationCoordinator:
     def _classification(context: Any, action: Any, manual_record: Any = None, client: str | None = None) -> str:
         from .inventory import ManagedConversation, classify_managed_conversation
 
+        if str(getattr(action.kind, "value", action.kind)) == "delete_schedule_run":
+            return "healthy"
         if str(
             getattr(
                 getattr(action, "kind", None),
@@ -3529,10 +3994,25 @@ class OperationCoordinator:
         observed_sdk = observed.pop("expected_sdk_session_id", None)
         approved_row = approved.pop("session_row_fingerprint", None)
         observed_row = observed.pop("session_row_fingerprint", None)
+        # These optional flags were introduced independently on both branches.
+        # Compare their authorization meaning without rewriting frozen evidence.
+        for evidence, sdk in ((approved, approved_sdk), (observed, observed_sdk)):
+            selected = evidence.pop("explicitly_selected", False)
+            legacy = evidence.pop("explicit_unbound_active", False)
+            if type(selected) is not bool or type(legacy) is not bool:
+                return False
+            status = evidence.get("expected_status")
+            if legacy and (status != "active" or sdk not in (None, sentinel)):
+                return False
+            if status != "deleted":
+                evidence["explicitly_selected"] = selected or legacy
         if cls._metadata(approved) != cls._metadata(observed):
             return False
         if approved_sdk is sentinel:
-            return False
+            # Serialized metadata omits NULL. Absence permits no SDK transition.
+            if observed_sdk is not None or approved_row != observed_row:
+                return False
+            approved_sdk = None
         allowed_sdk = {None} if approved_sdk is None else {approved_sdk, None}
         if observed_sdk not in allowed_sdk:
             return False
@@ -3869,6 +4349,7 @@ class OperationCoordinator:
         timeout: float,
         app_server_factory: Any,
         binary_resolver: Any,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         entered = False
         try:
@@ -3880,9 +4361,9 @@ class OperationCoordinator:
                     from .orca_authorization import execution_scope
                     with execution_scope(live.document, live.candidates, clients_closed=live.clients_closed_ack):
                         return self._execute_live_locked(live, timeout=timeout,
-                            app_server_factory=None, binary_resolver=None)
+                            app_server_factory=None, binary_resolver=None, progress_callback=progress_callback)
                 return self._execute_live_locked(live, timeout=timeout,
-                    app_server_factory=app_server_factory, binary_resolver=binary_resolver)
+                    app_server_factory=app_server_factory, binary_resolver=binary_resolver, progress_callback=progress_callback)
         except Exception as exc:
             inspection = self._inspect_child_states(live.document)
             prior = live.result or {}
@@ -3908,11 +4389,19 @@ class OperationCoordinator:
         timeout: float,
         app_server_factory: Any,
         binary_resolver: Any,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         from .cleanup_service import partition_actions
         from .codex_app_server import CodexAppServer
         from .discovery import choose_codex_binary
 
+        self._emit_progress(
+            progress_callback,
+            "apply",
+            "started",
+            operation_id=live.operation_id,
+            counts={"action_count": len(live.candidates)},
+        )
         child_inspection = self._inspect_child_states(live.document)
         if child_inspection.blockers:
             result = self._result_document(
@@ -3925,6 +4414,13 @@ class OperationCoordinator:
                 mutation_started=child_inspection.mutation_started,
             )
             live.result = result
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "completed",
+                operation_id=live.operation_id,
+                counts={"batch_count": len(child_inspection.batches)},
+            )
             return result
 
         current = self._with_current_guard_sources(live.adapters, live.client,
@@ -3945,14 +4441,17 @@ class OperationCoordinator:
             | set(getattr(live, "completed_child_ids", ()))
         )
         batches = partition_actions(live.candidates)
+        total_action_count = sum(len(batch.actions) for batch in batches)
+        completed_action_count = 0
+        completed_action_ids: set[str] = set()
         from .manual_delete import (
             build_manual_delete_closure,
             frontend_actions_after_native_success,
         )
 
         manual_ids = {
-            str(action_id)
-            for action_id in getattr(live, "manual_actions", {})
+            str(action.action_id) for action in live.candidates
+            if str(action.action_id) in getattr(live, "manual_actions", {})
         }
         closures_by_native: dict[str, Any] = {}
         frontend_dependencies: dict[str, str] = {}
@@ -3993,6 +4492,20 @@ class OperationCoordinator:
             if isinstance(raw, Mapping)
             and str(raw.get("child_operation_id") or "")
         }
+        # ``frozen_child_ids`` is built after partitioning so its immutable
+        # batch keys can be used to seed progress for already completed
+        # recovery children.
+        completed_action_count = sum(
+            len(batch.actions)
+            for batch in batches
+            if frozen_child_ids.get(batch_key(batch)) in completed_child_ids
+        )
+        completed_action_ids.update(
+            str(action.action_id)
+            for batch in batches
+            if frozen_child_ids.get(batch_key(batch)) in completed_child_ids
+            for action in batch.actions
+        )
         if frozen_child_ids:
             unresolved = [
                 self._blocker(
@@ -4014,6 +4527,13 @@ class OperationCoordinator:
                     mutation_started=child_inspection.mutation_started,
                 )
                 live.result = result
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "completed",
+                    operation_id=live.operation_id,
+                    counts={"batch_count": len(child_inspection.batches)},
+                )
                 return result
         for index, batch in enumerate(batches):
             key = batch_key(batch)
@@ -4036,7 +4556,39 @@ class OperationCoordinator:
                     self._batch_scope_metadata(live.context, batch)
                 )
                 batch_results.append(skipped_batch)
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_skipped",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                        "completed_action_count": completed_action_count,
+                        "total_action_count": total_action_count,
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                )
                 continue
+            self._emit_progress(
+                progress_callback,
+                "apply",
+                "batch_started",
+                operation_id=live.operation_id,
+                counts={
+                    "batch_index": index + 1,
+                    "batch_count": len(batches),
+                    "action_count": len(batch.actions),
+                    "completed_action_count": completed_action_count,
+                    "total_action_count": total_action_count,
+                },
+                child_operation_id=child_id,
+                mutation_family=str(batch.mutation_family),
+                storage_id=str(batch.storage_id),
+            )
             batch_mutation_started = False
             store: OperationStore | None = None
             try:
@@ -4056,10 +4608,14 @@ class OperationCoordinator:
                         result: Any | None,
                     ) -> None:
                         nonlocal batch_mutation_started, mutation_started
-                        status = (
-                            str(getattr(result, "status", ""))
+                        nonlocal completed_action_count
+                        raw_status = (
+                            getattr(result, "status", "")
                             if result is not None else ""
                         )
+                        status = str(
+                            getattr(raw_status, "value", raw_status)
+                        ).casefold()
                         batch_mutation_started = (
                             batch_mutation_started
                             or phase == "mutation_started"
@@ -4093,6 +4649,41 @@ class OperationCoordinator:
                         if status:
                             event["result_status"] = status
                         store.append_event(event, state_updates=current)
+                        action_id = str(action.action_id)
+                        if phase == "verified" and action_id not in completed_action_ids:
+                            counts = {
+                                "completed_action_count": completed_action_count,
+                                "total_action_count": total_action_count,
+                                "batch_index": index + 1,
+                                "batch_count": len(batches),
+                            }
+                            if status in {"deleted", "cleaned", "repaired"}:
+                                completed_action_ids.add(action_id)
+                                completed_action_count += 1
+                                counts["completed_action_count"] = completed_action_count
+                                self._emit_progress(
+                                    progress_callback,
+                                    "apply",
+                                    "action_completed",
+                                    operation_id=live.operation_id,
+                                    counts=counts,
+                                    child_operation_id=child_id,
+                                    action_id=action_id,
+                                    action_state=phase,
+                                    result_status=status,
+                                )
+                            elif status:
+                                self._emit_progress(
+                                    progress_callback,
+                                    "apply",
+                                    "action_checked",
+                                    operation_id=live.operation_id,
+                                    counts=counts,
+                                    child_operation_id=child_id,
+                                    action_id=action_id,
+                                    action_state=phase,
+                                    result_status=status,
+                                )
 
                     def startup_checkpoint(job_name):
                         nonlocal batch_mutation_started, mutation_started
@@ -4182,6 +4773,28 @@ class OperationCoordinator:
                     statuses.intersection({"deleted", "cleaned", "repaired", "partial"})
                     or getattr(outcome, "modified", False)
                 )
+                if batch_status == "complete":
+                    for action in batch.actions:
+                        action_id = str(action.action_id)
+                        if action_id in completed_action_ids:
+                            continue
+                        completed_action_ids.add(action_id)
+                        completed_action_count += 1
+                        self._emit_progress(
+                            progress_callback,
+                            "apply",
+                            "action_completed",
+                            operation_id=live.operation_id,
+                            counts={
+                                "completed_action_count": completed_action_count,
+                                "total_action_count": total_action_count,
+                                "batch_index": index + 1,
+                                "batch_count": len(batches),
+                            },
+                            child_operation_id=child_id,
+                            action_id=action_id,
+                            action_state="verified",
+                        )
                 any_modified = any_modified or batch_modified
                 stopped_unknown = stopped_unknown or batch_unknown
                 if (
@@ -4216,6 +4829,12 @@ class OperationCoordinator:
                     "action_ids": [str(action.action_id) for action in batch.actions],
                     "result": outcome_doc,
                 }
+                outcome_errors = self._outcome_errors(outcome)
+                if outcome_errors:
+                    batch_result["blockers"] = [self._blocker(
+                        "mutation_outcome_unknown" if batch_unknown else "batch_execution_blocked",
+                        message, scope=f"child:{child_id}",
+                    ) for message in outcome_errors]
                 batch_result.update(self._batch_scope_metadata(live.context, batch))
                 batch_results.append(batch_result)
                 store.append_event(
@@ -4232,7 +4851,25 @@ class OperationCoordinator:
                         # marker. The operation-level flag may already be
                         # true because an earlier child completed.
                         "mutation_started": batch_mutation_started,
+                        "blockers": batch_result.get("blockers", []),
                     },
+                )
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_completed",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                        "completed_action_count": completed_action_count,
+                        "total_action_count": total_action_count,
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                    batch_status=batch_status,
                 )
                 if batch_unknown:
                     break
@@ -4350,6 +4987,21 @@ class OperationCoordinator:
                             "persistence_error": str(journal_error) or repr(journal_error),
                         }
                 batch_results.append(failed_batch)
+                self._emit_progress(
+                    progress_callback,
+                    "apply",
+                    "batch_completed",
+                    operation_id=live.operation_id,
+                    counts={
+                        "batch_index": index + 1,
+                        "batch_count": len(batches),
+                        "action_count": len(batch.actions),
+                    },
+                    child_operation_id=child_id,
+                    mutation_family=str(batch.mutation_family),
+                    storage_id=str(batch.storage_id),
+                    batch_status="unknown" if batch_unknown else "blocked",
+                )
                 if batch_unknown:
                     break
                 blocked_batches.append(child_id)
@@ -4361,8 +5013,34 @@ class OperationCoordinator:
         # being mistaken for progress on a stopped operation.
         if stopped_unknown:
             terminal, terminal_error = None, None
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "skipped",
+                operation_id=live.operation_id,
+                reason="recovery_required",
+            )
         else:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "started",
+                operation_id=live.operation_id,
+            )
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "started",
+                operation_id=live.operation_id,
+            )
             terminal, terminal_error = self._terminal_context(live)
+            self._emit_progress(
+                progress_callback,
+                "inventory",
+                "completed",
+                operation_id=live.operation_id,
+                counts=self._progress_counts(terminal) if terminal is not None else {},
+            )
         live.terminal_context = terminal if terminal_error is None else None
         residuals: list[str] = []
         if terminal_error is None and terminal is not None:
@@ -4449,6 +5127,51 @@ class OperationCoordinator:
             mutation_started=mutation_started,
         )
         live.result = result
+        if stopped_unknown:
+            # The operation is waiting for explicit recovery verification;
+            # no terminal scan ran in this path.
+            pass
+        elif terminal_error is not None:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "failed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+            )
+        elif terminal is not None:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "completed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+            )
+        else:
+            self._emit_progress(
+                progress_callback,
+                "verify",
+                "failed",
+                operation_id=live.operation_id,
+                counts={"residual_count": len(residuals)},
+                reason="terminal_context_unavailable",
+            )
+        self._emit_progress(
+            progress_callback,
+            "apply",
+            "completed",
+            operation_id=live.operation_id,
+            counts={
+                "batch_count": len(batch_results),
+                "action_count": sum(
+                    len(item.get("action_ids", ())) for item in batch_results
+                ),
+                "completed_action_count": completed_action_count,
+                "total_action_count": total_action_count,
+                "residual_count": len(residuals),
+            },
+            goal_status=goal,
+        )
         return result
 
     @staticmethod
@@ -4533,13 +5256,21 @@ class OperationCoordinator:
                         "paired frontend reference has no physical database"
                     )
                 by_native = evidence_by_database.setdefault(databases[0], {})
-                by_native.setdefault(str(manual.thread_id), []).extend(
-                    getattr(
-                        getattr(frontend_action, "impact", None),
-                        "frontend_reference_evidence",
-                        (),
+                for evidence in getattr(
+                    getattr(frontend_action, "impact", None),
+                    "frontend_reference_evidence", (),
+                ):
+                    expected = evidence.get("expected", {})
+                    identity_key = (
+                        "session_id" if evidence.get("platform") == "aionui"
+                        else "native_session_id"
                     )
-                )
+                    native_id = expected.get(identity_key)
+                    if native_id not in manual.affected_thread_ids:
+                        raise OperationCoordinatorError(
+                            "frontend reference is outside the frozen native cascade"
+                        )
+                    by_native.setdefault(str(native_id), []).append(evidence)
         # Guard all frozen frontend rows for each physical database as one
         # collection before execute_manual_delete can emit mutation_started.
         for by_native in evidence_by_database.values():
@@ -4721,6 +5452,7 @@ class OperationCoordinator:
                     engines=tuple(
                         live.document.get("scope", {}).get("engines", ())
                     ),
+                    explicit_session_ids=tuple(live.document.get("scope", {}).get("record_ids", ())),
                     include_action_contexts=True,
                     codex_home=self._bound_codex_home(live.document, None),
                 )
@@ -4825,6 +5557,19 @@ class OperationCoordinator:
         return ()
 
     @staticmethod
+    def _outcome_errors(outcome: Any) -> tuple[str, ...]:
+        containers = (
+            getattr(outcome, "results", ()),
+            getattr(getattr(outcome, "cleanup_report", None), "results", ()),
+            getattr(getattr(outcome, "session_cleanup", None), "results", ()),
+        )
+        return tuple(dict.fromkeys(
+            str(error) for results in containers for result in results or ()
+            for error in (getattr(result, "error", None), getattr(result, "request_error", None))
+            if error
+        ))
+
+    @staticmethod
     def _outcome_statuses(outcome: Any) -> set[str]:
         statuses: set[str] = set()
         containers = [
@@ -4835,7 +5580,8 @@ class OperationCoordinator:
             containers.append(getattr(outcome, "results", ()))
         for container in containers:
             for result in container or ():
-                raw_status = getattr(result, "status", "")
+                raw_status = ("blocked" if getattr(result, "preflight_blocked", False) is True
+                              else getattr(result, "status", ""))
                 status = str(getattr(raw_status, "value", raw_status))
                 if status:
                     statuses.add(status)
@@ -4865,6 +5611,7 @@ class OperationCoordinator:
 
         target_id = str(getattr(getattr(action, "target", None), "thread_id", ""))
         containers = (
+            getattr(outcome, "results", ()),
             getattr(getattr(outcome, "cleanup_report", None), "results", ()),
             getattr(getattr(outcome, "session_cleanup", None), "results", ()),
         )
@@ -4873,7 +5620,8 @@ class OperationCoordinator:
                 finding = getattr(result, "finding", None)
                 if str(getattr(finding, "thread_id", "")) != target_id:
                     continue
-                raw_status = getattr(result, "status", "")
+                raw_status = ("blocked" if getattr(result, "preflight_blocked", False) is True
+                              else getattr(result, "status", ""))
                 return str(getattr(raw_status, "value", raw_status))
         statuses = OperationCoordinator._outcome_statuses(outcome)
         if statuses == {"deleted"}:
