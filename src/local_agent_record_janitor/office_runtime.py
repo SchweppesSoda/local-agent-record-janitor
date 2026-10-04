@@ -117,11 +117,18 @@ def related(rows, roots):
             _fail()
         exe = str(executable or "").replace("\\", "/").casefold()
         cmd = str(command or "").replace("\\", "/").casefold()
+        # Linux /proc/stat is a mutable, truncated thread name. Node 24 may
+        # report MainThread while /proc/exe still proves the Node executable.
+        executable_name = exe.rsplit("/", 1)[-1]
+        runtime = name in _RUNTIMES | _CLI or executable_name in _RUNTIMES | _CLI
+        cli = name in _CLI or executable_name in _CLI
+        if runtime and (not isinstance(executable, str) or not isinstance(command, str)):
+            _fail()
         parts = [re.sub(r"[ _-]", "", p) for p in exe.split("/")]
         owned = bool(_PRODUCT.fullmatch(re.sub(r"[ _-]", "", name)))
         owned |= name not in _SHELLS and any(_PRODUCT.fullmatch(p) for p in parts)
-        owned |= name in _RUNTIMES | _CLI and (bool(_WORKER.search(cmd)) or "/@qoder-ai/qoder-agent-sdk/" in cmd
-            or name in _CLI and bool(re.search(r"(?:^|\s)--sdk(?:\s|$)", cmd))
+        owned |= runtime and (bool(_WORKER.search(cmd)) or "/@qoder-ai/qoder-agent-sdk/" in cmd
+            or cli and bool(re.search(r"(?:^|\s)--sdk(?:\s|$)", cmd))
             or any(root in cmd for root in root_names) and any(flag in cmd for flag in (
                 "qoder_config_dir=", "qodercn_config_dir=", "--config-dir ", "--user-data-dir=")))
         if owned:

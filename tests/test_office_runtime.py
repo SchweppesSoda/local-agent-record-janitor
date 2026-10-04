@@ -44,6 +44,13 @@ class OfficeRuntimeTests(unittest.TestCase):
                 worker.wait(timeout=10)
                 worker.stdout.close(); worker.stderr.close()
 
+    def test_linux_thread_name_does_not_hide_executable_identity(self):
+        row = {"pid": 100007, "parent": 1, "name": "MainThread",
+               "executable": "/opt/node/bin/node", "command": "node /tmp/qoder-worker-runtime.mjs"}
+        self.assertEqual(runtime.related([row], [Path("/tmp")]), [100007])
+        with self.assertRaisesRegex(runtime.OfficeDatabaseError, "coverage_unknown"):
+            runtime.related([{**row, "command": None}], [Path("/tmp")])
+
 
 if __name__ == "__main__":
     unittest.main()
