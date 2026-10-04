@@ -45,6 +45,9 @@ surface its stderr phase/count events while keeping stdout as the JSON result.
    then `operation verify` (legacy integrations use `agent status/verify`).
    Preserve the exact plan/state location. Never edit a frozen plan or journal,
    delete/bypass `apply.lock`, or discard unresolved recovery evidence.
+   When a parent plan is missing, the supported native v1 child-only
+   `operation status/verify` route can use the original child journal; see
+   [the operation CLI recovery boundary](operation-cli.md#commands).
 7. Further work after verification needs a fresh plan and must remain within
    the user's authorized scope. Newly discovered actions are not authorized by
    an old plan. Report residuals only from authoritative discovery evidence;

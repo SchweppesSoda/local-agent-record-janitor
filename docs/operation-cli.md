@@ -127,6 +127,20 @@ adapter's `verify=false` does not revoke that legacy read-only diagnosis.
 Existing v2 plans likewise receive no v3 evidence. An affected unstarted mutation
 must be replanned; an unknown operation must be recovered before any new mutation.
 
+If an older top-level plan is missing, `operation status/verify` also accepts
+the exact existing child operation ID and its native `--codex-home` (or the
+original journal `plan.json` via `--plan`). Standalone recovery is limited to
+self-contained `larj.child-operation-plan.v1` / `delete_conversation` journals.
+It validates the original child hash, store binding, checkpoint and event
+sequence, holds the store and operation locks, and reads the complete native
+catalog plus frozen artifacts and Desktop references. Surviving records produce
+`completed_with_residuals`; incomplete evidence stays `unknown`. Recovery never
+starts an app-server, repeats deletion, reconstructs a parent plan, or expands
+authorization. The original child plan and journal are retained. A fresh plan
+within the user's existing scope is required for remaining records. Other
+families, mixed frontend evidence and Orca startup boundaries still require
+their original top-level plan.
+
 Herdr is inventory-only. By default, `records --client herdr
 [--herdr-root PATH ...]` reads snapshot schema3 current and recognized recovery
 files across default/named sessions. Explicit roots replace default candidate
@@ -341,6 +355,12 @@ do not identify which store is open. On Windows, the read-only CIM process
 probe is bounded and uses a hidden PowerShell window; a timeout or launch error
 is reported as an inability to prove that clients are closed. Apply and verify restore the frozen native
 store when a plan is supplied and reject a conflicting explicit home.
+
+Cindy process attribution supports both per-user `Programs\Cindy` and machine
+`Program Files\Cindy` / `Program Files (x86)\Cindy` installations. Excluding a
+separate Cindy family still requires existing matching executable identities,
+its process ancestry and consistent absolute `--user-data-dir` evidence.
+Missing or conflicting evidence remains blocking.
 
 Record output contains the Desktop catalog's UI display title when available,
 its source, the full stable record ID, parent/descendant IDs and a snapshot ID.

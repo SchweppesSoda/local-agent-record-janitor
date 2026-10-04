@@ -660,6 +660,13 @@ class OperationCoordinator:
             )
             return result
         try:
+            from .child_recovery import query_child_operation
+            child_result = query_child_operation(self, plan_path or _find_operation_plan(
+                operation_id, operation_home=operation_home, codex_home=codex_home),
+                operation_id=operation_id, codex_home=codex_home, verify=False,
+                progress_callback=progress_callback)
+            if child_result is not None:
+                return child_result
             result = self._status_for_document(
                 self._load_plan(
                     operation_id,
@@ -707,6 +714,13 @@ class OperationCoordinator:
         document: Mapping[str, Any] | None = None
         computed: Mapping[str, Any] | None = None
         try:
+            from .child_recovery import query_child_operation
+            child_result = query_child_operation(self, plan_path or _find_operation_plan(
+                operation_id, operation_home=operation_home, codex_home=codex_home),
+                operation_id=operation_id, codex_home=codex_home, verify=True,
+                progress_callback=progress_callback)
+            if child_result is not None:
+                return child_result
             live = self._live.get(str(operation_id or ""))
             document = live.document if live is not None else self._load_plan(
                 operation_id, plan_path, None,

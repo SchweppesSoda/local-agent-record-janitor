@@ -260,8 +260,9 @@ class CodexDesktopStateTests(unittest.TestCase):
     def _cindy_process_records(
         self,
         root: Path,
+        installation: str = "Programs",
     ) -> tuple[dict[str, object], ...]:
-        executable = root / "Programs" / "Cindy" / "Cindy.exe"
+        executable = root / installation / "Cindy" / "Cindy.exe"
         executable.parent.mkdir(parents=True, exist_ok=True)
         executable.write_bytes(b"cindy")
         user_data = root / "CindyGlobal"
@@ -425,6 +426,32 @@ class CodexDesktopStateTests(unittest.TestCase):
             _relevant_client_names(native_home, records),
             ("ChatGPT.exe",),
         )
+
+    @unittest.skipUnless(os.name == "nt", "Windows Cindy installations")
+    def test_machine_installations_keep_profile_and_identity_guards(self) -> None:
+        for installation in ("Program Files", "Program Files (x86)"):
+            with self.subTest(installation=installation):
+                root = Path(self.temporary_directory.name) / installation
+                records = self._cindy_process_records(root, installation)
+                native = root / ".codex"
+                native.mkdir()
+                self.assertEqual(_relevant_client_names(native, records), ())
+                self.assertEqual(
+                    _relevant_client_names(root / "CindyGlobal", records),
+                    ("Cindy.exe", "codex.exe"),
+                )
+                missing = [dict(row) for row in records]
+                missing[1]["command_line"] = "--type=renderer"
+                self.assertEqual(_relevant_client_names(native, missing),
+                                 ("Cindy.exe", "codex.exe"))
+                conflicting = [dict(row) for row in records]
+                conflicting[0]["command_line"] = f'--user-data-dir="{native}"'
+                self.assertEqual(_relevant_client_names(native, conflicting),
+                                 ("Cindy.exe", "codex.exe"))
+                mismatched = [dict(row) for row in records]
+                mismatched[1]["executable_path"] = records[2]["executable_path"]
+                self.assertEqual(_relevant_client_names(native, mismatched),
+                                 ("Cindy.exe", "codex.exe"))
 
     def test_cindy_store_blocks_cindy_and_bundled_codex(self) -> None:
         root = Path(self.temporary_directory.name) / "processes"
