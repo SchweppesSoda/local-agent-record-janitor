@@ -121,7 +121,7 @@ def runtime_fingerprint():
     node = node.resolve(strict=True)
     executable, _ = frozen_files.read_file(node.parent, node.name)
     helpers = [frozen_files.read_file(helper.parent, name)[0]
-               for name in ("office_drafts.cjs", "office_ui.cjs", "physical.cjs")]
+               for name in ("office_drafts.cjs", "office_ui.cjs", "paseo_ui.cjs", "physical.cjs")]
     return {"root": str(root), "node": str(node), "executable": executable,
             "code_sha256": hashlib.sha256(_json(manifest)).hexdigest(), "helpers": helpers}
 

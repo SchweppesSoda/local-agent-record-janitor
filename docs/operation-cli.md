@@ -299,9 +299,49 @@ snapshots and unreadable sources report incomplete inventory rather than an empt
 `inventory_scope=persisted_agent_registry` does not cover provider transcripts,
 schedules, workspaces, client caches or all writers. Saved status is not a live
 probe: `--inspect-clients` keeps `clients_closed=null`. No daemon is started or
-contacted. All mutation and verification capabilities are disabled; plan/run/apply
+contacted. Without an explicit binding, mutation and verification capabilities are disabled; plan/run/apply
 and cold status/verify remain blocked without dispatching a native writer. See
 [Paseo boundaries](adapters.md#paseoagent-注册记录只读盘点).
+
+### Paseo 完整本地操作
+
+Windows 上显式绑定后，可沿用标准 `delete plan/apply` 与 `operation status/verify`。
+绑定必须来自实际启动配置，不能由项目 cwd 推断。示例：
+
+```json
+{
+  "schema_version": "larj.paseo-bindings.v1",
+  "profile_root": "D:/PaseoHome",
+  "server_id": "srv_example",
+  "runtime_binaries": ["D:/Apps/Paseo/paseo.exe"],
+  "native_stores": [
+    {"agent_id": "11111111-1111-4111-8111-111111111111", "engine": "codex", "root": "D:/CodexHome", "codex_binary": "D:/Apps/Codex/codex.exe"}
+  ],
+  "desktop_profiles": [
+    {"root": "D:/PaseoDesktop", "electron_runtime": "D:/Dependencies/electron-44.2.0", "runtime_binaries": ["D:/Apps/PaseoDesktop/Paseo.exe"]}
+  ]
+}
+```
+
+`native_stores` 包含 profile 中每个观察到的 agent。Pi 另需 `agent_dir`，其 `root` 是
+session 根；Claude `root` 是 config 根。一个计划只支持一个 Codex 根，可包含多个
+已绑定 Pi/Claude 根。`server_id` 必须与 `server-id` 文件和环境一致。
+`desktop_profiles: []` 明确限定为 headless 服务端；有本机桌面缓存时须列全。
+
+```powershell
+local-agent-record-janitor delete plan --client paseo --paseo-bindings bindings.json --record-id '<Paseo agent ID>' --out plan.json
+```
+
+检查计划中展开的后代、原生批次及前端批次，再按通用协议用 operation ID、plan SHA 和
+`--clients-closed` 执行。冷恢复从计划读取冻结绑定，不重新加载 bindings.json。
+
+存在桌面缓存时，先按办公版说明准备固定 ClassicLevel 依赖，并提供完整官方
+[Electron 44.2.0 Windows x64 分发包](https://github.com/electron/electron/releases/tag/v44.2.0)
+的解压目录；计划会逐文件验证内置 manifest，不能用正在运行的产品目录替代。
+源码 checkout 可用 `python -m tests.install_paseo_electron D:/Dependencies/electron-44.2.0`
+下载并核对固定 SHA 的测试依赖；该命令不安装或启动 Paseo。
+完整范围、中断恢复和明确阻挡条件见
+[Windows 清理边界](adapters.md#paseowindows-显式绑定的完整清理)。
 
 ## WorkBuddy local sessions
 

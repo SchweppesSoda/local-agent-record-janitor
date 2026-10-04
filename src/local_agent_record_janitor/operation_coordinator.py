@@ -301,6 +301,8 @@ class OperationCoordinator:
             adapters = office_bound_adapters(document, adapters)
             from .herdr_cleanup import bound_adapters as herdr_bound_adapters
             adapters = herdr_bound_adapters(document, adapters)
+            from .paseo_cleanup import bound_adapters as paseo_bound_adapters
+            adapters = paseo_bound_adapters(document, adapters)
             child_inspection = self._inspect_child_states(document)
             if child_inspection.blockers:
                 self._emit_progress(
@@ -833,6 +835,8 @@ class OperationCoordinator:
                 adapters = office_bound_adapters(document, adapters)
                 from .herdr_cleanup import bound_adapters as herdr_bound_adapters
                 adapters = herdr_bound_adapters(document, adapters)
+                from .paseo_cleanup import bound_adapters as paseo_bound_adapters
+                adapters = paseo_bound_adapters(document, adapters)
                 codex_home = self._bound_codex_home(document, codex_home)
                 has_orca_frontend = any(action.get("kind") == "delete_orca_frontend" for action in document.get("actions", ()))
                 discovery_roots = ((*validate_guard_sources(document), *orca_roots)
@@ -1173,6 +1177,10 @@ class OperationCoordinator:
             return list(dict.fromkeys((*cls._orca_native_residual_action_ids(document), *cls._orca_frontend_residual_action_ids(document))))
         if any(a.get("kind") == "delete_orca_frontend" for a in document.get("actions", ())):
             return cls._orca_frontend_residual_action_ids(document)
+        if any(a.get("kind") == "delete_paseo_frontend" for a in document.get("actions", ())):
+            from .paseo_cleanup import residuals
+            return residuals(document)
+
         if any(a.get("kind") == "delete_herdr_frontend" for a in document.get("actions", ())):
             from .herdr_cleanup import residuals
             return residuals(document)
@@ -1462,7 +1470,7 @@ class OperationCoordinator:
                 # even when an interruption prevented an execution result.
                 verified_modified = bool(state.get("modified")) or bool(
                     raw_batch.get("mutation_family") in {
-                        "delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend", "delete_herdr_frontend"
+                        "delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend", "delete_herdr_frontend", "delete_paseo_frontend"
                     }
                     and state.get("mutation_started")
                     and action_ids and not child_residuals
@@ -1606,6 +1614,11 @@ class OperationCoordinator:
         # provide protection evidence without becoming new inventory targets.
         candidates = source if inventory_adapters is None else inventory_adapters
         guards = self._with_current_guard_sources(source, client, codex_home=codex_home, orca_roots=orca_roots)
+        if client == "paseo" and explicit_frontend_ids:
+            from .paseo_cleanup import build_context as build_paseo_context
+            qualified = build_paseo_context(self, candidates, guards, explicit_frontend_ids, engines, document=approved_document)
+            if qualified is not None:
+                return qualified if include_action_contexts else qualified[:5]
         if client == "herdr" and explicit_frontend_ids:
             from .herdr_cleanup import build_context as build_herdr_context
             qualified = build_herdr_context(self, candidates, guards, explicit_frontend_ids, engines, document=approved_document)
@@ -1842,7 +1855,7 @@ class OperationCoordinator:
         from .client_capability_guards import restrict_cleanup_context
         from .client_contracts import describe_adapter
 
-        if adapters == live.adapters and not any(describe_adapter(a).client in {"orca", "herdr"} for a in adapters):
+        if adapters == live.adapters and not any(describe_adapter(a).client in {"orca", "herdr", "paseo"} for a in adapters):
             return
 
         from contextlib import nullcontext
@@ -1855,6 +1868,10 @@ class OperationCoordinator:
                   if not readonly_recovery and live.document.get("actions") and (frontends or live.document.get("schema_version") == PLAN_V3) else nullcontext())
         if herdr_evidence is not None and not readonly_recovery:
             ticket = herdr_planning_scope(herdr_evidence)
+        from .paseo_cleanup import evidence_from_document as get_paseo_evidence, planning_scope as paseo_planning_scope
+        paseo_evidence = get_paseo_evidence(live.document)
+        if paseo_evidence is not None and not readonly_recovery:
+            ticket = paseo_planning_scope(paseo_evidence)
         with ticket:
             live.context = restrict_cleanup_context(live.context, adapters, self.service.typed_actions)
             live.action_contexts = {key: restrict_cleanup_context(bound, adapters, self.service.typed_actions)
@@ -3168,7 +3185,7 @@ class OperationCoordinator:
         context: Any,
         scope: Mapping[str, Any],
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
-        if scope.get("client") in {"orca", "herdr"} and any(str(a.kind.value) in {"delete_orca_frontend", "delete_herdr_frontend"} for a in context.plan.actions):
+        if scope.get("client") in {"orca", "herdr", "paseo"} and any(str(a.kind.value) in {"delete_orca_frontend", "delete_herdr_frontend", "delete_paseo_frontend"} for a in context.plan.actions):
             blockers = [self._blocker("scan_incomplete", str(error)) for error in context.plan.errors]
             blockers.extend(self._blocker("action_unavailable", a.unavailable_reason or "Orca closure unavailable")
                             for a in context.plan.actions if not a.available)
@@ -3767,7 +3784,7 @@ class OperationCoordinator:
     def _classification(context: Any, action: Any, manual_record: Any = None, client: str | None = None) -> str:
         from .inventory import ManagedConversation, classify_managed_conversation
 
-        if str(getattr(action.kind, "value", action.kind)) in {"delete_orca_frontend", "delete_herdr_frontend"}:
+        if str(getattr(action.kind, "value", action.kind)) in {"delete_orca_frontend", "delete_herdr_frontend", "delete_paseo_frontend"}:
             payload = action.impact.external_action_payload or {}
             return "healthy" if payload.get("requires_action_ids") else "orphan_frontend"
         if str(getattr(action.kind, "value", action.kind)) == "delete_schedule_run":
@@ -4588,6 +4605,15 @@ class OperationCoordinator:
         entered = False
         try:
             with mutation_roots(frozen_operation_roots(live.document)):
+                from .paseo_cleanup import evidence_from_document, execution_scope as paseo_execution_scope
+                if evidence_from_document(live.document) is not None:
+                    from .mutation_guard import check_operation_root_admission
+                    check_operation_root_admission(live.document)
+                    with paseo_execution_scope(live.document, live.candidates, clients_closed=live.clients_closed_ack,
+                                               context=live.context, manual_actions=live.manual_actions):
+                        entered = True
+                        return self._execute_live_locked(live, timeout=timeout, app_server_factory=app_server_factory,
+                            binary_resolver=binary_resolver, progress_callback=progress_callback)
                 from .herdr_cleanup import evidence_from_document, execution_scope as herdr_execution_scope
                 if evidence_from_document(live.document) is not None:
                     from .mutation_guard import check_operation_root_admission
@@ -5016,7 +5042,7 @@ class OperationCoordinator:
                                 (),
                             )
                         }
-                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend", "delete_herdr_frontend"}
+                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts", "delete_orca_frontend", "delete_herdr_frontend", "delete_paseo_frontend"}
                                       else typed_by_id.get(str(action.action_id), action) for action in batch.actions)
                         outcome = self.service.execute(
                             batch_context,
@@ -6114,7 +6140,7 @@ class OperationCoordinator:
         # Exact WorkBuddy evidence distinguishes a missing row/usage/sidecar
         # from a value. Preserve its explicit nulls through plan persistence;
         # continue applying the ordinary body-key filter throughout the tree.
-        _workbuddy_nulls = _workbuddy_nulls or key in {"workbuddy_session_evidence", "office_session_evidence", "orca_frontend_evidence", "orca_target_evidence", "herdr_evidence"}
+        _workbuddy_nulls = _workbuddy_nulls or key in {"workbuddy_session_evidence", "office_session_evidence", "orca_frontend_evidence", "orca_target_evidence", "herdr_evidence", "paseo_evidence"}
         if key in {"title", "display_name", "thread_name", "name"}:
             from .display_metadata import display_title
             return display_title(value)

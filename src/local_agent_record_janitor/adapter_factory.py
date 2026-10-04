@@ -116,7 +116,13 @@ def create_default_adapters(args: Any) -> list[object]:
     selected = selected_platforms(args.platform)
     adapters: list[object] = []
     paseo_roots = tuple(getattr(args, "paseo_root", ()) or ())
-    if "paseo" in selected or str(getattr(args, "client", "")) == "paseo" or paseo_roots:
+    if getattr(args, "paseo_bindings", None) is not None:
+        from .paseo_bound_adapter import PaseoBoundAdapter, load_manifest
+        adapter = PaseoBoundAdapter(load_manifest(args.paseo_bindings))
+        if paseo_roots and (len(paseo_roots) != 1 or canonical_path(paseo_roots[0]) != canonical_path(adapter.profile_root)):
+            raise ValueError("paseo_binding_profile_mismatch")
+        adapters.append(adapter)
+    elif "paseo" in selected or str(getattr(args, "client", "")) == "paseo" or paseo_roots:
         from .paseo_store import PaseoAdapter, default_root, local_root
         roots = paseo_roots or (default_root(),)
         # Validate the original spelling before canonicalization can conceal

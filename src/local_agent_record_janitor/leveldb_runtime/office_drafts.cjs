@@ -150,8 +150,11 @@ function dataKey (raw) {
 }
 
 const uiCleaner = require('./office_ui.cjs')({ decodeString, encodeString, mapEntries, cleanDraft, fail })
+const paseoCleaner = require('./paseo_ui.cjs')({ decodeString, encodeString, mapEntries, fail })
 
 async function projection (db, request) {
+  if (request.paseo_server_id !== undefined && (!ID.test(request.paseo_server_id) ||
+      JSON.stringify(request.origins) !== '["paseo://app"]')) fail('office_leveldb_paseo_scope_invalid')
   const version = await db.get(Buffer.from('VERSION'))
   if (!version || !Buffer.from(version).equals(Buffer.from('1'))) fail('office_leveldb_schema_unverified')
   const chatIds = new Set(request.chat_ids)
@@ -164,7 +167,8 @@ async function projection (db, request) {
     if (++count.keys > 20000) fail('office_leveldb_key_budget_exceeded')
     const key = dataKey(rawKey)
     if (!key) continue
-    const cleanValue = uiCleaner(key.name, chatIds, childIds)
+    const cleanValue = request.paseo_server_id === undefined ? uiCleaner(key.name, chatIds, childIds)
+      : paseoCleaner(key.name, chatIds, request.paseo_server_id)
     if (!cleanValue) continue
     if (!request.origins.includes(key.origin)) fail('office_leveldb_draft_origin_unverified')
     // UTF16 and Latin1 names can otherwise denote the same logical DOM key.

@@ -39,7 +39,7 @@
 | WorkBuddy / WorkBuddy | 独立 SQLite、精确会话 artifacts 和 UI 引用 | 仅支持已识别 5.6.2 本地终态范围，Windows writer 覆盖及完整冻结证据；未知副本只读 |
 | 千问办公 / QwenWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 1.2.5 CN schema；草稿/恢复/共享 SDK 范围未闭合，写入和 verify 关闭 |
 | QoderWork CN | 主/子会话元数据及已知 SDK 文件位置 | 已核实 0.9.18 CN schema；不与 Qoder IDE/CLI 混用，写入和 verify 关闭 |
-| Paseo / 内置及未知 provider | 当前/旧格式 agent 快照、归档与恢复引用 | 固定源码的只读注册清单；无 native root/完整 writer 证明，写入和 verify 关闭 |
+| Paseo / 内置及未知 provider | 当前/旧格式 agent 快照、归档与恢复引用 | 默认只读；Windows 显式绑定的 Codex/Pi/Claude、服务端和桌面完整操作见下文，未知 provider 关闭 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -609,7 +609,7 @@ archivedAt、internal、daemon owner ID、固定 parent-agent 标签、恢复 ID
 config、provider metadata、runtime extra 和 lastError 不进入输出；原生转录不读取。
 同 profile 重复 agent ID 保留每个快照与引用，并报告冲突，不采用上游缓存的最后覆盖值。
 
-所有 capability 的删除与 verify 标志关闭，`delete plan/run/apply`、`operation status/verify`
+默认无绑定 adapter 的删除与 verify 标志关闭，`delete plan/run/apply`、`operation status/verify`
 不会把只读结果升级为删除完成。`records --inspect-clients` 只说明持久元数据观察范围，
 `clients_closed=null`、`coverage_complete=false`；保存的 `closed` 状态不是进程关闭证据。
 
@@ -621,7 +621,45 @@ config、provider metadata、runtime extra 和 lastError 不进入输出；原�
 错误也可能只记录到日志后继续发送删除事件。直接 unlink 则可能被内存缓存写回。
 归档会调用 provider 生命周期并可能级联子代理；桌面退出还可能保留后台 daemon，
 监督进程可能重启 worker。后续 writer 必须明确批准副本/调度与父子引用范围、证明全部
-相关写入者停止并提供持久 journal/只读恢复，不能用归档或删除事件代替终验。
+相关写入者停止并提供持久 journal/只读恢复，不能用归档或删除事件代替终验。下述显式绑定
+流程为已限定的本机组合提供这些证据；普通盘点不会自动获得该权限。
+
+### Paseo：Windows 显式绑定的完整清理
+
+`--paseo-bindings` 绑定一个服务端 profile、其 `server-id`、每个观察到的 agent 的实际
+Codex/Pi/Claude 根目录，以及全部相关本机桌面 profile 与运行文件。选择的是 Paseo ID；
+固定 parent-agent 标签的后代一起列入计划。cwd 不授予存储归属；未选 agent 共享同一
+原生记录、未知 provider、冲突恢复句柄或不完整清单阻挡计划。普通 provider metadata
+作为所属记录的一部分清理，不从配置内容推断路径或权限。
+
+原生批次复用既有引擎写入器及其他客户端的引用保护。全部原生依赖缺失后，前端批次清理
+已冻结的平铺/项目注册 JSON 和严格匹配上游原子写入命名的副本。选中 agent 专属调度可
+删除；其他调度只将已结束且属于选中 agent 的 run 的 `agentId/output/error` 置空，
+保留执行次数、状态、时间与其他 run。运行中的相关任务、专属调度包含未选历史 run、
+旧 `agent-timelines` 或未知嵌套 schema 均阻挡。
+
+绑定桌面使用 `paseo://app`：IndexedDB v1 `paseo-replica-row-store` 的精确
+`[serverId, kind, agentId]` agent/timeline 行、v5 canonical 文本草稿和 v2 workspace
+布局中的明确 agent/provider-subagent/plugin-agent 引用一并清理。其他服务器同 ID、
+其他会话、checkpoint、设置和数据库保持不变。LevelDB 的物理 CRC、WAL/SST、比较器、
+版本元数据先核验，再在私有副本上使用固定 Electron 44.2.0/Chromium 152 和
+ClassicLevel 3 执行原生事务；不让浏览器直接打开原目录。完整分发包与 helper 的身份和
+哈希被冻结，原生读回及独立冷副本的全部逻辑数据必须符合批准 after。
+
+执行要求相关应用关闭、`paseo.pid` 不存在、完整进程枚举可用。Windows 期间持有绑定
+运行文件的排他句柄和标准 daemon 启动 PID 租约；不自动停止应用或清除陈旧 PID。
+该边界覆盖声明的运行文件与标准启动路径，不能证明任意自定义、远程或独立插件 writer
+停止。`desktop_profiles: []` 只声明 headless 本机服务端范围，不代表所有浏览器、移动端
+和远程缓存都已删除；workspace 文件、生成文件、项目注册表和登录凭据不在会话删除范围。
+
+正常操作支持冷 status/verify，原生完成而前端尚未开始可冷继续。前端一旦开始后失败，
+持久 journal 保持 unknown，不自动重发；只有精确 after 可经 verify 判定完成。缓存安装
+前先写入带身份说明的完整 durable after 副本；中断时保留 `.larj-paseo-sealed-*` 并明确
+要求人工恢复，不能删除恢复副本后把未知状态当成成功。Blob、非文本附件、旧 replica
+cache、autoIncrement object store、不安全数值或未知 schema 不提供自动删除。
+macOS/Linux 的解析与协议测试不构成上述 Windows writer 的其他平台资格。
+
+绑定格式与依赖准备见 [完整本地操作](operation-cli.md#paseo-完整本地操作)。
 
 ## 既有 Codex Finding adapter
 

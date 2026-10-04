@@ -90,7 +90,8 @@ def current_guard_sources(adapters: Iterable[object] = (), *, client: str = "nat
     # A bound multi-provider client may delete a shared native record. Keep
     # known frontend owners even when candidate discovery selected only it.
     from .herdr_bound_adapter import HerdrBoundAdapter
-    if any(isinstance(adapter, HerdrBoundAdapter) for adapter in adapters):
+    from .paseo_bound_adapter import PaseoBoundAdapter
+    if any(isinstance(adapter, (HerdrBoundAdapter, PaseoBoundAdapter)) for adapter in adapters):
         from .adapter_factory import discover_shared_codex_guards
         present = {(describe_adapter(a).client, canonical_path(getattr(a, "database", None)))
                    for a in adapters if getattr(a, "database", None) is not None}
@@ -127,12 +128,13 @@ def refresh_guard_sources(adapters: Iterable[object]) -> tuple[object, ...]:
     adapters = tuple(adapters)
     for adapter in adapters:
         from .herdr_bound_adapter import HerdrBoundAdapter
+        from .paseo_bound_adapter import PaseoBoundAdapter
         client = describe_adapter(adapter).client
         if client in {"cindy", "aionui"}:
             invalidate = getattr(adapter, "invalidate_frontend_snapshot", None)
             if callable(invalidate):
                 invalidate()
-        if client == "orca" or isinstance(adapter, HerdrBoundAdapter):
+        if client == "orca" or isinstance(adapter, (HerdrBoundAdapter, PaseoBoundAdapter)):
             adapter.snapshot_references(refresh=True)
     return adapters
 

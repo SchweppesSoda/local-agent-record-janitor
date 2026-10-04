@@ -6,6 +6,8 @@ const fs = require('node:fs')
 const path = require('node:path')
 const MAX_FILES = 4096, MAX_FILE = 128 * 1024 * 1024, MAX_TOTAL = 512 * 1024 * 1024
 const MAX_RECORD = 32 * 1024 * 1024, MAX_BLOCK = 16 * 1024 * 1024, MAX_ENTRIES = 200000
+function createValidator (indexedDB = false) {
+const idb = indexedDB ? require('./idb_keys.cjs') : null
 function fail (code) { const error = new Error(code); error.code = code; throw error }
 const bad = () => fail('office_leveldb_physical_corruption')
 const table = new Uint32Array(256)
@@ -111,9 +113,10 @@ function records (bytes) {
 
 function internalKey (key) {
   if (key.length < 8 || (key[key.length - 8] !== 0 && key[key.length - 8] !== 1)) bad()
+  if (idb) idb.decode(key.subarray(0, -8))
 }
 function compareInternal (a, b) {
-  const compare = Buffer.compare(a.subarray(0, -8), b.subarray(0, -8))
+  const compare = (idb ? idb.compare : Buffer.compare)(a.subarray(0, -8), b.subarray(0, -8))
   if (compare) return compare
   const aa = a.readBigUInt64LE(a.length - 8), bb = b.readBigUInt64LE(b.length - 8)
   return aa === bb ? 0 : aa > bb ? -1 : 1
@@ -128,7 +131,7 @@ function writeBatch (bytes) {
   while (!c.end()) {
     const type = c.byte()
     if (type !== 0 && type !== 1) fail('office_leveldb_record_schema_unverified')
-    c.str(); if (type === 1) c.str()
+    const key = c.str(); if (idb) idb.decode(key); if (type === 1) c.str()
     if (++found > MAX_ENTRIES) fail('office_leveldb_physical_budget_exceeded')
   }
   if (found !== count) bad()
@@ -149,7 +152,7 @@ function manifest (logical) {
       if (rank < lastRank) bad()
       lastRank = rank
       if ([1, 2, 3, 4, 9].includes(tag)) { if (single.has(tag)) bad(); single.add(tag) }
-      if (tag === 1) { state.comparator = c.str().toString('latin1'); if (state.comparator !== 'leveldb.BytewiseComparator') fail('office_leveldb_comparator_unverified') }
+      if (tag === 1) { state.comparator = c.str().toString('latin1'); if (state.comparator !== (idb ? 'idb_cmp1' : 'leveldb.BytewiseComparator')) fail('office_leveldb_comparator_unverified') }
       else if (tag === 2) state.log = c.vi()
       else if (tag === 9) state.prevLog = c.vi()
       else if (tag === 3) state.next = c.vi()
@@ -289,7 +292,8 @@ function sst (bytes) {
   }
   if (end !== footerOffset) bad()
   return { blocks: seen.size, compressed_blocks: [...seen.values()].filter(h => h.compression === 1).length,
-    first_key: firstKey, last_key: lastKey }
+    first_key: firstKey, last_key: lastKey,
+    ...(idb ? { entries: dataBlocks.flatMap(block => block.entries) } : {}) }
 }
 
 function validate (root) {
@@ -344,4 +348,6 @@ function validate (root) {
     logs: logs.size, blocks, compressed_blocks: compressed }
 }
 
-module.exports = { validate, crc32c, mask, cursor, records, sst, snappy, blockEntries, manifest, writeBatch }
+return { validate, crc32c, mask, cursor, records, sst, snappy, blockEntries, manifest, writeBatch }
+}
+module.exports = { ...createValidator(), indexedDB: () => createValidator(true) }

@@ -47,10 +47,16 @@ jobs:
           LARJ_LEVELDB_RUNTIME: ${{ runner.temp }}/larj-leveldb-runtime
         run: python -m local_agent_record_janitor.office_leveldb --install
 
+      - name: Install hash-pinned Paseo browser test dependency
+        if: matrix.os == 'windows-latest'
+        run: python -m tests.install_paseo_electron "${{ runner.temp }}/larj-paseo-electron"
+
       - name: Run unit tests
         env:
           LARJ_LEVELDB_RUNTIME: ${{ runner.temp }}/larj-leveldb-runtime
           LARJ_REQUIRE_LEVELDB_TESTS: "1"
+          LARJ_PASEO_ELECTRON_RUNTIME: ${{ runner.temp }}/larj-paseo-electron
+          LARJ_REQUIRE_PASEO_BROWSER_TESTS: "1"
         run: python -m unittest discover -s tests -v
 
       - name: Set up pinned Rust fingerprint oracle

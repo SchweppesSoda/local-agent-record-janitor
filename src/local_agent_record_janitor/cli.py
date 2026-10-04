@@ -1031,6 +1031,8 @@ def _add_common_arguments(
                         help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
     parser.add_argument("--herdr-bindings", type=Path, metavar="JSON",
                         help="Herdr 完整清理的显式会话/原生目录/运行文件绑定清单（Windows）")
+    parser.add_argument("--paseo-bindings", type=Path, metavar="JSON",
+                        help="Paseo 完整清理的显式 agent/原生目录/桌面配置绑定清单（Windows）")
     parser.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
                         help="WorkBuddy 独立配置根目录（可重复；默认 WORKBUDDY_CONFIG_DIR 或 ~/.workbuddy）")
     parser.add_argument("--paseo-root", action="append", default=[], type=Path, metavar="PATH",
