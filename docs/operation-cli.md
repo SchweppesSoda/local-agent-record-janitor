@@ -21,7 +21,7 @@ through the independent `delete_native_project` family. See
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
-records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr|workbuddy> [--project <selector> ...]
+records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr|workbuddy|qwenwork|qoderwork> [--project <selector> ...]
 delete plan --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
@@ -95,8 +95,12 @@ planner pass.
 
 Qualified Orca native deletion uses `larj.operation-plan.v3`. Its target safety
 evidence freezes one managed account home, each complete native cascade, ordinary
-rollout/SQLite/index identities and link counts, required sources, configuration
-absence, and the fixed binary/invocation policy. Apply rechecks current references
+rollout/SQLite/index identities and link counts, required sources, bounded
+configuration hashes, opaque credential identities/hashes, approved startup
+artifacts, and the fixed binary/invocation policy. Target evidence and runtime
+policy v2 qualify configured homes under the exact [registered boundary](adapters.md#orca精确原生删除的限定组合).
+Unregistered optional databases, compressed rollouts, a pre-existing fixed index
+replacement file, or nonempty native logs block startup. Apply rechecks current references
 and target-scoped Windows process metadata and still requires a real
 `--clients-closed` acknowledgement. Plan-time running observations may become
 closed before apply. Only the exact approved action/home/IDs/paths receive an
@@ -117,6 +121,9 @@ the original native IDs/rollouts/rows/edges/sidebar index directly. A terminal
 child receipt retains that original runtime evidence. An existing Job, missing
 runtime proof, bad source, linked survivor or incomplete read keeps the outcome
 unknown. Software upgrades cannot add evidence or change the original plan hash.
+Legacy target evidence v1 remains readable for recovery, but cannot authorize a
+new v2 invocation; an unstarted operation needs a newly reviewed plan. Existing
+startup objects are checked according to the stored evidence version.
 Recovery inventories only the frozen native home; an ambient `CODEX_HOME` or an
 extra native adapter does not add a store to that inventory. Frozen and current
 protection sources still participate in guard checks, including source failures.
@@ -156,10 +163,15 @@ Live references remain separate from persisted current/restore; public pane
 IDs do not identify persisted panes. `client_ownership` uses that same cached
 snapshot and stays outside `snapshot_id`. `reference_values_match` describes
 observed session values, not an atomic generation or pane identity mapping.
-Responsive endpoints give `clients_closed=false`; failure or absence remains
-unknown, and full writer coverage is never complete. `runtime_writer_coverage_unknown`
-remains even after successful metadata queries. Records returns exit code `1` and
-`goal_status=blocked` while exposing the available references. Source errors
+Successful ping retains `clients_closed=false` even if the later snapshot fails;
+without a valid response the state remains unknown. `detached_daemon_observed`
+is the server's boolean startup self-report, not attached-client or writer proof.
+Full writer coverage remains incomplete. `runtime_writer_coverage_unknown`
+and `live_metadata_not_probed` have `blocks_delete=true` and `blocks_inventory=false`.
+Records may return exit code `0` and `goal_status=complete` for its explicit
+`inventory_scope` (persisted metadata or persisted plus live metadata), while
+retaining these cleanup restrictions. Actual read/schema/transport/conflict
+failures still return blocked. Source errors
 remain scoped to the selected profile/source. Herdr does not add Orca
 `guard_sources`; all native/frontend/remote mutation and its own verify
 capabilities are false. Delete plan/run returns structured capability blockers;
@@ -191,6 +203,20 @@ upstream FTS trigger definitions and index layouts. Unknown triggers return a
 `frontend_preflight_blocked` blocker before any native deletion is attempted.
 See [Cindy storage contract](cindy-storage-contract.md) for pinned upstream
 sources, the closed-client CJK fallback, and regression fixtures.
+
+## QwenWork and QoderWork office metadata
+
+`records --client qwenwork|qoderwork` reads independently registered CN database
+schemas and known SDK UUID locations. Repeatable `--qwenwork-root` /
+`--qoderwork-root` select profiles; `--qwenwork-sdk-root` / `--qoderwork-sdk-root`
+select the shared SDK root for that product. IDs stay qualified by client and
+profile. Unknown schemas and inaccessible sources cannot produce empty success.
+
+`inventory_scope=database_metadata_and_known_sdk_paths` does not promise the
+complete restoration/draft closure. All writer and verify capabilities remain
+false. Plans with no authorized actions stay blocked through apply, status and
+verify. No message, credential, workspace, generated artifact or cloud entity is
+deleted. See [the evidence and limits](adapters.md#千问办公与-qoderworkcn-只读盘点).
 
 ## WorkBuddy local sessions
 

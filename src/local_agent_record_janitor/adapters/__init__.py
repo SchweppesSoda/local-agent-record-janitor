@@ -5,6 +5,7 @@ from .native import NativeIntegrityAdapter, NativeIntegrityError
 from .orca import OrcaAdapter
 from .herdr import HerdrAdapter
 from ..workbuddy_store import WorkBuddyAdapter
+from ..office_store import OfficeAdapter
 
 __all__ = [
     "AdapterScanError",
@@ -16,4 +17,5 @@ __all__ = [
     "OrcaAdapter",
     "HerdrAdapter",
     "WorkBuddyAdapter",
+    "OfficeAdapter",
 ]

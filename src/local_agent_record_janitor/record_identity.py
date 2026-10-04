@@ -37,6 +37,8 @@ class ClientName(str, Enum):
     ORCA = "orca"
     HERDR = "herdr"
     WORKBUDDY = "workbuddy"
+    QWENWORK = "qwenwork"
+    QODERWORK = "qoderwork"
 
 
 # A frontend backend name alone does not prove which native store owns a

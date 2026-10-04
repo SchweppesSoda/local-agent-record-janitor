@@ -25,7 +25,7 @@ classifiers = [
   "Topic :: System :: Systems Administration",
   "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = ["tomli>=2.0.1,<2.4; python_version < '3.11'"]
 
 [project.scripts]
 local-agent-record-janitor = "local_agent_record_janitor.cli:main"
@@ -38,4 +38,4 @@ Issues = "https://github.com/SchweppesSoda/local-agent-record-janitor/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-local_agent_record_janitor = ["workbuddy_schema_562.json"]
+local_agent_record_janitor = ["workbuddy_schema_562.json", "orca_startup_0160.json", "office_schemas.json"]

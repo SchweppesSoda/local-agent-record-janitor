@@ -228,14 +228,14 @@ def scopes_for_actions(plan: Any, actions: Iterable[Any]) -> tuple[MutationScope
 
 def scopes_for_frozen_plan(plan: Mapping[str, Any]) -> tuple[MutationScope, ...]:
     if plan.get("schema_version") == "larj.child-operation-plan.v2":
-        from .orca_target_safety import EVIDENCE_SCHEMA, evidence_for_actions
+        from .orca_target_safety import EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA, evidence_for_actions
         boundary = plan.get("startup_boundary")
         target = plan.get("target", {})
         if (not isinstance(boundary, Mapping) or boundary.get("schema_version") != "larj.orca-startup-boundary.v1"
                 or boundary.get("coordination_scope") != "root_wide"
                 or boundary.get("home") != target.get("codex_home")
                 or not isinstance(boundary.get("target_safety_evidence"), list)
-                or any(value.get("schema_version") != EVIDENCE_SCHEMA or value.get("native_delete") is not True
+                or any(value.get("schema_version") not in {EVIDENCE_SCHEMA, LEGACY_EVIDENCE_SCHEMA} or value.get("native_delete") is not True
                        or value.get("api_boundary") != "validated_fixed_runtime"
                        for value in boundary["target_safety_evidence"])):
             raise OperationStoreError("Orca child has no trustworthy frozen startup scope")

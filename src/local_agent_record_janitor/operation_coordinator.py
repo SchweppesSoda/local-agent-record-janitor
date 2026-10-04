@@ -5686,7 +5686,11 @@ class OperationCoordinator:
                     if state.get("startup_artifacts") is not None and state["startup_artifacts"] != snapshot:
                         return ("orca_startup_snapshot_invalid",)
                     from .orca_target_safety import recheck_startup_snapshot
-                    recheck_startup_snapshot(storages[batch["storage_id"]], snapshot)
+                    evidence = child["startup_boundary"]["target_safety_evidence"]
+                    schemas = {value["schema_version"] for value in evidence}
+                    if len(schemas) != 1:
+                        return ("orca_startup_snapshot_invalid",)
+                    recheck_startup_snapshot(storages[batch["storage_id"]], snapshot, evidence_schema=next(iter(schemas)))
         except (ValueError, OSError, KeyError, TypeError):
             return ("orca_runtime_instance_unproven",)
         return ()

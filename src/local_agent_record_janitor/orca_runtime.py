@@ -14,15 +14,16 @@ from pathlib import Path
 from .codex_app_server import CodexAppServer
 from .orca_discovery import require_plain_directory, require_plain_file
 
-RUNTIME_POLICY_SCHEMA = "larj.orca-runtime.v1"
-PINNED_BINARY_SHA256 = "7d4588265a55adb1403f85d2e058b11dc971459842de84876c86ff02fb7771f2"
+RUNTIME_POLICY_SCHEMA = "larj.orca-runtime.v2"
+PINNED_BINARY_SHA256 = "fdda5fa3cf3fb3d000b876720742857676293e4315e4b045fae6f8bd7e866d1d"
 # The exact Windows binary/policy passed fresh public v3 plan, cold apply and
 # cold verify in owned TEMP. Static brand capabilities remain closed.
 RUNTIME_ACCEPTED = True
 CONFIG_OVERRIDES = (
     'model="janitor-metadata-local"', 'model_provider="janitor_local"',
     'chatgpt_base_url="http://127.0.0.1:1/"', 'check_for_update_on_startup=false',
-    'cli_auth_credentials_store="file"', 'project_doc_max_bytes=0', 'web_search="disabled"',
+    'cli_auth_credentials_store="ephemeral"', 'project_doc_max_bytes=0', 'web_search="disabled"',
+    'approval_policy="never"', 'sandbox_mode="read-only"',
     'model_providers.janitor_local={name="Janitor isolation local metadata",base_url="http://127.0.0.1:1/v1",wire_api="responses",requires_openai_auth=false}',
     'analytics.enabled=false', 'feedback.enabled=false', 'otel.exporter="none"',
     'otel.trace_exporter="none"', 'otel.log_user_prompt=false',
@@ -35,11 +36,13 @@ def invocation_policy() -> dict:
     """Bind the actual fixed invocation and trusted implementation bytes."""
     files = (Path(__file__), Path(__file__).with_name("orca_runtime_launcher.py"),
              Path(__file__).with_name("codex_app_server.py"), Path(__file__).with_name("orca_codex_schema.py"),
-             Path(__file__).with_name("orca_target_safety.py"), Path(sys.executable).absolute())
+             Path(__file__).with_name("orca_target_safety.py"), Path(__file__).with_name("orca_configuration.py"),
+             Path(__file__).with_name("orca_startup_0160.json"), Path(sys.executable).absolute())
     return {"schema_version": RUNTIME_POLICY_SCHEMA, "binary_sha256": PINNED_BINARY_SHA256,
             "config_overrides": list(CONFIG_OVERRIDES), "disabled_features": list(DISABLED_FEATURES),
             "enabled_features": ["skip_host_skill_discovery"], "strict_config": True,
-            "environment_policy": "complete_allowlist_isolated_homes_git_configs_loopback_proxy.v1",
+            "environment_policy": "complete_allowlist_isolated_homes_git_configs_loopback_proxy.v2",
+            "remote_control_environment": {"CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED": "1"},
             "cwd_policy": "fresh_owned_temp_empty_cwd", "job_policy": "parent_owned_named_job_zero_active.v1",
             "python_version": list(sys.version_info[:3]),
             "implementation": [{"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
@@ -222,6 +225,9 @@ def isolated_environment(root: Path, codex_home: Path) -> tuple[dict[str, str], 
         environment[name] = "http://127.0.0.1:1"
     environment["NO_PROXY"] = "127.0.0.1,localhost,::1"
     environment["CODEX_HOME"] = str(codex_home)
+    # This pinned release removed the similarly named feature flag. Its
+    # startup environment gate disables remote control before authentication.
+    environment["CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED"] = "1"
     environment["HOMEDRIVE"] = root.drive
     environment["HOMEPATH"] = str(root / "userprofile")[len(root.drive):]
     git_config = root / "empty-git-config"

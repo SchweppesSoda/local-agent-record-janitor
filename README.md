@@ -91,6 +91,24 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 [WorkBuddy 适配边界](docs/adapters.md#workbuddy独立本地会话)和
 [operation 契约](docs/operation-cli.md#workbuddy-local-sessions)。
 
+### 千问办公与 QoderWork
+
+`records --client qwenwork` 与 `records --client qoderwork` 可只读盘点已识别的 CN 版
+数据库：主会话、子会话、消息数量、云端/定时任务关联和已知 SDK 会话文件位置。
+两款产品的 profile 与 SDK 数据根分别处理，不与千问网页聊天、Qoder IDE 或 CLI 混用。
+
+```powershell
+local-agent-record-janitor records --client qwenwork --json
+local-agent-record-janitor records --client qoderwork --json
+# 自定义 profile 可重复指定；SDK 根也可显式指定：
+local-agent-record-janitor records --client qwenwork --qwenwork-root 'D:\profiles\QwenWorkCN' --qwenwork-sdk-root 'D:\sdk\.qwenworkcn' --json
+```
+
+当前支持 QwenWorkCN 1.2.5 与 QoderWork CN 0.9.18 的已核实 schema；未知格式报告
+不完整清单。清单不读取消息正文或登录凭据。完整清理仍受草稿、恢复副本、共享 SDK
+会话和云端引用的证据限制，删除入口保持 blocked，用户生成的文件保留。详见
+[办公版适配边界](docs/adapters.md#千问办公与-qoderworkcn-只读盘点)。
+
 ### 术语与身份边界
 
 | 层 | 本项目中的含义 |

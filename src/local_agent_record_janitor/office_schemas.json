@@ -1,0 +1,806 @@
+{
+  "qoderwork": {
+    "version": "0.9.18",
+    "edition": "CN",
+    "objects": [
+      [
+        "index",
+        "byok_custom_models_legacy_key_idx",
+        "byok_custom_models",
+        "CREATE INDEX `byok_custom_models_legacy_key_idx` ON `byok_custom_models` (`legacy_key`)"
+      ],
+      [
+        "index",
+        "byok_custom_models_source_idx",
+        "byok_custom_models",
+        "CREATE INDEX `byok_custom_models_source_idx` ON `byok_custom_models` (`source`)"
+      ],
+      [
+        "index",
+        "chats_worktree_path_idx",
+        "chats",
+        "CREATE INDEX `chats_worktree_path_idx` ON `chats` (`worktree_path`)"
+      ],
+      [
+        "index",
+        "idx_pairing_channel_conv",
+        "channel_pairings",
+        "CREATE INDEX `idx_pairing_channel_conv` ON `channel_pairings` (`channel_id`,`conversation_id`)"
+      ],
+      [
+        "index",
+        "idx_pairing_v2_robot_binding",
+        "channel_pairings_v2",
+        "CREATE UNIQUE INDEX `idx_pairing_v2_robot_binding` ON `channel_pairings_v2` (`channel_id`,`robot_id`,`binding_key`)"
+      ],
+      [
+        "index",
+        "mcp_oauth_tokens_by_user_unique",
+        "mcp_oauth_tokens_by_user",
+        "CREATE UNIQUE INDEX `mcp_oauth_tokens_by_user_unique` ON `mcp_oauth_tokens_by_user` (`user_id`,`server_name`)"
+      ],
+      [
+        "index",
+        "messages_chat_created_at_idx",
+        "messages",
+        "CREATE INDEX `messages_chat_created_at_idx` ON `messages` (`chat_id`,`created_at`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_message_unique",
+        "messages",
+        "CREATE UNIQUE INDEX `messages_sub_chat_message_unique` ON `messages` (`sub_chat_id`,`message_id`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_sequence_idx",
+        "messages",
+        "CREATE INDEX `messages_sub_chat_sequence_idx` ON `messages` (`sub_chat_id`,`sequence`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_sequence_unique",
+        "messages",
+        "CREATE UNIQUE INDEX `messages_sub_chat_sequence_unique` ON `messages` (`sub_chat_id`,`sequence`)"
+      ],
+      [
+        "index",
+        "nudge_logs_created_at_idx",
+        "nudge_logs",
+        "CREATE INDEX `nudge_logs_created_at_idx` ON `nudge_logs` (`created_at`)"
+      ],
+      [
+        "index",
+        "nudge_logs_review_id_idx",
+        "nudge_logs",
+        "CREATE INDEX `nudge_logs_review_id_idx` ON `nudge_logs` (`review_id`)"
+      ],
+      [
+        "index",
+        "projects_path_unique",
+        "projects",
+        "CREATE UNIQUE INDEX `projects_path_unique` ON `projects` (`path`)"
+      ],
+      [
+        "index",
+        "rc_session_mappings_remote_session_id_idx",
+        "rc_session_mappings",
+        "CREATE UNIQUE INDEX `rc_session_mappings_remote_session_id_idx` ON `rc_session_mappings` (`remote_session_id`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_created_at_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_created_at_idx` ON `skill_evolution_suggestions` (`created_at`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_skill_name_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_skill_name_idx` ON `skill_evolution_suggestions` (`skill_name`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_status_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_status_idx` ON `skill_evolution_suggestions` (`status`)"
+      ],
+      [
+        "index",
+        "task_run_logs_task_id_idx",
+        "task_run_logs",
+        "CREATE INDEX `task_run_logs_task_id_idx` ON `task_run_logs` (`task_id`)"
+      ],
+      [
+        "index",
+        "voice_input_history_created_at_idx",
+        "voice_input_history",
+        "CREATE INDEX `voice_input_history_created_at_idx` ON `voice_input_history` (`created_at`)"
+      ],
+      [
+        "index",
+        "voice_input_hotwords_enabled_idx",
+        "voice_input_hotwords",
+        "CREATE INDEX `voice_input_hotwords_enabled_idx` ON `voice_input_hotwords` (`enabled`)"
+      ],
+      [
+        "index",
+        "voice_input_hotwords_normalized_unique",
+        "voice_input_hotwords",
+        "CREATE UNIQUE INDEX `voice_input_hotwords_normalized_unique` ON `voice_input_hotwords` (`normalized_text`)"
+      ],
+      [
+        "table",
+        "__drizzle_migrations",
+        "__drizzle_migrations",
+        "CREATE TABLE \"__drizzle_migrations\" (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)"
+      ],
+      [
+        "table",
+        "app_settings",
+        "app_settings",
+        "CREATE TABLE `app_settings` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`value` text NOT NULL,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "byok_custom_models",
+        "byok_custom_models",
+        "CREATE TABLE `byok_custom_models` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`legacy_key` text,\n\t`source` text DEFAULT 'byok' NOT NULL,\n\t`display_name` text NOT NULL,\n\t`provider` text,\n\t`type` text,\n\t`url` text,\n\t`style` text,\n\t`model` text NOT NULL,\n\t`format` text,\n\t`is_vl` integer DEFAULT false NOT NULL,\n\t`is_reasoning` integer DEFAULT false NOT NULL,\n\t`max_input_tokens` integer DEFAULT 0 NOT NULL,\n\t`max_output_tokens` integer DEFAULT 0 NOT NULL,\n\t`encrypted_parameters` text DEFAULT '{}' NOT NULL,\n\t`extra_params` text DEFAULT '' NOT NULL,\n\t`migrated_from` text,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "channel_pairings",
+        "channel_pairings",
+        "CREATE TABLE `channel_pairings` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`channel_id` text NOT NULL,\n\t`conversation_id` text NOT NULL,\n\t`conversation_type` text,\n\t`subject_name` text,\n\t`paired_at` integer NOT NULL,\n\t`created_at` integer,\n\t`sender_staff_id` text\n)"
+      ],
+      [
+        "table",
+        "channel_pairings_v2",
+        "channel_pairings_v2",
+        "CREATE TABLE `channel_pairings_v2` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`channel_id` text NOT NULL,\n\t`robot_id` text NOT NULL,\n\t`binding_key` text NOT NULL,\n\t`conversation_type` text NOT NULL,\n\t`subject_name` text,\n\t`sender_staff_id` text,\n\t`paired_at` integer NOT NULL,\n\t`created_at` integer\n)"
+      ],
+      [
+        "table",
+        "chats",
+        "chats",
+        "CREATE TABLE `chats` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text,\n\t`project_id` text NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer,\n\t`archived_at` integer,\n\t`worktree_path` text,\n\t`branch` text,\n\t`base_branch` text, `pr_url` text, `pr_number` integer, `additional_directories` text, `output_directory` text, `source` text, `wecom_account_id` text, `wecom_user_id` text, `chat_type` text DEFAULT 'task', `ext` text, `source_chat_id` text, `deleted_at` integer,\n\tFOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "google_oauth_tokens",
+        "google_oauth_tokens",
+        "CREATE TABLE `google_oauth_tokens` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`account` text,\n\t`client_id` text NOT NULL,\n\t`scopes` text,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "knowledge_bases",
+        "knowledge_bases",
+        "CREATE TABLE `knowledge_bases` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`owner_id` text NOT NULL,\n\t`title` text NOT NULL,\n\t`description` text,\n\t`status` text DEFAULT 'active',\n\t`source_count` integer DEFAULT 0,\n\t`auto_search_enabled` integer DEFAULT true,\n\t`synced_at` integer,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "mcp_oauth_tokens",
+        "mcp_oauth_tokens",
+        "CREATE TABLE `mcp_oauth_tokens` (\n\t`server_name` text PRIMARY KEY NOT NULL,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "mcp_oauth_tokens_by_user",
+        "mcp_oauth_tokens_by_user",
+        "CREATE TABLE `mcp_oauth_tokens_by_user` (\n\t`user_id` text NOT NULL,\n\t`server_name` text NOT NULL,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "messages",
+        "messages",
+        "CREATE TABLE `messages` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`message_id` text NOT NULL,\n\t`chat_id` text NOT NULL,\n\t`sub_chat_id` text NOT NULL,\n\t`sequence` integer NOT NULL,\n\t`role` text NOT NULL,\n\t`parts` text DEFAULT '[]' NOT NULL,\n\t`metadata` text DEFAULT '{}' NOT NULL,\n\t`searchable_text` text,\n\t`search_status` text DEFAULT 'ready' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer,\n\tFOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`sub_chat_id`) REFERENCES `sub_chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "messages_fts",
+        "messages_fts",
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(\n        searchable_text,\n        chat_id UNINDEXED,\n        sub_chat_id UNINDEXED,\n        message_id UNINDEXED,\n        role UNINDEXED,\n        tokenize='trigram case_sensitive 0'\n      )"
+      ],
+      [
+        "table",
+        "messages_fts_config",
+        "messages_fts_config",
+        "CREATE TABLE 'messages_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+      ],
+      [
+        "table",
+        "messages_fts_content",
+        "messages_fts_content",
+        "CREATE TABLE 'messages_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)"
+      ],
+      [
+        "table",
+        "messages_fts_data",
+        "messages_fts_data",
+        "CREATE TABLE 'messages_fts_data'(id INTEGER PRIMARY KEY, block BLOB)"
+      ],
+      [
+        "table",
+        "messages_fts_docsize",
+        "messages_fts_docsize",
+        "CREATE TABLE 'messages_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+      ],
+      [
+        "table",
+        "messages_fts_idx",
+        "messages_fts_idx",
+        "CREATE TABLE 'messages_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+      ],
+      [
+        "table",
+        "ms365_auth_states",
+        "ms365_auth_states",
+        "CREATE TABLE `ms365_auth_states` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "nudge_logs",
+        "nudge_logs",
+        "CREATE TABLE `nudge_logs` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`type` text NOT NULL,\n\t`review_type` text NOT NULL,\n\t`title` text NOT NULL,\n\t`preview` text,\n\t`sub_chat_id` text,\n\t`review_id` text,\n\t`duration_ms` integer,\n\t`is_error` integer DEFAULT false NOT NULL,\n\t`error_message` text,\n\t`created_at` integer\n, `awareness_target` text)"
+      ],
+      [
+        "table",
+        "projects",
+        "projects",
+        "CREATE TABLE `projects` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`path` text NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer\n, `git_remote_url` text, `git_provider` text, `git_owner` text, `git_repo` text)"
+      ],
+      [
+        "table",
+        "rc_session_mappings",
+        "rc_session_mappings",
+        "CREATE TABLE `rc_session_mappings` (\n\t`sub_chat_id` text PRIMARY KEY NOT NULL,\n\t`chat_id` text NOT NULL,\n\t`cwd` text NOT NULL,\n\t`remote_session_id` text NOT NULL,\n\t`last_broker_event_seq` integer DEFAULT 0 NOT NULL,\n\t`last_synced_seq` integer DEFAULT 0 NOT NULL,\n\t`last_published_msg_id` text,\n\t`import_id` text,\n\t`import_mode` text,\n\t`import_status` text,\n\t`import_error` text,\n\t`import_lock_expires_at` text,\n\t`created_at` integer,\n\t`updated_at` integer,\n\tFOREIGN KEY (`sub_chat_id`) REFERENCES `sub_chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "scheduled_tasks",
+        "scheduled_tasks",
+        "CREATE TABLE `scheduled_tasks` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`description` text,\n\t`project_id` text NOT NULL,\n\t`enabled` integer DEFAULT true NOT NULL,\n\t`delete_after_run` integer,\n\t`missed_run_policy` text DEFAULT 'prompt' NOT NULL,\n\t`schedule` text NOT NULL,\n\t`payload` text NOT NULL,\n\t`next_run_at` integer,\n\t`running_at` integer,\n\t`last_run_at` integer,\n\t`last_run_status` text,\n\t`last_error` text,\n\t`last_duration_ms` integer,\n\t`consecutive_errors` integer DEFAULT 0,\n\t`created_at` integer,\n\t`updated_at` integer, `source_chat_id` text, `source_sub_chat_id` text, `deleted_at` integer,\n\tFOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "skill_evolution_suggestions",
+        "skill_evolution_suggestions",
+        "CREATE TABLE `skill_evolution_suggestions` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`skill_name` text NOT NULL,\n\t`action` text NOT NULL,\n\t`summary` text NOT NULL,\n\t`rationale` text,\n\t`confidence` real NOT NULL,\n\t`skill_file_hash` text,\n\t`source_sub_chat_id` text NOT NULL,\n\t`source_session_id` text,\n\t`review_id` text,\n\t`status` text DEFAULT 'pending' NOT NULL,\n\t`evolution_chat_id` text,\n\t`snapshot_path` text,\n\t`expires_at` integer,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "sub_chats",
+        "sub_chats",
+        "CREATE TABLE `sub_chats` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text,\n\t`chat_id` text NOT NULL,\n\t`session_id` text,\n\t`mode` text DEFAULT 'agent' NOT NULL,\n\t`messages` text DEFAULT '[]' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer, `stream_id` text, `feedback` text DEFAULT 'none', `model_level` text, `ext` text, `message_feedbacks` text DEFAULT '{}',\n\tFOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "task_run_logs",
+        "task_run_logs",
+        "CREATE TABLE `task_run_logs` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`task_id` text NOT NULL,\n\t`chat_id` text,\n\t`sub_chat_id` text,\n\t`run_at` integer NOT NULL,\n\t`duration_ms` integer,\n\t`status` text NOT NULL,\n\t`error` text,\n\t`created_at` integer, `trigger` text,\n\tFOREIGN KEY (`task_id`) REFERENCES `scheduled_tasks`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "voice_input_history",
+        "voice_input_history",
+        "CREATE TABLE `voice_input_history` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`raw_text` text NOT NULL,\n\t`final_text` text NOT NULL,\n\t`target_app_name` text,\n\t`insert_method` text,\n\t`insert_status` text DEFAULT 'inserted' NOT NULL,\n\t`error_message` text,\n\t`created_at` integer\n)"
+      ],
+      [
+        "table",
+        "voice_input_hotwords",
+        "voice_input_hotwords",
+        "CREATE TABLE `voice_input_hotwords` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`text` text NOT NULL,\n\t`normalized_text` text NOT NULL,\n\t`enabled` integer DEFAULT true NOT NULL,\n\t`source` text DEFAULT 'manual' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "trigger",
+        "messages_fts_ad",
+        "messages",
+        "CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN\n      DELETE FROM messages_fts WHERE rowid = OLD.rowid;\n    END"
+      ],
+      [
+        "trigger",
+        "messages_fts_ai",
+        "messages",
+        "CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN\n      INSERT INTO messages_fts(rowid, searchable_text, chat_id, sub_chat_id, message_id, role)\n      VALUES (NEW.rowid, NEW.searchable_text, NEW.chat_id, NEW.sub_chat_id, NEW.message_id, NEW.role);\n    END"
+      ],
+      [
+        "trigger",
+        "messages_fts_au",
+        "messages",
+        "CREATE TRIGGER messages_fts_au AFTER UPDATE OF searchable_text ON messages BEGIN\n      DELETE FROM messages_fts WHERE rowid = OLD.rowid;\n      INSERT INTO messages_fts(rowid, searchable_text, chat_id, sub_chat_id, message_id, role)\n      VALUES (NEW.rowid, NEW.searchable_text, NEW.chat_id, NEW.sub_chat_id, NEW.message_id, NEW.role);\n    END"
+      ]
+    ]
+  },
+  "qwenwork": {
+    "version": "1.2.5",
+    "edition": "CN",
+    "objects": [
+      [
+        "index",
+        "acp_idempotency_scope_key_unique",
+        "acp_idempotency",
+        "CREATE UNIQUE INDEX `acp_idempotency_scope_key_unique` ON `acp_idempotency` (`runtime_id`,`scope`,`key`)"
+      ],
+      [
+        "index",
+        "acp_workspace_map_session_root_unique",
+        "acp_workspace_map",
+        "CREATE UNIQUE INDEX `acp_workspace_map_session_root_unique` ON `acp_workspace_map` (`session_id`,`root`)"
+      ],
+      [
+        "index",
+        "agent_turn_inputs_sub_chat_message_unique",
+        "agent_turn_inputs",
+        "CREATE UNIQUE INDEX `agent_turn_inputs_sub_chat_message_unique` ON `agent_turn_inputs` (`sub_chat_id`,`message_id`)"
+      ],
+      [
+        "index",
+        "agent_turn_inputs_sub_chat_state_position_idx",
+        "agent_turn_inputs",
+        "CREATE INDEX `agent_turn_inputs_sub_chat_state_position_idx` ON `agent_turn_inputs` (`sub_chat_id`,`state`,`position`)"
+      ],
+      [
+        "index",
+        "byok_custom_models_legacy_key_idx",
+        "byok_custom_models",
+        "CREATE INDEX `byok_custom_models_legacy_key_idx` ON `byok_custom_models` (`legacy_key`)"
+      ],
+      [
+        "index",
+        "byok_custom_models_source_idx",
+        "byok_custom_models",
+        "CREATE INDEX `byok_custom_models_source_idx` ON `byok_custom_models` (`source`)"
+      ],
+      [
+        "index",
+        "chats_local_project_sidebar_idx",
+        "chats",
+        "CREATE INDEX `chats_local_project_sidebar_idx` ON `chats` (`local_project_id`,`deleted_at`,`archived_at`,\"updated_at\" DESC,\"id\" DESC)"
+      ],
+      [
+        "index",
+        "chats_sidebar_active_updated_idx",
+        "chats",
+        "CREATE INDEX `chats_sidebar_active_updated_idx` ON `chats` (`deleted_at`,`archived_at`,\"updated_at\" DESC,\"id\" DESC)"
+      ],
+      [
+        "index",
+        "chats_worktree_path_idx",
+        "chats",
+        "CREATE INDEX `chats_worktree_path_idx` ON `chats` (`worktree_path`)"
+      ],
+      [
+        "index",
+        "data_import_records_source_capability_idx",
+        "data_import_records",
+        "CREATE INDEX `data_import_records_source_capability_idx` ON `data_import_records` (`source_instance`,`capability`,`state`)"
+      ],
+      [
+        "index",
+        "data_import_records_source_identity_unique",
+        "data_import_records",
+        "CREATE UNIQUE INDEX `data_import_records_source_identity_unique` ON `data_import_records` (`source_instance`,`capability`,`entity_type`,`source_id`)"
+      ],
+      [
+        "index",
+        "idx_enterprise_managed_folder",
+        "enterprise_managed_resources",
+        "CREATE INDEX `idx_enterprise_managed_folder` ON `enterprise_managed_resources` (`org_id`,`user_id`,`folder_name`)"
+      ],
+      [
+        "index",
+        "idx_pairing_channel_conv",
+        "channel_pairings",
+        "CREATE INDEX `idx_pairing_channel_conv` ON `channel_pairings` (`channel_id`,`conversation_id`)"
+      ],
+      [
+        "index",
+        "idx_pairing_v2_robot_binding",
+        "channel_pairings_v2",
+        "CREATE UNIQUE INDEX `idx_pairing_v2_robot_binding` ON `channel_pairings_v2` (`channel_id`,`robot_id`,`binding_key`)"
+      ],
+      [
+        "index",
+        "local_projects_deleted_created_id_idx",
+        "local_projects",
+        "CREATE INDEX `local_projects_deleted_created_id_idx` ON `local_projects` (`deleted_at`,\"created_at\" DESC,\"id\" DESC)"
+      ],
+      [
+        "index",
+        "mcp_oauth_tokens_by_user_unique",
+        "mcp_oauth_tokens_by_user",
+        "CREATE UNIQUE INDEX `mcp_oauth_tokens_by_user_unique` ON `mcp_oauth_tokens_by_user` (`user_id`,`server_name`)"
+      ],
+      [
+        "index",
+        "messages_chat_created_at_idx",
+        "messages",
+        "CREATE INDEX `messages_chat_created_at_idx` ON `messages` (`chat_id`,`created_at`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_message_unique",
+        "messages",
+        "CREATE UNIQUE INDEX `messages_sub_chat_message_unique` ON `messages` (`sub_chat_id`,`message_id`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_sequence_idx",
+        "messages",
+        "CREATE INDEX `messages_sub_chat_sequence_idx` ON `messages` (`sub_chat_id`,`sequence`)"
+      ],
+      [
+        "index",
+        "messages_sub_chat_sequence_unique",
+        "messages",
+        "CREATE UNIQUE INDEX `messages_sub_chat_sequence_unique` ON `messages` (`sub_chat_id`,`sequence`)"
+      ],
+      [
+        "index",
+        "nudge_logs_created_at_idx",
+        "nudge_logs",
+        "CREATE INDEX `nudge_logs_created_at_idx` ON `nudge_logs` (`created_at`)"
+      ],
+      [
+        "index",
+        "nudge_logs_review_id_idx",
+        "nudge_logs",
+        "CREATE INDEX `nudge_logs_review_id_idx` ON `nudge_logs` (`review_id`)"
+      ],
+      [
+        "index",
+        "projects_path_unique",
+        "projects",
+        "CREATE UNIQUE INDEX `projects_path_unique` ON `projects` (`path`)"
+      ],
+      [
+        "index",
+        "rc_session_mappings_remote_session_id_idx",
+        "rc_session_mappings",
+        "CREATE UNIQUE INDEX `rc_session_mappings_remote_session_id_idx` ON `rc_session_mappings` (`remote_session_id`)"
+      ],
+      [
+        "index",
+        "scheduled_task_admissions_state_idx",
+        "scheduled_task_admissions",
+        "CREATE INDEX `scheduled_task_admissions_state_idx` ON `scheduled_task_admissions` (`state`)"
+      ],
+      [
+        "index",
+        "scheduled_task_admissions_task_occurrence_idx",
+        "scheduled_task_admissions",
+        "CREATE UNIQUE INDEX `scheduled_task_admissions_task_occurrence_idx` ON `scheduled_task_admissions` (`task_id`,`scheduled_at`)"
+      ],
+      [
+        "index",
+        "scheduled_task_admissions_task_state_idx",
+        "scheduled_task_admissions",
+        "CREATE INDEX `scheduled_task_admissions_task_state_idx` ON `scheduled_task_admissions` (`task_id`,`state`)"
+      ],
+      [
+        "index",
+        "session_event_log_runtime_acked_idx",
+        "session_event_log",
+        "CREATE INDEX `session_event_log_runtime_acked_idx` ON `session_event_log` (`runtime_id`,`acked_at`)"
+      ],
+      [
+        "index",
+        "session_event_log_stream_event_id_unique",
+        "session_event_log",
+        "CREATE UNIQUE INDEX `session_event_log_stream_event_id_unique` ON `session_event_log` (`session_id`,`event_stream_id`,`event_id`)"
+      ],
+      [
+        "index",
+        "session_event_log_stream_seq_idx",
+        "session_event_log",
+        "CREATE INDEX `session_event_log_stream_seq_idx` ON `session_event_log` (`session_id`,`event_stream_id`,`seq`)"
+      ],
+      [
+        "index",
+        "session_event_log_stream_seq_unique",
+        "session_event_log",
+        "CREATE UNIQUE INDEX `session_event_log_stream_seq_unique` ON `session_event_log` (`session_id`,`event_stream_id`,`seq`)"
+      ],
+      [
+        "index",
+        "session_event_log_stream_source_id_unique",
+        "session_event_log",
+        "CREATE UNIQUE INDEX `session_event_log_stream_source_id_unique` ON `session_event_log` (`session_id`,`event_stream_id`,`source_event_id`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_created_at_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_created_at_idx` ON `skill_evolution_suggestions` (`created_at`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_skill_name_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_skill_name_idx` ON `skill_evolution_suggestions` (`skill_name`)"
+      ],
+      [
+        "index",
+        "skill_evo_suggestions_status_idx",
+        "skill_evolution_suggestions",
+        "CREATE INDEX `skill_evo_suggestions_status_idx` ON `skill_evolution_suggestions` (`status`)"
+      ],
+      [
+        "index",
+        "task_run_logs_chat_id_idx",
+        "task_run_logs",
+        "CREATE INDEX `task_run_logs_chat_id_idx` ON `task_run_logs` (`chat_id`)"
+      ],
+      [
+        "index",
+        "task_run_logs_task_id_idx",
+        "task_run_logs",
+        "CREATE INDEX `task_run_logs_task_id_idx` ON `task_run_logs` (`task_id`)"
+      ],
+      [
+        "index",
+        "voice_input_history_created_at_idx",
+        "voice_input_history",
+        "CREATE INDEX `voice_input_history_created_at_idx` ON `voice_input_history` (`created_at`)"
+      ],
+      [
+        "index",
+        "voice_input_hotwords_enabled_idx",
+        "voice_input_hotwords",
+        "CREATE INDEX `voice_input_hotwords_enabled_idx` ON `voice_input_hotwords` (`enabled`)"
+      ],
+      [
+        "index",
+        "voice_input_hotwords_normalized_unique",
+        "voice_input_hotwords",
+        "CREATE UNIQUE INDEX `voice_input_hotwords_normalized_unique` ON `voice_input_hotwords` (`normalized_text`)"
+      ],
+      [
+        "table",
+        "__drizzle_migrations",
+        "__drizzle_migrations",
+        "CREATE TABLE \"__drizzle_migrations\" (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)"
+      ],
+      [
+        "table",
+        "acp_idempotency",
+        "acp_idempotency",
+        "CREATE TABLE `acp_idempotency` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`runtime_id` text NOT NULL,\n\t`scope` text NOT NULL,\n\t`key` text NOT NULL,\n\t`fingerprint` text NOT NULL,\n\t`response` text NOT NULL,\n\t`created_at` text NOT NULL,\n\t`updated_at` text NOT NULL\n)"
+      ],
+      [
+        "table",
+        "acp_workspace_map",
+        "acp_workspace_map",
+        "CREATE TABLE `acp_workspace_map` (\n\t`workspace_id` text PRIMARY KEY NOT NULL,\n\t`session_id` text NOT NULL,\n\t`root` text NOT NULL,\n\t`created_at` integer,\n\tFOREIGN KEY (`session_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "agent_turn_inputs",
+        "agent_turn_inputs",
+        "CREATE TABLE `agent_turn_inputs` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`message_id` text NOT NULL,\n\t`chat_id` text NOT NULL,\n\t`sub_chat_id` text NOT NULL,\n\t`source` text NOT NULL,\n\t`delivery_policy` text DEFAULT 'queue-only' NOT NULL,\n\t`state` text DEFAULT 'queued' NOT NULL,\n\t`position` integer NOT NULL,\n\t`version` integer DEFAULT 1 NOT NULL,\n\t`content` text NOT NULL,\n\t`prompt_preview` text DEFAULT '' NOT NULL,\n\t`attachment_count` integer DEFAULT 0 NOT NULL,\n\t`target_turn_id` text,\n\t`error_code` text,\n\t`error_message` text,\n\t`accepted_sequence` integer,\n\t`created_at` integer,\n\t`updated_at` integer,\n\t`accepted_at` integer,\n\t`handed_off_at` integer,\n\t`target_turn_completed_at` integer,\n\t`blocked_by_pause` integer DEFAULT false NOT NULL,\n\t`steer_origin` text,\n\tFOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`sub_chat_id`) REFERENCES `sub_chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "app_settings",
+        "app_settings",
+        "CREATE TABLE `app_settings` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`value` text NOT NULL,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "byok_custom_models",
+        "byok_custom_models",
+        "CREATE TABLE `byok_custom_models` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`legacy_key` text,\n\t`source` text DEFAULT 'byok' NOT NULL,\n\t`display_name` text NOT NULL,\n\t`provider` text,\n\t`type` text,\n\t`url` text,\n\t`style` text,\n\t`model` text NOT NULL,\n\t`format` text,\n\t`is_vl` integer DEFAULT false NOT NULL,\n\t`is_reasoning` integer DEFAULT false NOT NULL,\n\t`max_input_tokens` integer DEFAULT 0 NOT NULL,\n\t`max_output_tokens` integer DEFAULT 0 NOT NULL,\n\t`encrypted_parameters` text DEFAULT '{}' NOT NULL,\n\t`extra_params` text DEFAULT '' NOT NULL,\n\t`migrated_from` text,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "channel_pairings",
+        "channel_pairings",
+        "CREATE TABLE `channel_pairings` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`channel_id` text NOT NULL,\n\t`conversation_id` text NOT NULL,\n\t`conversation_type` text,\n\t`subject_name` text,\n\t`paired_at` integer NOT NULL,\n\t`created_at` integer,\n\t`sender_staff_id` text\n)"
+      ],
+      [
+        "table",
+        "channel_pairings_v2",
+        "channel_pairings_v2",
+        "CREATE TABLE `channel_pairings_v2` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`channel_id` text NOT NULL,\n\t`robot_id` text NOT NULL,\n\t`binding_key` text NOT NULL,\n\t`conversation_type` text NOT NULL,\n\t`subject_name` text,\n\t`sender_staff_id` text,\n\t`paired_at` integer NOT NULL,\n\t`created_at` integer\n)"
+      ],
+      [
+        "table",
+        "chats",
+        "chats",
+        "CREATE TABLE `chats` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text,\n\t`project_id` text NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer,\n\t`archived_at` integer,\n\t`worktree_path` text,\n\t`branch` text,\n\t`base_branch` text, `pr_url` text, `pr_number` integer, `additional_directories` text, `output_directory` text, `source` text, `wecom_account_id` text, `wecom_user_id` text, `chat_type` text DEFAULT 'task', `ext` text, `source_chat_id` text, `deleted_at` integer, `local_project_id` text REFERENCES `local_projects`(`id`) ON UPDATE no action ON DELETE set null, `version` integer DEFAULT 0,\n\tFOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "client_config_module_cache",
+        "client_config_module_cache",
+        "CREATE TABLE `client_config_module_cache` (\n\t`source_id` text NOT NULL,\n\t`scope_fingerprint` text NOT NULL,\n\t`module_key` text NOT NULL,\n\t`schema_version` integer NOT NULL,\n\t`generation` integer NOT NULL,\n\t`fetched_at` integer NOT NULL,\n\t`content_hash` text NOT NULL,\n\t`payload_json` text NOT NULL,\n\tPRIMARY KEY(`source_id`, `scope_fingerprint`, `module_key`)\n)"
+      ],
+      [
+        "table",
+        "data_import_records",
+        "data_import_records",
+        "CREATE TABLE `data_import_records` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`source_instance` text NOT NULL,\n\t`capability` text NOT NULL,\n\t`entity_type` text NOT NULL,\n\t`source_id` text NOT NULL,\n\t`target_id` text NOT NULL,\n\t`state` text DEFAULT 'planned' NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`imported_at` integer\n)"
+      ],
+      [
+        "table",
+        "enterprise_managed_resources",
+        "enterprise_managed_resources",
+        "CREATE TABLE `enterprise_managed_resources` (\n\t`org_id` text NOT NULL,\n\t`user_id` text NOT NULL,\n\t`resource_type` text NOT NULL,\n\t`resource_origin` text NOT NULL,\n\t`resource_id` text NOT NULL,\n\t`folder_name` text NOT NULL,\n\t`resolved_revision_id` text,\n\t`target_version` text,\n\t`content_hash` text,\n\t`source_market_item_id` text,\n\t`last_state_hash` text,\n\t`lease_expires_at` integer,\n\t`installed_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL,\n\tPRIMARY KEY(`org_id`, `user_id`, `resource_type`, `resource_id`)\n)"
+      ],
+      [
+        "table",
+        "google_oauth_tokens",
+        "google_oauth_tokens",
+        "CREATE TABLE `google_oauth_tokens` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`account` text,\n\t`client_id` text NOT NULL,\n\t`scopes` text,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "knowledge_bases",
+        "knowledge_bases",
+        "CREATE TABLE `knowledge_bases` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`owner_id` text NOT NULL,\n\t`title` text NOT NULL,\n\t`description` text,\n\t`status` text DEFAULT 'active',\n\t`source_count` integer DEFAULT 0,\n\t`auto_search_enabled` integer DEFAULT true,\n\t`synced_at` integer,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "local_projects",
+        "local_projects",
+        "CREATE TABLE `local_projects` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`root_paths` text DEFAULT '[]' NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL,\n\t`deleted_at` integer\n, `icon` text NOT NULL DEFAULT 'newfolder-close', `icon_color` text NOT NULL DEFAULT 'black')"
+      ],
+      [
+        "table",
+        "mcp_oauth_tokens",
+        "mcp_oauth_tokens",
+        "CREATE TABLE `mcp_oauth_tokens` (\n\t`server_name` text PRIMARY KEY NOT NULL,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "mcp_oauth_tokens_by_user",
+        "mcp_oauth_tokens_by_user",
+        "CREATE TABLE `mcp_oauth_tokens_by_user` (\n\t`user_id` text NOT NULL,\n\t`server_name` text NOT NULL,\n\t`expires_at` integer,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "messages",
+        "messages",
+        "CREATE TABLE `messages` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`message_id` text NOT NULL,\n\t`chat_id` text NOT NULL,\n\t`sub_chat_id` text NOT NULL,\n\t`sequence` integer NOT NULL,\n\t`role` text NOT NULL,\n\t`parts` text DEFAULT '[]' NOT NULL,\n\t`metadata` text DEFAULT '{}' NOT NULL,\n\t`searchable_text` text,\n\t`search_status` text DEFAULT 'ready' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer,\n\tFOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade,\n\tFOREIGN KEY (`sub_chat_id`) REFERENCES `sub_chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "messages_fts",
+        "messages_fts",
+        "CREATE VIRTUAL TABLE messages_fts USING fts5(\n        searchable_text,\n        chat_id UNINDEXED,\n        sub_chat_id UNINDEXED,\n        message_id UNINDEXED,\n        role UNINDEXED,\n        tokenize='trigram case_sensitive 0'\n      )"
+      ],
+      [
+        "table",
+        "messages_fts_config",
+        "messages_fts_config",
+        "CREATE TABLE 'messages_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+      ],
+      [
+        "table",
+        "messages_fts_content",
+        "messages_fts_content",
+        "CREATE TABLE 'messages_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)"
+      ],
+      [
+        "table",
+        "messages_fts_data",
+        "messages_fts_data",
+        "CREATE TABLE 'messages_fts_data'(id INTEGER PRIMARY KEY, block BLOB)"
+      ],
+      [
+        "table",
+        "messages_fts_docsize",
+        "messages_fts_docsize",
+        "CREATE TABLE 'messages_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+      ],
+      [
+        "table",
+        "messages_fts_idx",
+        "messages_fts_idx",
+        "CREATE TABLE 'messages_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+      ],
+      [
+        "table",
+        "ms365_auth_states",
+        "ms365_auth_states",
+        "CREATE TABLE `ms365_auth_states` (\n\t`key` text PRIMARY KEY NOT NULL,\n\t`encrypted_payload` blob NOT NULL,\n\t`encryption_version` integer DEFAULT 1 NOT NULL,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL\n)"
+      ],
+      [
+        "table",
+        "nudge_logs",
+        "nudge_logs",
+        "CREATE TABLE `nudge_logs` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`type` text NOT NULL,\n\t`review_type` text NOT NULL,\n\t`title` text NOT NULL,\n\t`preview` text,\n\t`sub_chat_id` text,\n\t`review_id` text,\n\t`duration_ms` integer,\n\t`is_error` integer DEFAULT false NOT NULL,\n\t`error_message` text,\n\t`created_at` integer\n, `awareness_target` text)"
+      ],
+      [
+        "table",
+        "projects",
+        "projects",
+        "CREATE TABLE `projects` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`path` text NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer\n, `git_remote_url` text, `git_provider` text, `git_owner` text, `git_repo` text)"
+      ],
+      [
+        "table",
+        "rc_session_mappings",
+        "rc_session_mappings",
+        "CREATE TABLE `rc_session_mappings` (\n\t`sub_chat_id` text PRIMARY KEY NOT NULL,\n\t`chat_id` text NOT NULL,\n\t`cwd` text NOT NULL,\n\t`remote_session_id` text NOT NULL,\n\t`last_broker_event_seq` integer DEFAULT 0 NOT NULL,\n\t`last_synced_seq` integer DEFAULT 0 NOT NULL,\n\t`last_published_msg_id` text,\n\t`import_id` text,\n\t`import_mode` text,\n\t`import_status` text,\n\t`import_error` text,\n\t`import_lock_expires_at` text,\n\t`created_at` integer,\n\t`updated_at` integer,\n\tFOREIGN KEY (`sub_chat_id`) REFERENCES `sub_chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "scheduled_task_admission_cursors",
+        "scheduled_task_admission_cursors",
+        "CREATE TABLE `scheduled_task_admission_cursors` (\n\t`task_id` text PRIMARY KEY NOT NULL,\n\t`schedule` text NOT NULL,\n\t`materialized_through_at` integer NOT NULL,\n\tFOREIGN KEY (`task_id`) REFERENCES `scheduled_tasks`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "scheduled_task_admissions",
+        "scheduled_task_admissions",
+        "CREATE TABLE `scheduled_task_admissions` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`task_id` text NOT NULL,\n\t`scheduled_at` integer NOT NULL,\n\t`reserve_at` integer NOT NULL,\n\t`request_body` text NOT NULL,\n\t`state` text NOT NULL,\n\t`occurrence_id` text,\n\t`execute_at` integer,\n\t`clock_offset_ms` integer,\n\t`fallback_at` integer NOT NULL,\n\t`next_retry_at` integer,\n\t`retry_count` integer DEFAULT 0 NOT NULL,\n\t`request_id` text,\n\t`last_http_status` integer,\n\t`last_error_code` text,\n\t`created_at` integer NOT NULL,\n\t`updated_at` integer NOT NULL, `protocol_version` integer DEFAULT 1 NOT NULL, `account_id` text, `environment_key` text, `execute_at_raw` text, `expires_at_raw` text, `expires_at` integer, `fallback_eligible` integer DEFAULT false NOT NULL, `next_poll_at` integer, `request_started_at` integer, `started_at` integer, `waiting_previous` integer DEFAULT false NOT NULL, `operation_version` integer DEFAULT 0 NOT NULL, `projected_at` integer, `local_initial` integer DEFAULT false NOT NULL,\n\tFOREIGN KEY (`task_id`) REFERENCES `scheduled_tasks`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "scheduled_tasks",
+        "scheduled_tasks",
+        "CREATE TABLE `scheduled_tasks` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL,\n\t`description` text,\n\t`project_id` text NOT NULL,\n\t`enabled` integer DEFAULT true NOT NULL,\n\t`delete_after_run` integer,\n\t`missed_run_policy` text DEFAULT 'prompt' NOT NULL,\n\t`schedule` text NOT NULL,\n\t`payload` text NOT NULL,\n\t`next_run_at` integer,\n\t`running_at` integer,\n\t`last_run_at` integer,\n\t`last_run_status` text,\n\t`last_error` text,\n\t`last_duration_ms` integer,\n\t`consecutive_errors` integer DEFAULT 0,\n\t`created_at` integer,\n\t`updated_at` integer, `source_chat_id` text, `source_sub_chat_id` text, `deleted_at` integer, `local_project_id` text REFERENCES `local_projects`(`id`) ON UPDATE no action ON DELETE set null,\n\tFOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "session_event_log",
+        "session_event_log",
+        "CREATE TABLE `session_event_log` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`session_id` text NOT NULL,\n\t`event_stream_id` text NOT NULL,\n\t`runtime_id` text NOT NULL,\n\t`event_id` text NOT NULL,\n\t`source_event_id` text NOT NULL,\n\t`seq` integer NOT NULL,\n\t`seq_ids` text NOT NULL,\n\t`turn_id` text,\n\t`payload` blob NOT NULL,\n\t`occurred_at` text NOT NULL,\n\t`acked_at` integer,\n\t`created_at` integer NOT NULL,\n\tFOREIGN KEY (`session_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "session_event_streams",
+        "session_event_streams",
+        "CREATE TABLE `session_event_streams` (\n\t`session_id` text PRIMARY KEY NOT NULL,\n\t`runtime_id` text NOT NULL,\n\t`event_stream_id` text NOT NULL,\n\t`high_watermark_seq` integer DEFAULT 0 NOT NULL,\n\t`last_rotation_reason` text,\n\t`rotated_at` integer,\n\t`created_at` integer,\n\tFOREIGN KEY (`session_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "skill_evolution_suggestions",
+        "skill_evolution_suggestions",
+        "CREATE TABLE `skill_evolution_suggestions` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`skill_name` text NOT NULL,\n\t`action` text NOT NULL,\n\t`summary` text NOT NULL,\n\t`rationale` text,\n\t`confidence` real NOT NULL,\n\t`skill_file_hash` text,\n\t`source_sub_chat_id` text NOT NULL,\n\t`source_session_id` text,\n\t`review_id` text,\n\t`status` text DEFAULT 'pending' NOT NULL,\n\t`evolution_chat_id` text,\n\t`snapshot_path` text,\n\t`expires_at` integer,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "table",
+        "sub_chats",
+        "sub_chats",
+        "CREATE TABLE `sub_chats` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text,\n\t`chat_id` text NOT NULL,\n\t`session_id` text,\n\t`mode` text DEFAULT 'agent' NOT NULL,\n\t`messages` text DEFAULT '[]' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer, `stream_id` text, `feedback` text DEFAULT 'none', `model_level` text, `ext` text, `message_feedbacks` text DEFAULT '{}',\n\tFOREIGN KEY (`chat_id`) REFERENCES `chats`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "task_run_logs",
+        "task_run_logs",
+        "CREATE TABLE `task_run_logs` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`task_id` text NOT NULL,\n\t`chat_id` text,\n\t`sub_chat_id` text,\n\t`run_at` integer NOT NULL,\n\t`duration_ms` integer,\n\t`status` text NOT NULL,\n\t`error` text,\n\t`created_at` integer, `trigger` text,\n\tFOREIGN KEY (`task_id`) REFERENCES `scheduled_tasks`(`id`) ON UPDATE no action ON DELETE cascade\n)"
+      ],
+      [
+        "table",
+        "voice_input_history",
+        "voice_input_history",
+        "CREATE TABLE `voice_input_history` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`raw_text` text NOT NULL,\n\t`final_text` text NOT NULL,\n\t`target_app_name` text,\n\t`insert_method` text,\n\t`insert_status` text DEFAULT 'inserted' NOT NULL,\n\t`error_message` text,\n\t`created_at` integer\n)"
+      ],
+      [
+        "table",
+        "voice_input_hotwords",
+        "voice_input_hotwords",
+        "CREATE TABLE `voice_input_hotwords` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`text` text NOT NULL,\n\t`normalized_text` text NOT NULL,\n\t`enabled` integer DEFAULT true NOT NULL,\n\t`source` text DEFAULT 'manual' NOT NULL,\n\t`created_at` integer,\n\t`updated_at` integer\n)"
+      ],
+      [
+        "trigger",
+        "messages_fts_ad",
+        "messages",
+        "CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN\n      DELETE FROM messages_fts WHERE rowid = OLD.rowid;\n    END"
+      ],
+      [
+        "trigger",
+        "messages_fts_ai",
+        "messages",
+        "CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN\n      INSERT INTO messages_fts(rowid, searchable_text, chat_id, sub_chat_id, message_id, role)\n      VALUES (NEW.rowid, NEW.searchable_text, NEW.chat_id, NEW.sub_chat_id, NEW.message_id, NEW.role);\n    END"
+      ],
+      [
+        "trigger",
+        "messages_fts_au",
+        "messages",
+        "CREATE TRIGGER messages_fts_au AFTER UPDATE OF searchable_text ON messages BEGIN\n      DELETE FROM messages_fts WHERE rowid = OLD.rowid;\n      INSERT INTO messages_fts(rowid, searchable_text, chat_id, sub_chat_id, message_id, role)\n      VALUES (NEW.rowid, NEW.searchable_text, NEW.chat_id, NEW.sub_chat_id, NEW.message_id, NEW.role);\n    END"
+      ]
+    ]
+  }
+}

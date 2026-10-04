@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 from typing import Any
 
-from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter, WorkBuddyAdapter
+from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter, WorkBuddyAdapter, OfficeAdapter
 from .herdr_discovery import default_herdr_locators, local_herdr_path
 from .orca_discovery import OrcaDiscoveryError, default_orca_root, local_orca_path, reverse_account_profile
 from .record_identity import canonical_path
@@ -96,6 +96,14 @@ def create_default_adapters(args: Any) -> list[object]:
     codex_bin = args.codex_bin.expanduser() if args.codex_bin else None
     selected = selected_platforms(args.platform)
     adapters: list[object] = []
+    from .office_store import PROFILES, default_profile_roots
+    for client in PROFILES:
+        requested = tuple(getattr(args, client + "_root", ()) or ())
+        if client in selected or str(getattr(args, "client", "")) == client or requested:
+            roots = requested or default_profile_roots(client, appdata=getattr(args, "appdata", None))
+            unique = {os.path.normcase(os.path.normpath(os.fspath(root))): root for root in roots}
+            adapters.extend(OfficeAdapter(client=client, profile_root=root,
+                sdk_root=getattr(args, client + "_sdk_root", None)) for root in unique.values())
 
     if "aionui" in selected:
         aionui_home = args.aionui_codex_home or native_codex_home

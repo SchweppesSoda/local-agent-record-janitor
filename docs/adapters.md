@@ -325,6 +325,42 @@ runtime、WSL/远端及桥接副本不具备全局发现保证。持久化 lease
 writer 已停。当前运行观察不提供全盘 writer 证明，macOS/Linux 和 Orca 产品实机运行
 归属尚未验收。
 
+### 千问办公与 QoderWork：CN 只读盘点
+
+`OfficeAdapter` 以独立 `qwenwork` / `qoderwork` 客户端和引擎接入公共 records，
+共享只读基础设施，分别校验整套表、索引、外键和 FTS trigger schema。登记依据为
+2026-10-04 静态解包的官方 Windows 包：QwenWorkCN 1.2.5
+（SHA-256 `95a4a35cb4517fd145913233c171c211d00a84b4f2c84be7685db64fd6afc3c8`）与
+QoderWork CN 0.9.18（`085f668322572cca2c600f9a96e567f2f926f9830a78809966d9cc7c2e99242d`）。
+产品入口见[千问办公](https://help.aliyun.com/zh/qwenwork/desktop-usage)和
+[QoderWork](https://docs.qoder.cn/qoderwork/product-overview/what-is-qoderwork-cn)。
+国际版、其他版本和相似产品名不自动继承该资格。
+
+Windows 的数据库分别位于 `%APPDATA%/QwenWorkCN/data/agents.db` 与
+`%APPDATA%/QoderWork CN/data/agents.db`。发现同产品 stable/dev/canary profile 时
+分别列出；`--qwenwork-root` / `--qoderwork-root` 可重复指定。SDK 根分别为
+`~/.qwenworkcn`、`~/.qoderworkcn`，也可通过对应 `--*-sdk-root` 显式指定。
+同产品多个 profile 共享 SDK 根，不能从一个 profile 的会话 ID 推断 SDK 独占归属。
+
+公开记录身份是 `(client, profile, chats.id)`；`sub_chats.session_id` 才是 SDK UUID。
+只读查询保留时间、项目、子会话、规范化 messages 表的计数及云映射/任务日志/提醒
+计数，不读取 name、消息 parts、searchable_text、legacy messages 或凭据配置。
+`inventory_scope=database_metadata_and_known_sdk_paths` 仅表示该范围的读取情况。
+SDK 文件仅按 UUID 在有界目录枚举位置，不读取正文，不将相似名称当作另一产品记录。
+未知 schema、损坏关联、链接目录、读取失败或预算耗尽保持 blocked；其它已读取
+profile/记录继续显示，不将错误折叠为零记录。
+
+完整删除尚无已验证 writer。除了数据库主子行和 SDK 主/子转录，还存在 Chromium
+`agent-drafts-global` 草稿、file-history 检查点、临时计划/工具输出、逐会话日志、
+Qwen shell-outputs/sensitive-vault，以及无 FK 的自动化、fork、导入和 ACP 恢复引用。
+`agent-input-history` 是没有逐聊天归属的共享输入历史；云端映射不授权远程删除。
+主窗口的 `persist:main` 草稿数据库位于 `Partitions/main/Local Storage/leveldb`，
+不能只检查 profile 顶层 Local Storage。profile 与 SDK 分处两个物理根，开放 writer
+还需要共同冻结、持久 unknown 占用及冷恢复协议，以及办公版后台 writer 的关闭证明。
+单独删 SQLite 无法证明聊天不会恢复，因此所有写入及 verify capability 关闭；
+delete plan/run/apply、冷 status/verify 不将其升级为完成。用户文档、工作区、输出、
+登录信息、共享 memory、voice history 和全局日志不属于已批准的单条记录清理范围。
+
 ### Orca：精确原生删除的限定组合
 
 首个已验收组合限 Windows、本机 journal4/record2、一个明确 managed account home、
@@ -334,24 +370,47 @@ writer 已停。当前运行观察不提供全盘 writer 证明，macOS/Linux �
 资格；品牌、目录名和 marker 不独立授予写权限。
 
 固定 API 为真实 `codex-cli 0.160.0` Windows 原生 exe，SHA-256 为
-`7d4588265a55adb1403f85d2e058b11dc971459842de84876c86ff02fb7771f2`。
+`fdda5fa3cf3fb3d000b876720742857676293e4315e4b045fae6f8bd7e866d1d`。
+依据为官方 `rust-v0.160.0` 的 Windows standalone 包及固定源码
+[`a956835d`](https://github.com/openai/codex/tree/a956835d020762cb2b570053af06f643a11c0ecc)。
+相同版本字符串不替代文件哈希；先前登记的同版本 binary 不继承本次资格。
 要求 `state_5.sqlite` 的 SQLx 58 项及四个辅助 DB 各 2 项 migration/schema 与登记元数据
 一致，backfill 为已完成单行，rollout migration 两表为空；缺 state DB、空 DB、旧/未知
 schema 均不授予 writer，缺辅助 DB 仅允许固定运行时创建。所有共享 DB/index、已知
 rollout 必须 plain、nlink=1；已知别名、managed marker、父目录和配置来源纳入冻结。
 
-首版仅验收 home 无 `config.toml`、`auth.json`、`credentials.json`，初始无
-`installation_id`、`skills`、`tmp`、`.tmp`、`thread-writer-locks` 的组合。Windows 固定
-system config/requirements 必须不存在，祖先目录身份可证明；不读取这些系统文件。
-已有凭据或 startup artifacts 不通过本切片，不能从空 TEMP 验收推断其安全。允许的
-新建副作用仅包括已登记的辅助 SQLite family、bundled system skills、installation ID、
-精确 arg0 shim/锁和 thread coordination lock；未知叶、链接或目录替换阻挡。
+target evidence/runtime policy v2 同时验收空启动目录及带受限配置、模拟凭据、已有
+启动产物的 managed home。`config.toml` 仅接受有界的模型/推理/审批/沙箱/认证偏好、
+更新开关与项目 trust 标记；未知 key、provider/profile/hooks/MCP 表及存储重定向阻挡。
+配置只冻结哈希；`auth.json`、`.credentials.json`、`credentials.json` 仅冻结身份和
+哈希，不解析或输出值。固定 runtime 强制 ephemeral auth，不加载这些凭据。
+`environments.toml`、Windows system config/requirements 及已知相邻 package manifest
+必须不存在，祖先目录身份可证明；不读取这些配置文件。
+
+已有 startup 产物仅允许固定 bundle 的逐文件内容哈希、合法 installation UUID、
+已登记目录及 plain、单链接、空的协调锁；已有活动 arg0 bucket 阻挡。允许的新建
+副作用限已登记的辅助 SQLite family、bundled system skills、installation ID、
+精确 arg0 shim/锁、thread coordination lock 和 `.sqlite-maintenance.lock`。
+未知叶、内容漂移、链接或目录替换阻挡。
+
+原生启动会清理跨 thread 的过期日志，因此已有 `logs_2.sqlite.logs` 必须为空。
+未登记的 `thread_history_1.sqlite`、`memories_v2_1.sqlite`、
+`agent_message_board_1.sqlite` 及 WAL/SHM/journal 必须不存在；原生 index 的固定
+替换路径 `session_index.jsonl.tmp` 也必须不存在。
+所选 thread 的 `memories_1.sqlite.stage1_outputs` 不得含 `selected_for_phase2` 标记，
+避免原生删除触发未授权的全局 memory consolidation job；不限制无关 thread 的标记。
+rollout 文件名须包含有效时间戳与批准 UUID；sessions/archived_sessions 的有界枚举
+不得发现压缩 `.jsonl.zst` 副本。以上条件在执行前重查；“用过的 home”不表示任意
+业务状态都已取得写入资格。
 
 专用运行时使用完整 allowlist 环境与全新 TEMP cwd，不继承 storage override、认证、
 Git 配置/credential helper；采用固定 strict-config 覆盖并禁用 plugins/remote plugin/
 apps/hooks/skill 搜索依赖安装等启动同步。早期默认启动曾实际尝试 GitHub `ls-remote`；
 最终禁同步策略不能用 loopback proxy 拒绝本身代替验收。Windows Job 在 native spawn
 前建立，parent 为唯一 Job handle owner；父进程崩溃会回收整个子树。
+该固定版本的 remote control feature 已移除，隔离环境使用实际启动门槛
+`CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1` 关闭 transport 的认证与连接循环，
+并把此设置纳入 invocation policy；不依赖已经无效的 feature 开关。
 
 关闭资格使用真实 Toolhelp PID/父 PID/image name/birth metadata，拒绝已知 Orca 主进程、
 目标相关 lease owner 及其已知子链，保留探测错误；不采集全局 argv。无关 Codex/
@@ -364,10 +423,17 @@ binary。协议版本与 unknown 占用见 [operation 协议](operation-cli.md)�
 ```powershell
 $env:PYTHONPATH = 'src'
 python -m tests.orca_binary_acceptance --binary 'C:\absolute\pinned\codex.exe'
+python -m tests.orca_configured_acceptance --binary 'C:\absolute\pinned\codex.exe'
+# 独立检查延迟后台维护，不发送删除请求：
+python -m tests.orca_configured_acceptance --binary 'C:\absolute\pinned\codex.exe' --maintenance-warm-seconds 65
 ```
 
 入口先进入完整隔离环境的新 Python worker，再执行公共 v3 plan/cold apply/status/verify；
 结果保留在输出的 TEMP 路径。它只接受登记 SHA 和限定资格，不是 live cleanup 命令。
+配置验收还从真实启动生成 schema/skills，冻结合成配置及不合法的模拟凭据，验证
+执行前漂移阻断、父子删除、范围外哨兵保持，以及三个独立进程的 apply/status/verify。
+延长维护检查允许运行时生成自身日志，并验证下一次启动仍被空日志条件阻挡；
+不删除这些日志来制造可写资格。
 
 ### Herdr：已接入持久化只读引用
 

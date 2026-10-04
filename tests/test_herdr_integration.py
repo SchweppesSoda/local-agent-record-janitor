@@ -50,6 +50,7 @@ class HerdrIntegrationTests(unittest.TestCase):
         code, default = self.invoke(["records", "--client", "herdr", "--json"])
         self.assertEqual(default["goal_status"], "complete")  # Requested persisted metadata only.
         self.assertEqual(code, 0)
+        self.assertEqual(default["inventory_scope"], "persisted_metadata")
         self.assertTrue(all(error["blocks_delete"] for error in default["store_errors"]))
         self.assertTrue(all(not error["blocks_inventory"] for error in default["store_errors"]))
         self.assertEqual(len(default["targets"]), 14)
@@ -159,4 +160,14 @@ class HerdrIntegrationTests(unittest.TestCase):
         self.assertEqual(plan["goal_status"], "blocked")
         self.assertIn("client_capability_limit", {b["blocker_code"] for b in plan["blockers"]})
         self.assertNotIn("record_not_found", {b["blocker_code"] for b in plan["blockers"]})
+        self.writer.assert_not_called()
+
+    def test_text_inventory_success_retains_visible_cleanup_restrictions(self):
+        out, errors = StringIO(), StringIO()
+        code = main(["records", "--client", "herdr", "--herdr-root", str(self.profile)],
+                    stdout=out, stderr=errors, cleanup_service=self.service,
+                    app_server_factory=self.writer, binary_resolver=self.writer)
+        self.assertEqual(code, 0)
+        self.assertIn("清理限制", errors.getvalue())
+        self.assertIn("live_metadata_not_probed", errors.getvalue())
         self.writer.assert_not_called()

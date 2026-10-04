@@ -29,7 +29,7 @@ def create_native_schema(home):
 
 
 def add_native_record(home, thread_id, *, parent=None):
-    path = home / "sessions" / "2026" / "10" / "03" / ("rollout-" + thread_id + ".jsonl")
+    path = home / "sessions" / "2026" / "10" / "03" / ("rollout-2026-10-03T00-00-00-" + thread_id + ".jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
     source = {"subAgent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}} if parent else "cli"
     path.write_text(json.dumps({"timestamp": "2026-10-03T00:00:00.000Z", "type": "session_meta", "payload": {

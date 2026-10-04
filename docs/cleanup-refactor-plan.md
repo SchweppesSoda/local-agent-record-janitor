@@ -1,9 +1,10 @@
 # 多客户端记录清理施工方案
 
-状态：P0/P1/P2a/P2b/P3a/P3b 已落地，开发已恢复；P4 已交付持久化引用与显式本机
-live metadata 两个只读切片，全部 writer 归属仍未知；P5 已交付首个 Orca/Codex/Windows
-精确原生组合，P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
-规划现有客户端契约收口和 Orca、Herdr 接入。当前功能以 [设计与安全边界](design.md)、
+状态：P0–P4 的限定功能已落地；Herdr 持久化与显式本机 live metadata 保持只读，
+全部 writer 归属仍未知。P5 已扩展 Orca/Codex/Windows 精确原生组合至有界配置、
+凭据和已有启动产物；P6 跨平台验收未完成。本文承接已完成的 0.2.0 清理核心重构，
+规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公与 QoderWork 的独立适配。
+当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
 下文拟新增的接口、字段和能力不是支持声明。
 
@@ -18,6 +19,12 @@ reader 已接入同一公共清单和保护链；含新保护来源的顶层计�
 自定义或未证明关联的存储。
 
 ## 目标与已完成基线
+
+办公版新增范围沿用同一阶段门槛：先按独立 CN schema 和 profile 盘点主/子会话及
+SDK 位置，再逐组合证明 SQLite、转录、草稿与恢复副本闭包。当前已接入只读清单，
+完整 writer 尚受 LevelDB 草稿、共享 SDK UUID、自动化/import/fork/ACP、会话缓存、
+办公版后台进程关闭及 profile/SDK 双根持久恢复协议限制。未知格式、远程关联及生成文档不进入自动删除；边界见
+[办公版适配](adapters.md#千问办公与-qoderworkcn-只读盘点)。
 
 目标是让同一套记录清理流程正确回答：记录属于哪个客户端和存储、被谁引用、关系是否
 完整、哪些动作确实可执行，以及执行后还剩什么。新增客户端应复用身份、计划、保护和
@@ -244,11 +251,12 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 公共 v3 plan/cold apply/cold verify TEMP 验收。品牌静态 capability 仍关闭，逐目标票据
 只开放该组合；Herdr、其他引擎/home/runtime/OS 和 frontend/remote 写入继续关闭。
 
-**暂停位置（2026-10-04）：**开发暂止于 P5 首个限定组合，实现基线为 `cb2c7a6`。
-P5 其余组合与 P6 尚未完成。恢复开发时，先为正常使用过、已有配置/凭据和启动产物的
-Orca managed home 设计可冻结的兼容边界，再用合成配置与隔离临时目录中的真实程序
-验收；不得直接放宽当前阻挡条件，也不以用户真实记录试删代替验收。其他引擎、Herdr
-和跨平台能力继续按各自证据门槛推进。
+**配置兼容切片：**target evidence/runtime policy v2 使用重新固定 SHA 的官方
+Windows binary，以完整隔离环境、ephemeral auth 和配置白名单运行。合成配置、
+不合法模拟凭据、实际启动生成的 schema/skills 及未选中哨兵均纳入隔离验收，
+入口为 `tests.orca_configured_acceptance`。旧 v1 evidence 只读恢复，不改 hash；
+未开始旧计划要求重计划。日志非空、未登记额外 DB、压缩 rollout、固定临时 index
+或未知启动副作用保持阻挡，不将该切片扩张成任意已有 home 的支持声明。
 
 #### P5 首个切片的施工与验收
 
@@ -268,8 +276,8 @@ account home 的 native-only 目标及引擎必须后代；runtime home、bridge
    边界和固定 API binary 身份。共享 DB/index 的未知 hardlink、路径替换、外部
    `sqlite_home`、配置来源不能证明、未知 bridge/恢复源分别阻止，不从 marker
    推断 app-server 副作用范围。只读 alias 投影保持观察含义，不成为全盘别名证明。
-   固定 SQLite migration/schema、complete backfill、初始无配置/凭据/startup artifacts
-   均为首版资格；实际允许的新建 family/leaf 有限枚举，详见
+   固定 SQLite migration/schema、complete backfill、v2 配置和既有 startup 内容证明
+   均为当前资格；实际允许的新建 family/leaf 有限枚举，详见
    [精确组合限制](adapters.md#orca精确原生删除的限定组合)。
 3. **显式协议版本：**新授权边界采用条件 `larj.operation-plan.v3`，仅受影响
    顶层计划携带有版本的 target safety evidence，并纳入同一 approval hash。
@@ -300,8 +308,8 @@ account home 的 native-only 目标及引擎必须后代；runtime home、bridge
 上述关闭检查、冻结/复查与真实 binary 隔离验收共同决定逐目标资格，不翻转品牌
 capability。当前完成范围继续限于
 [冻结 paths/rows/approved references](agent-automation.md#result-contract)，不要求证明
-全盘未知副本或所有无关 writer 消失。已有配置/凭据/startup artifacts、未完成 backfill、
-未知 schema、bridge、runtime home 及其他组合继续阻挡，不从空 TEMP 正例推广支持。
+全盘未知副本或所有无关 writer 消失。未通过白名单的配置或 startup 内容、未完成
+backfill、未知 schema、bridge、runtime home 及其他组合继续阻挡，不从 TEMP 正例推广支持。
 
 依据：[lease schema](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/shared/agent-session-record.ts)、
 [close predicate](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/structured-agent-session-close.ts)、
@@ -339,8 +347,9 @@ writer 已停时，对应 native 删除继续阻止。删除前端引用与删�
 
 ### P6：发布收口
 
-**当前状态：**本地验证使用 Windows 合成临时存储；macOS/Linux 实机及 CI 矩阵尚未执行，
-不以语法检查或平台 skip 代替验收。
+**当前状态：**本地验证使用 Windows 合成临时存储。已审阅既有六格 CI 的失败证据并
+修正跨平台路径、权限及环境夹具；当前源码的 macOS/Linux 实际矩阵尚待执行，
+不以语法检查、源码复核或平台 skip 代替验收。
 
 沿用 Windows/macOS/Linux × Python 3.10/3.12 的既有 CI 矩阵。链接、文件身份和
 进程归属等平台相关能力，须在实际支持平台执行对应测试；skip 不作为该能力通过的

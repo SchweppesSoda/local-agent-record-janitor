@@ -1031,6 +1031,11 @@ def _add_common_arguments(
                         help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
     parser.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
                         help="WorkBuddy 独立配置根目录（可重复；默认 WORKBUDDY_CONFIG_DIR 或 ~/.workbuddy）")
+    for office_client, label in (("qwenwork", "千问办公 CN"), ("qoderwork", "QoderWork CN")):
+        parser.add_argument("--" + office_client + "-root", action="append", default=[], type=Path, metavar="PATH",
+                            help=label + " userData 根目录（可重复；只读盘点）")
+        parser.add_argument("--" + office_client + "-sdk-root", type=Path, metavar="PATH",
+                            help=label + " SDK 数据根目录（只读检查会话文件位置）")
     if not codex_only:
         parser.add_argument(
             "--pi-agent-dir",
@@ -1068,7 +1073,7 @@ def _add_operation_scope_arguments(
 
     parser.add_argument(
         "--client",
-        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr", "workbuddy"),
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr", "workbuddy", "qwenwork", "qoderwork"),
         required=client_required,
         help=(
             "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
@@ -1139,6 +1144,8 @@ _CLIENT_PLATFORM_MAP = {
     "orca": "orca",
     "herdr": "herdr",
     "workbuddy": "workbuddy",
+    "qwenwork": "qwenwork",
+    "qoderwork": "qoderwork",
 }
 _OPERATION_BODY_KEYS = frozenset(
     {
@@ -1174,7 +1181,7 @@ def _normalize_client_name(value: object) -> str:
     except KeyError as exc:
         raise ValueError(
             "--client 必须指定一个受支持的客户端："
-            "native、codex-native、cindy、aionui、pi、claude、orca、herdr 或 workbuddy"
+            "native、codex-native、cindy、aionui、pi、claude、orca、herdr、workbuddy、qwenwork 或 qoderwork"
         ) from exc
 
 
@@ -1456,6 +1463,8 @@ def _run_operation_backend(
 
     try:
         if verb == "plan":
+            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork"}:
+                supplied_adapters = _create_default_adapters(args)
             operation_kwargs: dict[str, Any] = {
                 "client": str((scope or {}).get("client") or ""),
                 "projects": tuple((scope or {}).get("projects", ())),
@@ -1500,6 +1509,8 @@ def _run_operation_backend(
                 operation_kwargs["progress_callback"] = progress_callback
             result = coordinator.apply_operation(**operation_kwargs)
         elif verb == "run":
+            if supplied_adapters is None and (scope or {}).get("client") in {"qwenwork", "qoderwork"}:
+                supplied_adapters = _create_default_adapters(args)
             operation_kwargs = {
                 "client": str((scope or {}).get("client") or ""),
                 "projects": tuple((scope or {}).get("projects", ())),
@@ -2947,7 +2958,7 @@ def _run_client_records(
         if any(error_matches_group(error, key) for key in selected_group_keys):
             relevant_errors.append(error)
     relevant_errors = list(dict.fromkeys(relevant_errors))
-    inventory_blockers = [error for error in relevant_errors if getattr(error, "blocks_inventory", True)]
+    inventory_blockers = [error for error in relevant_errors if getattr(error, "blocks_inventory", True) is not False]
 
     payload = {
         "schema_version": "larj.client-records.v1",
@@ -3004,6 +3015,10 @@ def _run_client_records(
     payload["snapshot_id"] = "inventory:v1:" + hashlib.sha256(
         json.dumps(rendered_targets, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+    if client == "herdr":
+        payload["inventory_scope"] = "persisted_and_live_metadata" if args.inspect_clients else "persisted_metadata"
+    elif client in {"qwenwork", "qoderwork"}:
+        payload["inventory_scope"] = "database_metadata_and_known_sdk_paths"
     from .client_inventory import collect_client_file_aliases, collect_shared_store_file_aliases
     payload["file_aliases"] = collect_client_file_aliases(contexts, selected).to_dict()
     payload["shared_store_file_aliases"] = collect_shared_store_file_aliases(contexts, selected)
@@ -3087,6 +3102,9 @@ def _run_client_records(
             f"  阻塞：{blocker['blocker_code']} "
             f"{_human_message(blocker['message'])}\n"
         )
+    for error in relevant_errors:
+        if getattr(error, "blocks_inventory", True) is False:
+            stderr.write(f"  清理限制：{_human_message(str(error.message))}\n")
     return EXIT_OK if not inventory_blockers else EXIT_ERROR
 
 

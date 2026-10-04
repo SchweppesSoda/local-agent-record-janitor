@@ -69,7 +69,8 @@ class IsolatedCodexRuntimeTests(unittest.TestCase):
     def test_runtime_allowlist_isolates_all_homes_git_credentials_and_configuration(self):
         with patch("local_agent_record_janitor.orca_runtime._windows_directory", return_value=self.root), patch.dict(
                 os.environ, {"OPENAI_API_KEY": "PRIVATE_TEST_SENTINEL", "SSH_AUTH_SOCK": "outside",
-                             "GIT_CONFIG_COUNT": "99", "CODEX_SQLITE_HOME": "outside"}):
+                             "GIT_CONFIG_COUNT": "99", "CODEX_SQLITE_HOME": "outside",
+                             "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED": "0"}):
             environment, cwd = isolated_environment(self.root, self.home)
         for name in ("OPENAI_API_KEY", "SSH_AUTH_SOCK", "CODEX_SQLITE_HOME"):
             self.assertNotIn(name, environment)
@@ -81,6 +82,7 @@ class IsolatedCodexRuntimeTests(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_COUNT"], "2")
         self.assertEqual(environment["GIT_CONFIG_VALUE_0"], "")
         self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(environment["CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED"], "1")
         self.assertEqual(Path(environment["GIT_CONFIG_GLOBAL"]).read_bytes(), b"")
 
     @unittest.skipUnless(os.name == "nt", "Binary acceptance wrapper uses Windows isolation")
