@@ -76,6 +76,18 @@ class HerdrFullflowTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "execution_ticket_required"):
             herdr_cleanup.execute(evidence, phase_callback=lambda _: self.fail("no standalone writer"))
 
+    def test_native_actions_cannot_grant_their_own_scope(self):
+        add_native_record(self.home, CODEX_ID)
+        evidence = herdr_cleanup.evidence_from_document(self.plan())
+        extra = copy.deepcopy(evidence["native_actions"][0])
+        other = "44444444-4444-4444-8444-444444444444"
+        extra.update(action_id="unowned", thread_id=other, affected_thread_ids=[other])
+        evidence["native_actions"].append(extra)
+        evidence["native_targets"][0]["action_ids"].append("unowned")
+        evidence["native_targets"][0]["ids"].append(other)
+        with self.assertRaisesRegex(herdr_cleanup.codec.HerdrCleanupError, "native_action_owner_unproven"):
+            herdr_cleanup.validate(evidence)
+
     def test_same_process_retains_other_clients_shared_native_guards(self):
         import sqlite3
         from contextlib import closing

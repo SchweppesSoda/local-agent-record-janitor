@@ -37,6 +37,19 @@ def frozen_pi_id(path):
     return next(iter(values), None)
 
 
+def pi_reference_matches_action(reference, path):
+    native = reference["native_record"]
+    try:
+        Path(native["path"]).lstat()
+    except FileNotFoundError:
+        # Pi freezes its writer path with normcase. Once removed, Windows
+        # cannot recover physical casing from either alias; use the frozen
+        # physical identity in precisely that writer encoding.
+        from .pi_sessions import _normalized_path
+        return _normalized_path(Path(native["canonical_path"])) == path
+    return canonical_path(native["path"]) == canonical_path(path)
+
+
 @contextmanager
 def planning_scope(evidence):
     validate(evidence)
@@ -102,6 +115,11 @@ def validate(evidence):
                 actual_root = action.get("herdr_native_root")
             if action["kind"] != kind or actual_root is None or canonical_path(actual_root) != target["root"]:
                 codec.fail("native_action_binding_changed")
+            owners = [r for r in evidence["references"] if r["engine"] == target["engine"]
+                and r["native_id"] == action["thread_id"] and r["native_record"]["store"]["canonical_path"] == target["root"]]
+            if not owners or target["engine"] == "pi" and not any(
+                    pi_reference_matches_action(r, payload["path"]) for r in owners):
+                codec.fail("native_action_owner_unproven")
             covered.update((action["thread_id"], *action["affected_thread_ids"], *impact.get("descendant_thread_ids", ())))
             if target["engine"] == "pi" and canonical_path(payload["path"]) not in set(map(canonical_path, target["paths"])):
                 codec.fail("pi_action_path_changed")
