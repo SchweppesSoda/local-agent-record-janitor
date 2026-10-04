@@ -23,6 +23,10 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "delete_office_frontend": ActionCapability("delete_office_frontend", True, "delete_office_frontend", True,
+        "frozen_office_database_ui_and_vault_closure_absent"),
+    "delete_office_artifacts": ActionCapability("delete_office_artifacts", True, "delete_office_artifacts", True,
+        "frozen_office_sdk_session_and_subagent_artifacts_absent"),
     "remove_workbuddy_ui_reference": ActionCapability(
         kind="remove_workbuddy_ui_reference", implemented=True,
         mutation_family="remove_workbuddy_ui_reference", requires_clients_closed=True,
@@ -152,11 +156,11 @@ def capability_field_for_action(kind: object) -> str | None:
     family = action_capability(kind).mutation_family
     if family in {"delete_conversation", "delete_pi_session", "delete_claude_session",
                   "repair_legacy_index", "remove_desktop_state", "remove_broken_relation",
-                  "delete_workbuddy_session"}:
+                  "delete_workbuddy_session", "delete_office_artifacts"}:
         return "native_delete"
     if family in {"remove_frontend_reference", "remove_workbuddy_ui_reference"}:
         return "frontend_reference_delete"
-    if family in {"delete_frontend_session", "delete_schedule_run"}:
+    if family in {"delete_frontend_session", "delete_schedule_run", "delete_office_frontend"}:
         return "frontend_session_delete"
     if family in {"delete_project_item", "delete_native_project"}:
         return "frontend_project_delete"

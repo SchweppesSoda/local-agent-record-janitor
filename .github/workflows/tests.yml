@@ -35,5 +35,18 @@ jobs:
       - name: Install package
         run: python -m pip install --disable-pip-version-check -e .
 
+      - name: Set up pinned LevelDB runtime host
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install exact Office LevelDB dependency
+        env:
+          LARJ_LEVELDB_RUNTIME: ${{ runner.temp }}/larj-leveldb-runtime
+        run: python -m local_agent_record_janitor.office_leveldb --install
+
       - name: Run unit tests
+        env:
+          LARJ_LEVELDB_RUNTIME: ${{ runner.temp }}/larj-leveldb-runtime
+          LARJ_REQUIRE_LEVELDB_TESTS: "1"
         run: python -m unittest discover -s tests -v

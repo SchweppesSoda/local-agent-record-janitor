@@ -104,10 +104,12 @@ local-agent-record-janitor records --client qoderwork --json
 local-agent-record-janitor records --client qwenwork --qwenwork-root 'D:\profiles\QwenWorkCN' --qwenwork-sdk-root 'D:\sdk\.qwenworkcn' --json
 ```
 
-当前支持 QwenWorkCN 1.2.5 与 QoderWork CN 0.9.18 的已核实 schema；未知格式报告
-不完整清单。清单不读取消息正文或登录凭据。完整清理仍受草稿、恢复副本、共享 SDK
-会话和云端引用的证据限制，删除入口保持 blocked，用户生成的文件保留。详见
-[办公版适配边界](docs/adapters.md#千问办公与-qoderworkcn-只读盘点)。
+当前支持 QwenWorkCN 1.2.5 与 QoderWork CN 0.9.18 的已核实 schema。本地会话可通过
+`delete plan/apply` 清理数据库、SDK 转录与会话缓存、草稿及已识别的界面引用，再用
+`operation status/verify` 核查结果。安装固定 LevelDB 依赖的方法见
+[办公版操作说明](docs/operation-cli.md#office-local-sessions)。清单不读取消息正文或
+登录凭据；云端、共享 SDK、自动化和无法证明归属的恢复引用仍会阻止对应目标删除。
+用户生成的文件保留。详见[办公版适配边界](docs/adapters.md#千问办公与-qoderworkcn-本地会话清理)。
 
 ### Paseo
 
@@ -181,7 +183,7 @@ OpenAI 稳定 API。
 | WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session` 与独立 `remove_workbuddy_ui_reference`；已证明的本地终态会话或仅置顶引用，未知归属及云同步关联阻止删除 |
 | Orca | 本机 journal 引用及已证明的 managed Codex home | 限定 Windows/Codex 组合逐目标验证删除资格；其他引擎、runtime home、桥接与远端写入关闭 |
 | Herdr | 持久化 current/restore 引用及显式本机 live metadata | 只读盘点；native root 与完整 writer 归属未证明，删除及自身终验关闭 |
-| 千问办公 / QoderWork CN | 已核实 CN schema 的主/子会话元数据和已知 SDK 文件位置 | 只读盘点；草稿、恢复副本和共享 SDK 的完整清理范围未证明 |
+| 千问办公 / QoderWork CN | 已核实 CN schema、独占 SDK 记录、界面缓存与逐会话文件 | 本地会话分 SDK/profile 两批删除并冷验证；云端、共享或未知恢复引用阻止对应目标 |
 | Paseo | 当前及旧格式 agent 注册快照、归档状态和恢复引用 | 只读盘点；不推断 provider 原生存储归属或 daemon 已停止 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
 | Codex：rollout-only | rollout 内容文件存在，但 thread 列表记录不存在 | 删除整个 thread，属于 `high`，必须明确选择 |

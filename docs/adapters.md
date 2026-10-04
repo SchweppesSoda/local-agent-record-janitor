@@ -328,10 +328,10 @@ runtime、WSL/远端及桥接副本不具备全局发现保证。持久化 lease
 writer 已停。当前运行观察不提供全盘 writer 证明，macOS/Linux 和 Orca 产品实机运行
 归属尚未验收。
 
-### 千问办公与 QoderWork：CN 只读盘点
+### 千问办公与 QoderWork：CN 本地会话清理
 
 `OfficeAdapter` 以独立 `qwenwork` / `qoderwork` 客户端和引擎接入公共 records，
-共享只读基础设施，分别校验整套表、索引、外键和 FTS trigger schema。登记依据为
+共享盘点与删除基础设施，分别校验整套表、索引、外键和 FTS trigger schema。登记依据为
 2026-10-04 静态解包的官方 Windows 包：QwenWorkCN 1.2.5
 （SHA-256 `95a4a35cb4517fd145913233c171c211d00a84b4f2c84be7685db64fd6afc3c8`）与
 QoderWork CN 0.9.18（`085f668322572cca2c600f9a96e567f2f926f9830a78809966d9cc7c2e99242d`）。
@@ -353,16 +353,31 @@ SDK 文件仅按 UUID 在有界目录枚举位置，不读取正文，不将相�
 未知 schema、损坏关联、链接目录、读取失败或预算耗尽保持 blocked；其它已读取
 profile/记录继续显示，不将错误折叠为零记录。
 
-完整删除尚无已验证 writer。除了数据库主子行和 SDK 主/子转录，还存在 Chromium
-`agent-drafts-global` 草稿、file-history 检查点、临时计划/工具输出、逐会话日志、
-Qwen shell-outputs/sensitive-vault，以及无 FK 的自动化、fork、导入和 ACP 恢复引用。
-`agent-input-history` 是没有逐聊天归属的共享输入历史；云端映射不授权远程删除。
-主窗口的 `persist:main` 草稿数据库位于 `Partitions/main/Local Storage/leveldb`，
-不能只检查 profile 顶层 Local Storage。profile 与 SDK 分处两个物理根，开放 writer
-还需要共同冻结、持久 unknown 占用及冷恢复协议，以及办公版后台 writer 的关闭证明。
-单独删 SQLite 无法证明聊天不会恢复，因此所有写入及 verify capability 关闭；
-delete plan/run/apply、冷 status/verify 不将其升级为完成。用户文档、工作区、输出、
-登录信息、共享 memory、voice history 和全局日志不属于已批准的单条记录清理范围。
+已支持的本地会话沿现有 `plan → apply → status/verify` 执行。完整 ID 选择可以包含
+未软删除聊天；项目范围默认只选软删除聊天。数据库事务删除主/子行、关联消息、FTS
+投影和独占 nudge，保留项目与其他聊天，并更新 Qwen sidebarTaskLayout。SDK 批次包括
+主转录、已证明归属的 subagent、session-memory、file-history、工具/图片缓存和会话
+日志；Qwen 还处理逐子会话 shell/sandbox 输出和 sensitive-vault 条目，保留主密钥。
+文件身份、完整清单和哈希必须在执行前仍与计划相符。
+
+Chromium 数据库同时检查 profile 顶层与 `Partitions/main/Local Storage/leveldb`。
+显式安装的 Node/classic-level 固定依赖在私有副本上制定计划；验证物理文件、逻辑
+投影及运行时代码后，才对原库同步写入并冷读取核验。清理逐聊天草稿、置顶、打开的
+子会话、已识别的布局与恢复上下文，同时更新 Chromium origin 元数据。无逐聊天
+归属的 `agent-input-history`、模型偏好、预览设置和登录数据保留。未知格式或校验
+失败不降级为仅删 SQLite。安装步骤见[Office CLI](operation-cli.md#office-local-sessions)。
+
+profile 与 SDK 分成独立物理根批次，同时冻结并检查旧 unknown 操作。SDK 批次经
+验证完成后才释放 profile 批次；每次修改前持久记录 mutation checkpoint，部分失败
+保持 unknown，不自动重发。冷 status/verify 从原计划还原根目录，检查所选记录及
+未知操作的保留数据投影。执行要求办公主进程、helper、SDK CLI/worker 及其子进程
+已退出；不能从缺少主窗口推断数据目录已停止写入。
+
+同产品其他 profile 的 SDK UUID 引用参与冻结；共享 UUID、未选 fork、云端映射、
+选中会话关联的自动化/import/ACP 恢复引用、未知 schema 和不确定文件归属逐项
+阻断。云端映射不授权远程删除。用户文档、工作区、输出、登录信息、共享 memory、
+voice history 和全局日志不属于单条记录清理范围。支持依据是上述 CN schema 和
+临时数据上的真实 SQLite/LevelDB 操作，不代表其他发行版本或真实客户端重启已验收。
 
 ### Orca：精确原生删除的限定组合
 

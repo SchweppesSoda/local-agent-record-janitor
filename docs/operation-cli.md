@@ -6,7 +6,7 @@ partitioning, journal recovery, mutation, and verification belong to the
 `OperationCoordinator`, which delegates storage work to `CleanupService`. The
 CLI does not maintain a second scanner or mutation implementation. The
 implemented deletion paths currently cover healthy/native records with a
-frozen frontend closure, Cindy Pi/Claude sessions, exact supported local WorkBuddy sessions, and Cindy frontend sessions
+frozen frontend closure, Cindy Pi/Claude sessions, exact supported local WorkBuddy and Office sessions, and Cindy frontend sessions
 whose exact row status is `deleted`. AionUI orphan
 project/conversations rows are executable only for the probed supported schema
 with immutable row evidence and zero `acp_session` references; other schemas
@@ -204,7 +204,7 @@ upstream FTS trigger definitions and index layouts. Unknown triggers return a
 See [Cindy storage contract](cindy-storage-contract.md) for pinned upstream
 sources, the closed-client CJK fallback, and regression fixtures.
 
-## QwenWork and QoderWork office metadata
+## Office local sessions
 
 `records --client qwenwork|qoderwork` reads independently registered CN database
 schemas and known SDK UUID locations. Repeatable `--qwenwork-root` /
@@ -212,11 +212,39 @@ schemas and known SDK UUID locations. Repeatable `--qwenwork-root` /
 select the shared SDK root for that product. IDs stay qualified by client and
 profile. Unknown schemas and inaccessible sources cannot produce empty success.
 
-`inventory_scope=database_metadata_and_known_sdk_paths` does not promise the
-complete restoration/draft closure. All writer and verify capabilities remain
-false. Plans with no authorized actions stay blocked through apply, status and
-verify. No message, credential, workspace, generated artifact or cloud entity is
-deleted. See [the evidence and limits](adapters.md#千问办公与-qoderworkcn-只读盘点).
+`inventory_scope=database_metadata_and_known_sdk_paths` describes the body-free
+inventory. Planning separately freezes the complete supported local closure.
+Select full `chats.id` values for retained conversations; project/all-projects
+scope selects only soft-deleted conversations. Install the pinned LevelDB
+dependency explicitly before planning profiles with Chromium storage:
+
+```powershell
+python -m local_agent_record_janitor.office_leveldb --install
+local-agent-record-janitor delete plan --client qwenwork --record-id '<chat ID>' --out office-plan.json --json
+local-agent-record-janitor delete apply --operation-id '<operation ID from plan>' --plan office-plan.json --clients-closed --json
+local-agent-record-janitor operation verify --operation-id '<operation ID from plan>' --plan office-plan.json --json
+```
+
+Use `qoderwork` for QoderWork CN. The dependency installer requires Node.js 18
+or newer and npm; it installs the locked `classic-level` package without install
+scripts. `LARJ_LEVELDB_RUNTIME` can select a dedicated runtime directory.
+Deletion never installs dependencies implicitly. Freeze/apply bind the Node
+binary, helper and dependency code, native library, physical store and logical
+before/after projections. Planning and status inspect private copies.
+
+Each operation has SDK `delete_office_artifacts` and profile
+`delete_office_frontend` batches. Native transcripts and owned caches must be
+verified deleted before the profile's database, drafts and known UI references
+are removed. Unknown prior operations on either root block the operation before
+its first mutation. A partial write stays unknown; cold status/verify use the
+original roots and evidence without retrying writes. Close Office main/helper
+processes and SDK workers first; `--clients-closed` does not bypass process checks.
+
+Only the registered CN schemas and proven local ownership qualify. Shared SDK
+UUIDs, selected remote mappings, automation/import/fork/ACP recovery references,
+unknown UI formats, changed runtime or store evidence produce targeted blockers.
+Workspace files, generated artifacts, credentials and cloud records are preserved.
+See [the evidence and limits](adapters.md#千问办公与-qoderworkcn-本地会话清理).
 
 ## Paseo agent registry metadata
 

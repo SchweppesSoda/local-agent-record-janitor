@@ -38,4 +38,4 @@ Issues = "https://github.com/SchweppesSoda/local-agent-record-janitor/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-local_agent_record_janitor = ["workbuddy_schema_562.json", "orca_startup_0160.json", "office_schemas.json"]
+local_agent_record_janitor = ["workbuddy_schema_562.json", "orca_startup_0160.json", "office_schemas.json", "leveldb_runtime/*.cjs", "leveldb_runtime/*.json"]

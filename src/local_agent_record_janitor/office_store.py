@@ -1,8 +1,7 @@
-"""Metadata-only QwenWork CN and QoderWork CN inventories.
+"""Body-free inventories for QwenWork CN and QoderWork CN.
 
-The products share database concepts, but have separate schema registrations,
-profiles and SDK homes. No writer is registered: SQLite, SDK checkpoints,
-cloud bindings and Chromium drafts do not yet have one proven deletion scope.
+office_cleanup qualifies the complete selected closure at plan time; ordinary
+inventory never opens Chromium storage or reads conversation bodies.
 """
 
 from __future__ import annotations
@@ -123,7 +122,8 @@ def read_database(client: str, root: Path) -> dict:
         if row["sub_chat_id"] not in by_child or by_child[row["sub_chat_id"]]["chat_id"] != row["chat_id"]:
             raise ValueError("office_relations_inconsistent")
     reference_errors = []
-    if any(row["sub_chat_id"] is not None and row["sub_chat_id"] not in by_child for row in nudges):
+    if any(row["sub_chat_id"] is not None and not any(identifier == row["sub_chat_id"] or identifier[:8] == row["sub_chat_id"]
+            for identifier in by_child) for row in nudges):
         reference_errors.append("office_nudge_references_unresolved")
     if any((row["chat_id"] is not None and row["chat_id"] not in by_chat)
            or (row["sub_chat_id"] is not None and (row["sub_chat_id"] not in by_child
@@ -242,11 +242,9 @@ class OfficeAdapter:
                     binding, native_record=RecordKey(store, row["id"], kind="office_chat"),
                     kind=ReferenceKind.CURRENT, lifecycle=ReferenceLifecycle.DELETED if row["deleted_at"] is not None else ReferenceLifecycle.UNKNOWN,
                     source_locator="chats/id/" + row["id"], evidence_complete=not errors))
-        errors.append(SourceFailure(str(source), "office_writer_and_recovery_scope_unverified", profile_root=self.profile_root,
-            database=source, store=store, error_type="OfficeCleanupUnavailable", blocks_inventory=False))
         descriptor = ClientDescriptor(self.client, profile_root=self.profile_root, sources=(source,), native_stores=(store,),
             owner_process_root=self.profile_root, inventory_engines=(self.client,),
-            capability_limits=(EngineCapability(self.client, self.client, verify=False),))
+            capability_limits=(EngineCapability(self.client, self.client, native_delete=True, frontend_session_delete=True, verify=True),))
         self._snapshot = ReferenceSnapshot(descriptor, tuple(references), tuple(errors))
         return self._snapshot
 
@@ -261,7 +259,8 @@ def build_inventory(adapters, *, client, engines=()):
         raise ValueError("office_adapter_missing")
     descriptors, errors, references, targets, projects, databases = [], [], [], [], {}, []
     seen_profiles = {}
-    capability = EngineCapability(client, client, verify=False, reason="Office metadata is readable; complete record deletion is not qualified")
+    capability = EngineCapability(client, client, native_delete=True, frontend_session_delete=True, verify=True,
+        reason="Exact-schema local conversation cleanup; complete selected closure is checked by delete plan")
     for adapter in selected:
         snap = adapter.snapshot_references()
         descriptors.append(snap.descriptor)
@@ -294,7 +293,9 @@ def build_inventory(adapters, *, client, engines=()):
             for identifier in {row["chat_id"], child_chat.get(row["sub_chat_id"])} - {None}:
                 run_counts[identifier] += row["run_count"]
         for row in observed["nudge_references"]:
-            nudge_counts[child_chat.get(row["sub_chat_id"])] += row["nudge_count"]
+            owners = {chat for child, chat in child_chat.items() if child == row["sub_chat_id"] or child[:8] == row["sub_chat_id"]}
+            for owner in owners:
+                nudge_counts[owner] += row["nudge_count"]
         for ref in snap.references:
             chat = observed["chats"][ref.native_id]
             project_row = observed["projects"][chat["project_id"]]
@@ -307,7 +308,7 @@ def build_inventory(adapters, *, client, engines=()):
             targets.append(ClientTarget(client, client, ref.native_record, project, ref.native_id,
                 (ref.binding_key,), RecordClassification.PARTIAL_REMOTE if cloud else RecordClassification.UNVERIFIED,
                 capability, references=(ref,), frontend_binding_keys=(ref.binding_key,),
-                blocker_codes=("office_writer_and_recovery_scope_unverified",),
+                blocker_codes=("office_remote_session_requires_remote_contract",) if cloud else (),
                 record_metadata={"schema_version": observed["schema_version"], "edition": "CN",
                     "created_at": chat["created_at"], "updated_at": chat["updated_at"],
                     "archived_at": chat["archived_at"], "deleted_at": chat["deleted_at"],
@@ -320,11 +321,12 @@ def build_inventory(adapters, *, client, engines=()):
                     "sdk_root": str(adapter.sdk_root),
                     "sdk_artifacts": [artifact for row in children for artifact in observed.get("sdk_artifacts", {}).get(row["session_id"], ())],
                     "coverage": {"scope": "database_metadata_and_known_sdk_paths", "message_bodies_read": False,
-                        "full_record_closure": False, "cloud_delete": False,
-                        "unverified_stores": ["chromium_drafts", "global_input_history", "shared_sdk_profiles", "shell_outputs", "sensitive_vault", "import_and_fork_references", "global_logs"]}}))
+                        "full_record_closure": False, "closure_validation": "delete_plan_required", "cloud_delete": False,
+                        "preserved_shared_data": ["global_input_history", "global_logs", "shared_memories", "generated_outputs", "account_settings"]}}))
     names = tuple(engines) or (client,)
     return ClientInventory(client=client, engines=names, projects=tuple(projects.values()), records=(), frontend_sessions=(),
-        unmapped_frontend_sessions=(), targets=tuple(targets), capabilities={name: EngineCapability(client, name, verify=False,
+        unmapped_frontend_sessions=(), targets=tuple(targets), capabilities={name: EngineCapability(client, name, verify=True,
+            native_delete=name == client, frontend_session_delete=name == client,
             reason=capability.reason) for name in names}, errors=tuple(errors), descriptors=tuple(descriptors),
         references=tuple(references), scanned_databases=tuple(databases),
         scanned_resources=tuple((canonical_path(path), "office_chats") for path in databases))

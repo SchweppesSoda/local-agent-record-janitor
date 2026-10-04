@@ -1,9 +1,9 @@
 # 多客户端记录清理施工方案
 
-状态：P0–P4 的限定功能已落地；Herdr 持久化与显式本机 live metadata 保持只读，
-全部 writer 归属仍未知。P5 已扩展 Orca/Codex/Windows 精确原生组合至有界配置、
-凭据和已有启动产物；P6 已完成六组实际平台 CI 与 Windows 隔离发行包验收。
-本轮限定交付范围完成，未证明的删除组合继续关闭。本文承接已完成的 0.2.0 清理核心重构，
+状态：P0–P4 的限定功能已落地；后续完整删除流程继续开发。办公版已接入本地
+SQLite、SDK 文件和 Chromium 界面状态的双根删除及冷验证；Herdr、Paseo 和 Orca
+前端恢复状态的完整删除仍待补齐。此前 P5 的 Orca/Codex/Windows 原生组合与 P6
+平台验收仅代表当时范围，不能替代新增全流程的验收。本文承接已完成的 0.2.0 清理核心重构，
 规划现有客户端契约收口和 Orca、Herdr 接入；追加千问办公、QoderWork 与 Paseo 的独立适配。
 当前功能以 [设计与安全边界](design.md)、
 [Operation CLI](operation-cli.md) 和 [Adapter 贡献指南](adapters.md) 为准；
@@ -22,10 +22,11 @@ reader 已接入同一公共清单和保护链；含新保护来源的顶层计�
 ## 目标与已完成基线
 
 办公版新增范围沿用同一阶段门槛：先按独立 CN schema 和 profile 盘点主/子会话及
-SDK 位置，再逐组合证明 SQLite、转录、草稿与恢复副本闭包。当前已接入只读清单，
-完整 writer 尚受 LevelDB 草稿、共享 SDK UUID、自动化/import/fork/ACP、会话缓存、
-办公版后台进程关闭及 profile/SDK 双根持久恢复协议限制。未知格式、远程关联及生成文档不进入自动删除；边界见
-[办公版适配](adapters.md#千问办公与-qoderworkcn-只读盘点)。
+SDK 位置，再逐组合证明 SQLite、转录、草稿与恢复副本闭包。已实现普通本地会话的
+双根批次、LevelDB 草稿和界面引用清理、逐会话缓存、后台进程检查与持久恢复协议。
+共享 SDK UUID、所选会话的自动化/import/fork/ACP 引用仍逐项阻断。未知格式、
+远程关联及生成文档不进入自动删除；边界见
+[办公版适配](adapters.md#千问办公与-qoderworkcn-本地会话清理)。
 
 Paseo 已接入固定源码下的 agent 注册快照盘点：保留 profile 身份、归档和恢复引用，
 重复副本不覆盖。提供者根目录、daemon/监督进程/插件 writer、调度和子代理引用尚不能

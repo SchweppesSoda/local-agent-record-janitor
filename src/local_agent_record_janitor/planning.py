@@ -42,6 +42,8 @@ _DEFAULT_ROLLOUT_READER = find_thread_rollouts
 
 
 class ActionKind(str, Enum):
+    DELETE_OFFICE_FRONTEND = "delete_office_frontend"
+    DELETE_OFFICE_ARTIFACTS = "delete_office_artifacts"
     DELETE_CONVERSATION = "delete_conversation"
     REMOVE_BROKEN_RELATION = "remove_broken_relation"
     REPAIR_INDEX_PATH = "repair_index_path"
@@ -315,7 +317,7 @@ class CandidateAction:
                     else None
                 ),
             }
-        elif self.resource_kind in {"workbuddy_session", "workbuddy_ui_reference"}:
+        elif self.resource_kind in {"workbuddy_session", "workbuddy_ui_reference", "office_session"}:
             resource = {"kind": self.resource_kind, "target": self.target.to_dict(),
                         "database": self.impact.resource_path,
                         "artifact_paths": list(self.impact.external_artifact_paths)}

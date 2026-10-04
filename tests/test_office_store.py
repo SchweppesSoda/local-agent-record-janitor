@@ -81,23 +81,27 @@ class OfficeStoreTests(unittest.TestCase):
                 self.assertEqual(record["record_metadata"]["message_count"], 1)
                 self.assertEqual(record["record_metadata"]["sub_chats"][0]["session_id"], SDK_ID)
                 self.assertEqual(record["record_metadata"]["sdk_artifacts"][0]["path"], str(transcript))
-                self.assertFalse(record["capability"]["native_delete"])
-                self.assertFalse(record["capability"]["verify"])
+                self.assertTrue(record["capability"]["native_delete"])
+                self.assertTrue(record["capability"]["verify"])
+                self.assertEqual(record["record_metadata"]["coverage"]["closure_validation"], "delete_plan_required")
                 self.assertEqual(record["action_ids"], [])
                 self.assertEqual(before, {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before})
 
-    def test_plan_run_apply_and_cold_queries_keep_inventory_only_without_false_completion(self):
+    def test_remote_scope_plan_run_apply_and_cold_queries_remain_blocked_without_false_completion(self):
         for client in PROFILES:
             with self.subTest(client=client):
                 root = self.fixture(client)
                 path = self.root / (client + "-plan.json")
                 database = root / "data" / "agents.db"
+                with closing(sqlite3.connect(database)) as connection:
+                    connection.execute("INSERT INTO rc_session_mappings(sub_chat_id,chat_id,cwd,remote_session_id) VALUES ('child-1','chat-1',?,'remote')", (str(self.root),))
+                    connection.commit()
                 database_before = hashlib.sha256(database.read_bytes()).hexdigest()
                 code, plan = self.invoke("delete", "plan", "--client", client, "--" + client + "-root", str(root),
                     "--record-id", "chat-1", "--out", str(path), "--json")
                 self.assertNotEqual(code, 0)
                 self.assertEqual(plan["goal_status"], "blocked", plan)
-                self.assertIn("client_capability_limit", {item["blocker_code"] for item in plan["blockers"]})
+                self.assertIn("office_remote_session_requires_remote_contract", {item["blocker_code"] for item in plan["blockers"]})
                 self.assertEqual(plan["actions"], [])
                 before = path.read_bytes()
                 for verb in ("status", "verify"):
@@ -159,12 +163,12 @@ class OfficeStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "office_schema_unverified"):
             read_database("qoderwork", wrong)
 
-    def test_empty_supported_store_is_complete_metadata_but_never_deletion_qualified(self):
+    def test_empty_supported_store_has_registered_writer_but_no_selected_records(self):
         root = self.fixture("qwenwork", empty=True)
         inventory = build_inventory((OfficeAdapter(client="qwenwork", profile_root=root),), client="qwenwork")
         self.assertEqual(inventory.targets, ())
         self.assertFalse(any(error.blocks_inventory for error in inventory.errors))
-        self.assertFalse(inventory.capabilities["qwenwork"].native_delete)
+        self.assertTrue(inventory.capabilities["qwenwork"].native_delete)
 
     def test_orphan_auxiliary_references_are_reported_without_losing_readable_chats(self):
         for client in PROFILES:

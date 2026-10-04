@@ -97,9 +97,12 @@ class ExecutionOutcome:
     session_cleanup: Any | None = None
     schedule_cleanup: Any | None = None
     workbuddy_cleanup: Any | None = None
+    office_cleanup: Any | None = None
 
     @property
     def ok(self) -> bool:
+        if self.office_cleanup is not None:
+            return True
         if self.workbuddy_cleanup is not None:
             return True
         if self.schedule_cleanup is not None:
@@ -122,6 +125,8 @@ class ExecutionOutcome:
 
     @property
     def modified(self) -> bool:
+        if self.office_cleanup is not None:
+            return bool(self.office_cleanup.deleted_ids)
         if self.workbuddy_cleanup is not None:
             return bool(self.workbuddy_cleanup.deleted_session_ids or self.workbuddy_cleanup.removed_ui_only_ids)
         if self.schedule_cleanup is not None:
@@ -138,6 +143,8 @@ class ExecutionOutcome:
 
     @property
     def results(self) -> tuple[Any, ...]:
+        if self.office_cleanup is not None:
+            return (self.office_cleanup,)
         if self.workbuddy_cleanup is not None:
             return (self.workbuddy_cleanup,)
         if self.schedule_cleanup is not None:
@@ -154,6 +161,11 @@ class ExecutionOutcome:
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
+
+        if self.office_cleanup is not None:
+            return {"command": "delete", "mutation_kind": self.mutation_kind,
+                    "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
+                    "result": self.office_cleanup.to_dict(), "plan_fingerprint": str(self.plan.plan_fingerprint)}
 
         if self.workbuddy_cleanup is not None:
             return {"command": "delete", "mutation_kind": self.mutation_kind,
@@ -733,6 +745,23 @@ def _execute_prevalidated_actions_locked(
             plan=plan,
             frontend_session_cleanup=result,
         )
+
+    if mutation_kind in {"delete_office_frontend", "delete_office_artifacts"}:
+        from .office_cleanup import execute as execute_office, KINDS
+        evidence = actions[0].impact.external_action_payload["office_session_evidence"]
+        root = evidence["profile_root"] if evidence["role"] == "profile" else evidence["sdk_root"]
+        if (mutation_kind != KINDS[evidence["role"]] or
+                {a.target.thread_id for a in actions} != set(evidence["database"]["chat_ids"]) or
+                any(a.impact.external_action_payload.get("office_session_evidence") != evidence
+                    or a.impact.owner_client != evidence["client"] or a.impact.external_storage_root != root
+                    or a.impact.owner_process_root != evidence["profile_root"] for a in actions)):
+            raise ExecutionError("Office action scope mismatch")
+        def forward_office_phase(phase):
+            if action_state_callback is not None:
+                for action in actions:
+                    action_state_callback(phase, action, None)
+        result = execute_office(evidence, client_inspector=client_inspector, phase_callback=forward_office_phase)
+        return ExecutionOutcome(mutation_kind=mutation_kind, selected_actions=tuple(actions), plan=plan, office_cleanup=result)
 
     if mutation_kind in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}:
         from .workbuddy_store import execute as execute_workbuddy_cleanup

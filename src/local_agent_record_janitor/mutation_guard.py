@@ -481,6 +481,19 @@ def _check_siblings(scope: MutationScope, owner: OperationStore | None) -> None:
             )
 
 
+def check_operation_root_admission(document: Mapping[str, Any]) -> None:
+    """Check every frozen child root before the first cross-store mutation.
+
+    The coordinator must hold mutation_roots for this whole interval. This
+    grants no execution ticket and cannot bypass individual child admission.
+    """
+    held = set(getattr(_thread, "roots", ()))
+    for root in frozen_operation_roots(document):
+        if os.path.normcase(os.fspath(root)) not in held:
+            raise OperationStoreError("Operation admission requires all frozen root locks")
+        _check_siblings(MutationScope(root, None), None)
+
+
 @contextmanager
 def mutation_guard(scopes: Iterable[MutationScope], *, store: OperationStore | None = None) -> Iterator[None]:
     selected = _merge_scopes(scopes)

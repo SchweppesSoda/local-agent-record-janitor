@@ -526,6 +526,10 @@ def capability_for(
     if normalized_client == "workbuddy" and normalized_engine == "workbuddy":
         return EngineCapability("workbuddy", "workbuddy", native_delete=True, frontend_reference_delete=True, verify=True,
             reason="Exact supported local sessions or proven local-only pinned references; no remote deletion")
+    if normalized_client in {"qwenwork", "qoderwork"} and normalized_engine == normalized_client:
+        return EngineCapability(normalized_client, normalized_engine, native_delete=True,
+            frontend_session_delete=True, verify=True,
+            reason="Registered CN schemas, exclusive local SDK files and known UI state; exact plan closure required")
     if normalized_client in {"cindy", "aionui"} and normalized_engine in {
         "codex", "pi", "claude",
     }:

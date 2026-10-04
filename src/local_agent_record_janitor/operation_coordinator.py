@@ -297,6 +297,8 @@ class OperationCoordinator:
             )
             self._validate_apply_scope(document, normalized_scope)
             frozen_workbuddy_roots = self._bound_workbuddy_roots(document, workbuddy_roots)
+            from .office_cleanup import bound_adapters as office_bound_adapters
+            adapters = office_bound_adapters(document, adapters)
             child_inspection = self._inspect_child_states(document)
             if child_inspection.blockers:
                 self._emit_progress(
@@ -823,6 +825,8 @@ class OperationCoordinator:
                             batches=inspection.batches, modified=inspection.modified,
                             mutation_started=inspection.mutation_started))
                 client_name = str(document["scope"]["client"])
+                from .office_cleanup import bound_adapters as office_bound_adapters
+                adapters = office_bound_adapters(document, adapters)
                 codex_home = self._bound_codex_home(document, codex_home)
                 discovery_roots = ((*validate_guard_sources(document), *orca_roots)
                                    if document["schema_version"] == PLAN_V3 else orca_roots)
@@ -1240,6 +1244,19 @@ class OperationCoordinator:
             terminal_verified = cls._workbuddy_terminal_verified(document, root, family)
             for session_id in remaining_workbuddy(evidence, terminal_verified=terminal_verified):
                 residuals.append(workbuddy_actions[(root, session_id)])
+        from .office_cleanup import remaining as office_remaining
+        checked_office = {}
+        for action in document.get("actions", ()):
+            if action.get("kind") not in {"delete_office_frontend", "delete_office_artifacts"}:
+                continue
+            evidence = action["impact"]["external_action_payload"]["office_session_evidence"]
+            root = evidence["profile_root"] if evidence["role"] == "profile" else evidence["sdk_root"]
+            key = (root, evidence["profile_root"], action["kind"])
+            if key not in checked_office:
+                terminal = cls._workbuddy_terminal_verified(document, root, action["kind"])
+                checked_office[key] = office_remaining(evidence, terminal_verified=terminal)
+            if checked_office[key]:
+                residuals.append(action["action_id"])
         return list(dict.fromkeys(residuals))
 
     @classmethod
@@ -1404,7 +1421,7 @@ class OperationCoordinator:
                 # even when an interruption prevented an execution result.
                 verified_modified = bool(state.get("modified")) or bool(
                     raw_batch.get("mutation_family") in {
-                        "delete_workbuddy_session", "remove_workbuddy_ui_reference"
+                        "delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts"
                     }
                     and state.get("mutation_started")
                     and action_ids and not child_residuals
@@ -1644,6 +1661,11 @@ class OperationCoordinator:
             else tuple(self._default_adapters(client, codex_home=codex_home))
         )
         selected = tuple(adapter for adapter in source if self._adapter_matches(adapter, client))
+        if client in {"qwenwork", "qoderwork"}:
+            from .office_cleanup import build_context
+            context = build_context(selected, self.service, engines=engines, refresh=True)
+            result = (context, selected, None, None, {}, {})
+            return result if include_action_contexts else result[:5]
         if client == "workbuddy":
             from .workbuddy_store import build_context
             context = build_context(selected, self.service, engines=engines, refresh=True)
@@ -3089,6 +3111,9 @@ class OperationCoordinator:
         context: Any,
         scope: Mapping[str, Any],
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+        if scope.get("client") in {"qwenwork", "qoderwork"}:
+            from .office_cleanup import select_candidates
+            return select_candidates(context, scope, self._blocker)
         if scope.get("client") == "workbuddy":
             from .workbuddy_store import select_candidates
             return select_candidates(context, scope, self._blocker)
@@ -3725,7 +3750,7 @@ class OperationCoordinator:
 
     @staticmethod
     def _default_engine(client: str) -> str:
-        return {"pi": "pi", "claude": "claude", "workbuddy": "workbuddy"}.get(client, "codex")
+        return {"pi": "pi", "claude": "claude", "workbuddy": "workbuddy", "qwenwork": "qwenwork", "qoderwork": "qoderwork"}.get(client, "codex")
 
     @staticmethod
     def _bound_workbuddy_roots(document, requested=()):
@@ -3882,6 +3907,15 @@ class OperationCoordinator:
             if isinstance(item, Mapping)
         }
         fresh_actions = tuple(getattr(context.plan, "actions", ()))
+        if document.get("scope", {}).get("client") in {"qwenwork", "qoderwork"}:
+            from .office_cleanup import freeze_actions, operation_scope
+            completed = {str(value) for value in skip_child_ids}
+            pending_ids = {str(action_id) for batch in document.get("child_batches", ())
+                if str(batch.get("child_operation_id")) not in completed for action_id in batch.get("action_ids", ())}
+            pending = tuple(action for action in fresh_actions if str(action.action_id) in pending_ids and action.available)
+            with operation_scope(document):
+                rebound = {a.action_id: a for a in freeze_actions(pending, frozen=document.get("actions", ()))} if pending else {}
+            fresh_actions = tuple(rebound.get(a.action_id, a) for a in fresh_actions)
         if document.get("scope", {}).get("client") == "workbuddy":
             from .workbuddy_store import freeze_actions
             completed = set(map(str, skip_child_ids))
@@ -4489,6 +4523,14 @@ class OperationCoordinator:
         entered = False
         try:
             with mutation_roots(frozen_operation_roots(live.document)):
+                if live.document.get("scope", {}).get("client") in {"qwenwork", "qoderwork"}:
+                    from .mutation_guard import check_operation_root_admission
+                    from .office_cleanup import operation_scope
+                    check_operation_root_admission(live.document)
+                    entered = True
+                    with operation_scope(live.document):
+                        return self._execute_live_locked(live, timeout=timeout,
+                            app_server_factory=app_server_factory, binary_resolver=binary_resolver, progress_callback=progress_callback)
                 entered = True
                 if live.document.get("schema_version") == PLAN_V3:
                     if app_server_factory is not None or binary_resolver is not None:
@@ -4641,6 +4683,13 @@ class OperationCoordinator:
             if frozen_child_ids.get(batch_key(batch)) in completed_child_ids
             for action in batch.actions
         )
+        # Cold rebind may contain only pending candidates. Dependencies still
+        # recognize completed children proved by the frozen journal inspection.
+        completed_action_ids.update(
+            str(action_id) for batch in live.document.get("child_batches", ())
+            if str(batch.get("child_operation_id")) in completed_child_ids
+            for action_id in batch.get("action_ids", ())
+        )
         if frozen_child_ids:
             unresolved = [
                 self._blocker(
@@ -4727,6 +4776,10 @@ class OperationCoordinator:
             batch_mutation_started = False
             store: OperationStore | None = None
             try:
+                prerequisites = {str(value) for action in batch.actions
+                    for value in (getattr(getattr(action, "impact", None), "external_action_payload", None) or {}).get("requires_action_ids", ())}
+                if prerequisites - completed_action_ids:
+                    raise OperationCoordinatorError("approved_prerequisite_actions_not_verified")
                 storage_path = self._storage_path(
                     live.context, batch.storage_id, batch.actions[0]
                 )
@@ -4881,7 +4934,7 @@ class OperationCoordinator:
                                 (),
                             )
                         }
-                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}
+                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference", "delete_office_frontend", "delete_office_artifacts"}
                                       else typed_by_id.get(str(action.action_id), action) for action in batch.actions)
                         outcome = self.service.execute(
                             batch_context,
@@ -5976,7 +6029,7 @@ class OperationCoordinator:
         # Exact WorkBuddy evidence distinguishes a missing row/usage/sidecar
         # from a value. Preserve its explicit nulls through plan persistence;
         # continue applying the ordinary body-key filter throughout the tree.
-        _workbuddy_nulls = _workbuddy_nulls or key == "workbuddy_session_evidence"
+        _workbuddy_nulls = _workbuddy_nulls or key in {"workbuddy_session_evidence", "office_session_evidence"}
         if key in {"title", "display_name", "thread_name", "name"}:
             from .display_metadata import display_title
             return display_title(value)
