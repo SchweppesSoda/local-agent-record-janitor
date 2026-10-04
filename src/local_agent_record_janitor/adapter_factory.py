@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 from typing import Any
 
-from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter
+from .adapters import AionUIAdapter, CindyAdapter, NativeIntegrityAdapter, OrcaAdapter, HerdrAdapter, WorkBuddyAdapter
 from .herdr_discovery import default_herdr_locators, local_herdr_path
 from .orca_discovery import default_orca_root, local_orca_path, reverse_account_profile
 from .record_identity import canonical_path
@@ -145,6 +145,14 @@ def create_default_adapters(args: Any) -> list[object]:
     # adapters never become legacy native/home or scan candidates.
     adapters.extend(discover_orca_guards(args))
     adapters.extend(discover_herdr_adapters(args))
+    # WorkBuddy has no proven shared Codex/Claude store. Its default profile
+    # is a candidate only when selected, never an unrelated global guard.
+    workbuddy_roots = tuple(getattr(args, "workbuddy_root", ()) or ())
+    if "workbuddy" in selected or str(getattr(args, "client", "")) == "workbuddy" or workbuddy_roots:
+        from .workbuddy_store import local_root
+        roots = workbuddy_roots or (os.environ.get("WORKBUDDY_CONFIG_DIR") or Path.home() / ".workbuddy",)
+        unique = {canonical_path(local_root(root)): local_root(root) for root in roots}
+        adapters.extend(WorkBuddyAdapter(profile_root=root) for root in unique.values())
     return adapters
 
 

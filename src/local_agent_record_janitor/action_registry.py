@@ -23,6 +23,11 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "delete_workbuddy_session": ActionCapability(
+        kind="delete_workbuddy_session", implemented=True,
+        mutation_family="delete_workbuddy_session", requires_clients_closed=True,
+        verifies_by="frozen_workbuddy_rows_artifacts_and_ui_references_absent",
+    ),
     "delete_schedule_run": ActionCapability(
         kind="delete_schedule_run", implemented=True,
         mutation_family="delete_schedule_run", requires_clients_closed=True,
@@ -141,7 +146,8 @@ def capability_field_for_action(kind: object) -> str | None:
     """The client/profile ceiling required by an existing mutation family."""
     family = action_capability(kind).mutation_family
     if family in {"delete_conversation", "delete_pi_session", "delete_claude_session",
-                  "repair_legacy_index", "remove_desktop_state", "remove_broken_relation"}:
+                  "repair_legacy_index", "remove_desktop_state", "remove_broken_relation",
+                  "delete_workbuddy_session"}:
         return "native_delete"
     if family == "remove_frontend_reference":
         return "frontend_reference_delete"

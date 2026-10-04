@@ -96,9 +96,12 @@ class ExecutionOutcome:
     session_engine: str | None = None
     session_cleanup: Any | None = None
     schedule_cleanup: Any | None = None
+    workbuddy_cleanup: Any | None = None
 
     @property
     def ok(self) -> bool:
+        if self.workbuddy_cleanup is not None:
+            return True
         if self.schedule_cleanup is not None:
             return True
         if self.cleanup_report is not None:
@@ -119,6 +122,8 @@ class ExecutionOutcome:
 
     @property
     def modified(self) -> bool:
+        if self.workbuddy_cleanup is not None:
+            return bool(self.workbuddy_cleanup.deleted_ids)
         if self.schedule_cleanup is not None:
             return bool(self.schedule_cleanup.deleted_ids)
         if self.native_project_cleanup is not None:
@@ -133,6 +138,8 @@ class ExecutionOutcome:
 
     @property
     def results(self) -> tuple[Any, ...]:
+        if self.workbuddy_cleanup is not None:
+            return (self.workbuddy_cleanup,)
         if self.schedule_cleanup is not None:
             return (self.schedule_cleanup,)
         if self.native_project_cleanup is not None:
@@ -147,6 +154,11 @@ class ExecutionOutcome:
 
     def audit_payload(self) -> dict[str, Any]:
         """Return mutation evidence without observations or chat bodies."""
+
+        if self.workbuddy_cleanup is not None:
+            return {"command": "delete", "mutation_kind": "delete_workbuddy_session",
+                    "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
+                    "result": self.workbuddy_cleanup.to_dict(), "plan_fingerprint": str(self.plan.plan_fingerprint)}
 
         if self.schedule_cleanup is not None:
             return {"command": "delete", "mutation_kind": "delete_schedule_run",
@@ -721,6 +733,20 @@ def _execute_prevalidated_actions_locked(
             plan=plan,
             frontend_session_cleanup=result,
         )
+
+    if mutation_kind == "delete_workbuddy_session":
+        from .workbuddy_store import execute as execute_workbuddy_cleanup
+        evidence = tuple(action.impact.external_action_payload["workbuddy_session_evidence"] for action in actions)
+
+        def forward_workbuddy_phase(phase):
+            if action_state_callback is not None:
+                for action in actions:
+                    action_state_callback(phase, action, None)
+
+        result = execute_workbuddy_cleanup(evidence, client_inspector=client_inspector,
+                                           phase_callback=forward_workbuddy_phase)
+        return ExecutionOutcome(mutation_kind=mutation_kind, selected_actions=tuple(actions), plan=plan,
+                                workbuddy_cleanup=result)
 
     if mutation_kind == "delete_schedule_run":
         from .cindy_schedule_cleanup import execute as execute_schedule_cleanup

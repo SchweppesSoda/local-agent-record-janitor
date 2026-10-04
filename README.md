@@ -2,7 +2,7 @@
 
 `local-agent-record-janitor` 是本项目统一使用的仓库名、发行包名和 CLI 命令；Python
 模块名统一为 `local_agent_record_janitor`。它是一个本地、保守的多引擎 Agent 记录检查
-和清理工具：处理 Codex thread、Pi Agent session 和 Claude Code session，也能精确清除
+和清理工具：处理 Codex thread、Pi Agent、Claude Code 和 WorkBuddy session，也能精确清除
 Cindy/AionUI 中已经失效的 frontend reference；前端映射不是另一份 native record。
 
 ### 命名迁移
@@ -66,17 +66,40 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 链接目录或仍在运行的客户端会阻止修改。临时回滚副本只用于验证/恢复，验证通过后立即删除。
 详见 [本地环境清理契约](docs/native-project-cleanup.md)。
 
+### WorkBuddy 本地会话
+
+`workbuddy` 使用自己的客户端、引擎和 profile 身份。默认只在选中该客户端时读取
+`~/.workbuddy`（或 `WORKBUDDY_CONFIG_DIR`）；可重复指定 `--workbuddy-root`。
+清单只输出会话 ID、项目路径、状态、时间、归属和文件指纹，不展示标题或聊天正文。
+
+```powershell
+local-agent-record-janitor records --client workbuddy --workbuddy-root "$HOME\.workbuddy" --inspect-clients --json
+local-agent-record-janitor delete plan --client workbuddy --workbuddy-root "$HOME\.workbuddy" --record-id '<完整 session UUID>' --out .\workbuddy-plan.json
+# 核对计划、退出 WorkBuddy 及相关后台进程后执行：
+local-agent-record-janitor delete apply --plan .\workbuddy-plan.json --clients-closed
+local-agent-record-janitor operation verify --operation-id '<operation-id>' --plan .\workbuddy-plan.json
+```
+
+当前 writer 限定为已识别的 WorkBuddy 5.6.2 本地 schema 和已证明的记录副本、UI 引用。
+项目范围和 `--all-projects` 默认只选软删除会话；保留的终态会话必须以完整 ID 明确选择。
+`.file-rollback.ndjson`、未证明的 subagent 副本、云同步关联和未知 schema 会给出 blocker；
+数据库为空也不掩盖孤立文件或 UI-only ID。`complete` 只证明批准的本地记录范围，
+`remote_delete=false`，共享附件、用户工作产物和云端历史均不在清除保证中。账户、
+设置、插件、skills、memory、workspace 和自动化定义保留。详见
+[WorkBuddy 适配边界](docs/adapters.md#workbuddy独立本地会话)和
+[operation 契约](docs/operation-cli.md#workbuddy-local-sessions)。
+
 ### 术语与身份边界
 
 | 层 | 本项目中的含义 |
 |---|---|
 | Frontend namespace | Cindy/AionUI 自己的 owner、数据库、对话或会话 ID，以及它们到原生记录的 frontend reference/mapping |
 | Harness runtime | 实际运行的 Codex、Pi Agent 或 Claude Code harness、二进制路径和版本 |
-| Native store | `CODEX_HOME`、Pi `session_root` 或 Claude Code config root |
-| Native record | Codex 的 `(codex_home, thread_id)`、Pi 的 storage-qualified JSONL session、Claude Code 的 config-qualified session manifest |
+| Native store | `CODEX_HOME`、Pi `session_root`、Claude Code config root 或独立 WorkBuddy profile root |
+| Native record | Codex 的 `(codex_home, thread_id)`、Pi 的 storage-qualified JSONL session、Claude Code 的 config-qualified session manifest、WorkBuddy 的 profile-qualified session |
 
 跨引擎叙述统一使用 **local agent record / 原生记录**。Codex 对象严格称为
-**thread**，Pi Agent 与 Claude Code 对象称为 **session**；Cindy/AionUI 行称为
+**thread**，Pi Agent、Claude Code 与 WorkBuddy 对象称为 **session**；Cindy/AionUI 行称为
 **frontend reference**。认证来源、登录状态和账号绑定只可作为诊断事实，不参与
 删除目标身份，也不能代替 native store 与 native record 的精确限定；它们至多说明
 某个 harness 如何获得运行授权。
@@ -118,6 +141,7 @@ OpenAI 稳定 API。
 | Cindy | 软删除会话，或通过完整 Cindy 会话 ID 明确选择的保留会话；已失效的当前 `sdk_session_id` 或历史 `agent_switch` 引用 | 同一数据库内批量物理删除已批准的会话、消息、索引和支持的依赖；项目范围默认只选软删除行；引用清理仍使用精确字段/JSON 写入 |
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
+| WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session`；仅可证明完整范围的本地终态会话，未知副本/归属及云同步关联阻止删除 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
 | Codex：rollout-only | rollout 内容文件存在，但 thread 列表记录不存在 | 删除整个 thread，属于 `high`，必须明确选择 |
 | Codex：重复内容文件 | 同一 thread ID 有多份可验证 rollout 内容文件 | 保留，或把全部已确认副本作为整条 thread 的 `high` 风险删除范围；不提供隔离动作 |
@@ -129,7 +153,7 @@ OpenAI 稳定 API。
 
 已支持的发现会成为 Observation，并按能力显示 CandidateAction。当前可执行 mutation
 包括 healthy/native 及已冻结 frontend closure、整条 Codex thread、旧索引残留、Desktop
-宿主残留、精确关系边、AionUI/Cindy 引用，以及 Pi/Claude 的精确 session 删除；stale/
+宿主残留、精确关系边、AionUI/Cindy 引用，以及 Pi/Claude/WorkBuddy 的精确 session 删除；stale/
 broken 的完整发现仍走 anomaly scan，不保证从 `records` 统一进入可执行计划。
 `repair_index_path` 和 `quarantine_artifacts` 只保留旧 JSON 枚举兼容，不再生成或提供；
 无法证明身份和完整范围的异常记录只能保留。
@@ -145,6 +169,7 @@ broken 的完整发现仍走 anomaly scan，不保证从 `records` 统一进入�
 - 其他平台上的第三方前端路径尚无公开 CLI 支持承诺，不应依赖隐藏参数或内部程序接口建立自动化。
 - Pi Agent 在 Windows、macOS 和 Linux 均使用其公开的本地会话布局；默认目录为 `~/.pi/agent`，会话目录为 `~/.pi/agent/sessions`。会话目录的优先级为 `--pi-session-dir`、`PI_CODING_AGENT_SESSION_DIR`、合并后的项目/全局 `settings.json` 的 `sessionDir`、再到 `<agentDir>/sessions`；agent 目录本身按 `--pi-agent-dir`、`PI_CODING_AGENT_DIR`、`~/.pi/agent` 解析。`--pi-agent-dir` 不会覆盖明确的 session directory。
 - Claude Code 的普通 `~/.claude`/`CLAUDE_CONFIG_DIR` 清单和逐项删除可在 Windows、macOS 和 Linux 使用；Cindy profile 的自动发现仍受上一条 Windows 边界约束。
+- WorkBuddy 的本地元数据清单使用其独立 root；当前删除需要 Windows 上完整的已知 writer 进程探测，其他系统只读盘点并阻止写入。
 
 安装后通常使用 `local-agent-record-janitor` 命令。如果 pip 安装的 console script 尚未进入 `PATH`，所有示例都可以改用 `python -m local_agent_record_janitor`（macOS/Linux 常用 `python3 -m local_agent_record_janitor`）。
 

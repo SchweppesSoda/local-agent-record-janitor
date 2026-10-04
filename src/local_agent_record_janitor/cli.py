@@ -712,6 +712,8 @@ def build_parser() -> argparse.ArgumentParser:
     operation_verify.add_argument("--json", action="store_true")
     operation_verify.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
                                   help="Herdr persisted config root; readonly blocked plans retain their frozen result.")
+    operation_verify.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
+                                  help="WorkBuddy root; must match the frozen physical stores when supplied.")
     operation_verify.add_argument(
         "--progress",
         action="store_true",
@@ -1027,6 +1029,8 @@ def _add_common_arguments(
                         help="Orca userData 根目录（可重复；仅本机 metadata 盘点与保护）")
     parser.add_argument("--herdr-root", action="append", default=[], metavar="PATH",
                         help="Herdr config 根目录（可重复；只读引用，records --inspect-clients 可显式探测 live metadata）")
+    parser.add_argument("--workbuddy-root", action="append", default=[], type=Path, metavar="PATH",
+                        help="WorkBuddy 独立配置根目录（可重复；默认 WORKBUDDY_CONFIG_DIR 或 ~/.workbuddy）")
     if not codex_only:
         parser.add_argument(
             "--pi-agent-dir",
@@ -1064,7 +1068,7 @@ def _add_operation_scope_arguments(
 
     parser.add_argument(
         "--client",
-        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr"),
+        choices=("native", "codex-native", "cindy", "aionui", "pi", "claude", "orca", "herdr", "workbuddy"),
         required=client_required,
         help=(
             "选择一个客户端所有者；codex-native 表示官方 ChatGPT UI/Codex CLI "
@@ -1134,6 +1138,7 @@ _CLIENT_PLATFORM_MAP = {
     "claude": "claude",
     "orca": "orca",
     "herdr": "herdr",
+    "workbuddy": "workbuddy",
 }
 _OPERATION_BODY_KEYS = frozenset(
     {
@@ -1169,7 +1174,7 @@ def _normalize_client_name(value: object) -> str:
     except KeyError as exc:
         raise ValueError(
             "--client 必须指定一个受支持的客户端："
-            "native、codex-native、cindy、aionui、pi、claude、orca 或 herdr"
+            "native、codex-native、cindy、aionui、pi、claude、orca、herdr 或 workbuddy"
         ) from exc
 
 
@@ -1461,7 +1466,8 @@ def _run_operation_backend(
                 "operation_home": getattr(args, "operation_home", None),
                 "codex_home": getattr(args, "codex_home", None),
                 **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
-                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ()),
+                    "workbuddy_roots": tuple(getattr(args, "workbuddy_root", ()) or ())} if verb != "status" else {}),
                 "timeout": float(getattr(args, "timeout", 30.0) or 30.0),
                 "adapters": supplied_adapters,
                 "app_server_factory": app_server_factory,
@@ -1478,7 +1484,8 @@ def _run_operation_backend(
                 "operation_home": getattr(args, "operation_home", None),
                 "codex_home": getattr(args, "codex_home", None),
                 **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
-                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ()),
+                    "workbuddy_roots": tuple(getattr(args, "workbuddy_root", ()) or ())} if verb != "status" else {}),
                 "plan_sha256": (
                     getattr(args, "authorized_plan_sha256", None)
                     or getattr(args, "plan_fingerprint", None)
@@ -1503,7 +1510,8 @@ def _run_operation_backend(
                 "operation_home": getattr(args, "operation_home", None),
                 "codex_home": getattr(args, "codex_home", None),
                 **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
-                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ()),
+                    "workbuddy_roots": tuple(getattr(args, "workbuddy_root", ()) or ())} if verb != "status" else {}),
                 "clients_closed": bool(getattr(args, "clients_closed", False)),
                 "timeout": float(getattr(args, "timeout", 30.0) or 30.0),
                 "adapters": supplied_adapters,
@@ -1520,7 +1528,8 @@ def _run_operation_backend(
                 "operation_home": getattr(args, "operation_home", None),
                 "codex_home": getattr(args, "codex_home", None),
                 **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
-                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ()),
+                    "workbuddy_roots": tuple(getattr(args, "workbuddy_root", ()) or ())} if verb != "status" else {}),
             }
             if progress_callback is not None:
                 operation_kwargs["progress_callback"] = progress_callback
@@ -1532,7 +1541,8 @@ def _run_operation_backend(
                 "operation_home": getattr(args, "operation_home", None),
                 "codex_home": getattr(args, "codex_home", None),
                 **({"orca_roots": tuple(getattr(args, "orca_root", ()) or ()),
-                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ())} if verb != "status" else {}),
+                    "herdr_roots": tuple(getattr(args, "herdr_root", ()) or ()),
+                    "workbuddy_roots": tuple(getattr(args, "workbuddy_root", ()) or ())} if verb != "status" else {}),
                 "adapters": supplied_adapters,
                 "verify_timeout": int(getattr(args, "verify_timeout", 180) or 0),
             }

@@ -36,3 +36,6 @@ Issues = "https://github.com/SchweppesSoda/local-agent-record-janitor/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+local_agent_record_janitor = ["workbuddy_schema_562.json"]

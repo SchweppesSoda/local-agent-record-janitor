@@ -6,7 +6,7 @@ partitioning, journal recovery, mutation, and verification belong to the
 `OperationCoordinator`, which delegates storage work to `CleanupService`. The
 CLI does not maintain a second scanner or mutation implementation. The
 implemented deletion paths currently cover healthy/native records with a
-frozen frontend closure, Cindy Pi/Claude sessions, and Cindy frontend sessions
+frozen frontend closure, Cindy Pi/Claude sessions, exact supported local WorkBuddy sessions, and Cindy frontend sessions
 whose exact row status is `deleted`. AionUI orphan
 project/conversations rows are executable only for the probed supported schema
 with immutable row evidence and zero `acp_session` references; other schemas
@@ -21,7 +21,7 @@ through the independent `delete_native_project` family. See
 Use one client per operation. A plan/run selects exactly one scope mode:
 
 ```text
-records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr> [--project <selector> ...]
+records --client <native|codex-native|cindy|aionui|pi|claude|orca|herdr|workbuddy> [--project <selector> ...]
 delete plan --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
 delete apply --operation-id <id> [--plan <plan.json>] [--clients-closed]
 delete run --client <client> (--project <selector> ... | --all-projects | --record-id <id> ...)
@@ -174,6 +174,47 @@ upstream FTS trigger definitions and index layouts. Unknown triggers return a
 `frontend_preflight_blocked` blocker before any native deletion is attempted.
 See [Cindy storage contract](cindy-storage-contract.md) for pinned upstream
 sources, the closed-client CJK fallback, and regression fixtures.
+
+## WorkBuddy local sessions
+
+`records --client workbuddy [--workbuddy-root PATH ...]` inventories an independent
+WorkBuddy store. Explicit repeatable roots replace the default
+`WORKBUDDY_CONFIG_DIR` or `~/.workbuddy`; unrelated clients do not implicitly
+inspect that default root. The engine is `workbuddy`, and record identity includes
+the physical profile root. Metadata contains no chat titles, prompts or transcripts.
+`--inspect-clients` adds the bounded Windows writer probe; process failures cannot
+prove closure. Windows is currently required for mutation.
+
+The dedicated `delete_workbuddy_session` family supports the fixed WorkBuddy
+5.6.2 schema and proven local terminal record closure. Project/all-projects scopes
+select only soft-deleted rows (`deleted_at > 0`). Retained terminal rows require
+explicit full session UUIDs through `--record-id`; prefixes do not select records.
+One root has one batch containing only approved IDs. Plan freezes exact SQLite
+rows, exclusive artifact paths, supported sidebar/pinned references, complete shared
+store fingerprints, and reproducible batch after fingerprints.
+
+Apply restores frozen WorkBuddy roots when they are omitted and rejects conflicting
+explicit roots. It requires `--clients-closed`, complete related-writer closure and
+unchanged evidence, including under the SQLite writer lock. It deletes approved
+session/usage rows, proven exclusive artifacts and precise JSON ID references,
+checks exact affected counts, and removes temporary shared DB/JSON rollback only
+after complete proof. User work products and configuration/automation definitions
+remain. Shared attachment cleanup and cloud deletion are outside this guarantee;
+`remote_delete=false` and no cloud API is called.
+
+Unknown schema, orphan files/UI-only IDs, unproven rollback sidecars or subagent
+copies, shared media indexes and related remote mappings remain visible as blockers.
+An empty database does not prove full cleanup. Unrelated UI-only IDs are retained
+without blocking an independently proven exact local ID; all-projects reports their
+coverage gap. See [the complete support limits](adapters.md#workbuddy独立本地会话).
+
+After any partial unlink or post-commit failure, the child remains unknown and
+holds the shared database footprint, including against another ID in that store.
+Status/verify never resend deletion or restore a shared store. Recovery requires
+the immutable complete before/after proof, even if backup files are missing; mixed
+state preserves recovery evidence. Only a trusted completed child checkpoint or
+receipt with no remaining rollback permits later exact-ID verification without
+requiring the historical whole-store hash after other legitimate operations.
 
 ## Output
 

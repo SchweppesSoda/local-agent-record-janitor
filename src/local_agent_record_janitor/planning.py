@@ -53,6 +53,7 @@ class ActionKind(str, Enum):
     DELETE_CLAUDE_SESSION = "delete_claude_session"
     DELETE_FRONTEND_SESSION = "delete_frontend_session"
     DELETE_SCHEDULE_RUN = "delete_schedule_run"
+    DELETE_WORKBUDDY_SESSION = "delete_workbuddy_session"
     DELETE_PROJECT_ITEM = "delete_project_item"
     DELETE_NATIVE_PROJECT = "delete_native_project"
     KEEP = "keep"
@@ -313,6 +314,10 @@ class CandidateAction:
                     else None
                 ),
             }
+        elif self.resource_kind == "workbuddy_session":
+            resource = {"kind": "workbuddy_session", "target": self.target.to_dict(),
+                        "database": self.impact.resource_path,
+                        "artifact_paths": list(self.impact.external_artifact_paths)}
         elif self.resource_kind == "schedule_run":
             resource = {"kind": "schedule_run", "target": self.target.to_dict(),
                         "database": self.impact.resource_path}

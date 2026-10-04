@@ -36,6 +36,7 @@ class ClientName(str, Enum):
     CLAUDE = "claude"
     ORCA = "orca"
     HERDR = "herdr"
+    WORKBUDDY = "workbuddy"
 
 
 # A frontend backend name alone does not prove which native store owns a
@@ -519,6 +520,9 @@ def capability_for(
 
     normalized_client = normalize_client(client)
     normalized_engine = normalize_engine(engine)
+    if normalized_client == "workbuddy" and normalized_engine == "workbuddy":
+        return EngineCapability("workbuddy", "workbuddy", native_delete=True, verify=True,
+            reason="Exact supported local WorkBuddy sessions only; remote and unproven copies remain inventory-only")
     if normalized_client in {"cindy", "aionui"} and normalized_engine in {
         "codex", "pi", "claude",
     }:

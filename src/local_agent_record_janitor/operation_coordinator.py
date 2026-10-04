@@ -156,6 +156,7 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         adapters: Iterable[Any] | None = None,
         progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
         **_unused: Any,
@@ -190,6 +191,7 @@ class OperationCoordinator:
                 codex_home=codex_home,
                 orca_roots=orca_roots,
                 herdr_roots=herdr_roots,
+                workbuddy_roots=workbuddy_roots,
             )
             self._emit_progress(
                 progress_callback,
@@ -259,6 +261,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         plan_sha256: str | None = None,
         clients_closed: bool = False,
         adapters: Iterable[Any] | None = None,
@@ -293,6 +296,7 @@ class OperationCoordinator:
                 codex_home=codex_home,
             )
             self._validate_apply_scope(document, normalized_scope)
+            frozen_workbuddy_roots = self._bound_workbuddy_roots(document, workbuddy_roots)
             child_inspection = self._inspect_child_states(document)
             if child_inspection.blockers:
                 self._emit_progress(
@@ -342,7 +346,8 @@ class OperationCoordinator:
             discovery_roots = (*frozen_roots, *orca_roots) if document["schema_version"] == PLAN_V3 else orca_roots
             live = self._live.get(operation)
             source = (tuple(adapters) if adapters is not None else live.adapters if live is not None
-                      else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=discovery_roots)))
+                      else tuple(self._default_adapters(client_name, codex_home=codex_home, orca_roots=discovery_roots,
+                                                        workbuddy_roots=frozen_workbuddy_roots)))
             if document["schema_version"] == PLAN_V3:
                 source = retain_guard_sources(source, frozen_roots)
             source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
@@ -489,6 +494,7 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         clients_closed: bool = False,
         adapters: Iterable[Any] | None = None,
         timeout: float = 30.0,
@@ -518,6 +524,7 @@ class OperationCoordinator:
             codex_home=codex_home,
             orca_roots=orca_roots,
             herdr_roots=herdr_roots,
+            workbuddy_roots=workbuddy_roots,
             adapters=adapters,
             progress_callback=progress_callback,
         )
@@ -690,6 +697,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
@@ -704,6 +712,7 @@ class OperationCoordinator:
                 operation_id, plan_path, None,
                 operation_home=operation_home, codex_home=codex_home,
             )
+            self._bound_workbuddy_roots(document, workbuddy_roots)
             if self._blocked_without_mutation(document):
                 return self._status_for_document(document)
             with mutation_roots(frozen_operation_roots(document)):
@@ -711,6 +720,7 @@ class OperationCoordinator:
                     operation_id=operation_id, plan_path=plan_path,
                     operation_home=operation_home, codex_home=codex_home,
                     scope=scope, adapters=adapters, orca_roots=orca_roots, verify_timeout=verify_timeout,
+                    workbuddy_roots=workbuddy_roots,
                     progress_callback=progress_callback,
                 )
             return dict(computed)
@@ -742,6 +752,7 @@ class OperationCoordinator:
         operation_home: Path | None = None,
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         scope: Mapping[str, Any] | None = None,
         adapters: Iterable[Any] | None = None,
         verify_timeout: int = 180,
@@ -802,7 +813,8 @@ class OperationCoordinator:
                 discovery_roots = ((*validate_guard_sources(document), *orca_roots)
                                    if document["schema_version"] == PLAN_V3 else orca_roots)
                 source = tuple(adapters) if adapters is not None else tuple(self._default_adapters(
-                    client_name, codex_home=codex_home, orca_roots=discovery_roots))
+                    client_name, codex_home=codex_home, orca_roots=discovery_roots,
+                    workbuddy_roots=self._bound_workbuddy_roots(document, workbuddy_roots)))
                 if document["schema_version"] == PLAN_V3:
                     source = retain_guard_sources(source, validate_guard_sources(document))
                 source = self._with_current_guard_sources(source, client_name, codex_home=codex_home, orca_roots=orca_roots)
@@ -1203,7 +1215,66 @@ class OperationCoordinator:
         for database, evidence in schedule_groups.items():
             for run_id in remaining_schedule_runs(evidence):
                 residuals.append(schedule_actions[(database, run_id)])
+        from .workbuddy_store import remaining as remaining_workbuddy
+        workbuddy_groups, workbuddy_actions = {}, {}
+        for action in document.get("actions", ()):
+            if action.get("kind") == "delete_workbuddy_session":
+                evidence = action["impact"]["external_action_payload"]["workbuddy_session_evidence"]
+                workbuddy_groups.setdefault(evidence["root"], []).append(evidence)
+                workbuddy_actions[(evidence["root"], evidence["session_id"])] = action["action_id"]
+        for root, evidence in workbuddy_groups.items():
+            terminal_verified = cls._workbuddy_terminal_verified(document, root)
+            for session_id in remaining_workbuddy(evidence, terminal_verified=terminal_verified):
+                residuals.append(workbuddy_actions[(root, session_id)])
         return list(dict.fromkeys(residuals))
+
+    @classmethod
+    def _workbuddy_terminal_verified(cls, document: Mapping[str, Any], root: str) -> bool:
+        """Trust only a completed child bound to this exact authorization."""
+        storages = {str(item["storage_id"]): str(item["path"]) for item in document.get("storages", ())}
+        batches = [batch for batch in document.get("child_batches", ())
+                   if batch.get("mutation_family") == "delete_workbuddy_session"
+                   and storages.get(str(batch.get("storage_id"))) == root]
+        if len(batches) != 1:
+            return False
+        batch = batches[0]
+        action_ids = list(batch["action_ids"])
+        approved = [action for action in document["actions"] if action["action_id"] in action_ids]
+        if len(approved) != len(action_ids):
+            return False
+        projection = {"schema_version": "larj.child-operation-plan.v1",
+            "operation_id": batch["child_operation_id"],
+            "target": {"codex_home": root, "storage_id": batch["storage_id"]},
+            "parent_operation_id": document["operation_id"], "mutation_family": batch["mutation_family"],
+            "actions": cls._metadata(approved)}
+        store = OperationStore(Path(root), batch["child_operation_id"])
+        if not store.directory.exists() or store.lock_exists():
+            return False
+        result = store.read_result()
+        expected_hash = plan_sha256(projection)
+        if result is not None:
+            return bool(result.get("goal_status") == "complete"
+                and result.get("plan_sha256") == expected_hash
+                and result.get("mutation_started") is True
+                and sorted(result.get("action_ids", ())) == sorted(action_ids)
+                and sorted(result.get("verified_action_ids", ())) == sorted(action_ids)
+                and result.get("verification", {}).get("all_satisfied") is True)
+        # Successful apply has a durable action_verified checkpoint and final
+        # batch_finished event even before a result is compacted to a receipt.
+        # WorkBuddy emits action_verified only after its strict after proof and
+        # temporary rollback cleanup have both succeeded.
+        child = store.read_plan()
+        state = store.read_state()
+        events = store.read_events()
+        verified = {event.get("action_id") for event in events if event.get("event") == "action_verified"}
+        if events and events[-1].get("event") == "verification_finished":
+            verified.update(events[-1].get("verified_action_ids", ()))
+        return bool(child.get("plan_sha256") == expected_hash and state is not None
+            and state.get("goal_status") == "complete" and state.get("phase") == "finished"
+            and state.get("mutation_started") is True and state.get("current_action_state") == "verified"
+            and events and events[-1].get("goal_status") == "complete"
+            and events[-1].get("event") in {"batch_finished", "verification_finished"}
+            and verified == set(action_ids))
 
     @staticmethod
     def _orca_native_residual_action_ids(document: Mapping[str, Any]) -> list[str]:
@@ -1434,6 +1505,7 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
         explicit_frontend_ids: Sequence[str] = (),
     ) -> tuple[Any, ...]:
         from .client_capability_guards import restrict_cleanup_context
@@ -1442,7 +1514,8 @@ class OperationCoordinator:
         explicit_frontend_ids = explicit_session_ids
         candidates = (tuple(adapters) if adapters is not None else
                   () if client in {"pi", "claude"} else
-                  tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)))
+                  tuple(self._default_adapters(client, codex_home=codex_home, orca_roots=orca_roots,
+                                               herdr_roots=herdr_roots, workbuddy_roots=workbuddy_roots)))
         guards = self._with_current_guard_sources(candidates, client, codex_home=codex_home, orca_roots=orca_roots)
         if client == "orca" and explicit_frontend_ids:
             qualified = self._qualified_orca_context(candidates, guards, explicit_frontend_ids, engines)
@@ -1541,6 +1614,11 @@ class OperationCoordinator:
             else tuple(self._default_adapters(client, codex_home=codex_home))
         )
         selected = tuple(adapter for adapter in source if self._adapter_matches(adapter, client))
+        if client == "workbuddy":
+            from .workbuddy_store import build_context
+            context = build_context(selected, self.service, engines=engines, refresh=True)
+            result = (context, selected, None, None, {}, {})
+            return result if include_action_contexts else result[:5]
         if selected and all(callable(getattr(adapter, "snapshot_references", None))
                             and not callable(getattr(adapter, "scan", None)) for adapter in selected):
             context, catalog = self._readonly_client_context(selected, client, engines)
@@ -2935,10 +3013,12 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
     ) -> Sequence[Any]:
         from .adapter_factory import create_default_adapters, discover_orca_guards
 
-        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home, orca_roots=orca_roots, herdr_roots=herdr_roots)
+        args = OperationCoordinator._default_catalog_args(client, codex_home=codex_home, orca_roots=orca_roots,
+                                                          herdr_roots=herdr_roots, workbuddy_roots=workbuddy_roots)
         # Discover known local frontend protections independently of the
         # requested candidate client. The caller filters catalog candidates.
         args.platform = ["all"]
@@ -2953,11 +3033,13 @@ class OperationCoordinator:
         codex_home: Path | None = None,
         orca_roots: Sequence[str | Path] = (),
         herdr_roots: Sequence[str | Path] = (),
+        workbuddy_roots: Sequence[str | Path] = (),
     ) -> Any:
         return SimpleNamespace(
             client=client,
             orca_root=list(orca_roots),
             herdr_root=list(herdr_roots),
+            workbuddy_root=list(workbuddy_roots),
             platform=[client],
             appdata=None,
             codex_home=(Path(codex_home).expanduser() if codex_home else None),
@@ -2977,6 +3059,9 @@ class OperationCoordinator:
         context: Any,
         scope: Mapping[str, Any],
     ) -> tuple[tuple[Any, ...], list[dict[str, Any]]]:
+        if scope.get("client") == "workbuddy":
+            from .workbuddy_store import select_candidates
+            return select_candidates(context, scope, self._blocker)
         if getattr(context, "client_inventory", None) is not None:
             inventory = context.client_inventory
             try:
@@ -3610,7 +3695,18 @@ class OperationCoordinator:
 
     @staticmethod
     def _default_engine(client: str) -> str:
-        return {"pi": "pi", "claude": "claude"}.get(client, "codex")
+        return {"pi": "pi", "claude": "claude", "workbuddy": "workbuddy"}.get(client, "codex")
+
+    @staticmethod
+    def _bound_workbuddy_roots(document, requested=()):
+        if document.get("scope", {}).get("client") != "workbuddy":
+            return tuple(requested)
+        roots = tuple(Path(storage["path"]) for storage in document.get("storages", ()))
+        if not roots:
+            return tuple(requested)
+        if requested and {canonical_path(root) for root in requested} != {canonical_path(root) for root in roots}:
+            raise OperationCoordinatorError("workbuddy_frozen_store_mismatch")
+        return roots
 
     @staticmethod
     def _choose_plan_path(
@@ -3755,9 +3851,18 @@ class OperationCoordinator:
             for item in document.get("actions", ())
             if isinstance(item, Mapping)
         }
+        fresh_actions = tuple(getattr(context.plan, "actions", ()))
+        if document.get("scope", {}).get("client") == "workbuddy":
+            from .workbuddy_store import freeze_actions
+            completed = set(map(str, skip_child_ids))
+            pending_ids = {str(action_id) for batch in document.get("child_batches", ())
+                           if str(batch.get("child_operation_id")) not in completed for action_id in batch.get("action_ids", ())}
+            selected = tuple(action for action in fresh_actions if action.action_id in pending_ids and action.available)
+            rebound = {action.action_id: action for action in freeze_actions(selected)} if selected else {}
+            fresh_actions = tuple(rebound.get(action.action_id, action) for action in fresh_actions)
         current = {
             str(action.action_id): action
-            for action in getattr(context.plan, "actions", ())
+            for action in fresh_actions
         }
         frontend_by_target: dict[tuple[str, str, str], list[Any]] = {}
         for action in current.values():
@@ -4746,10 +4851,8 @@ class OperationCoordinator:
                                 (),
                             )
                         }
-                        typed = tuple(
-                            typed_by_id.get(str(action.action_id), action)
-                            for action in batch.actions
-                        )
+                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) == "delete_workbuddy_session"
+                                      else typed_by_id.get(str(action.action_id), action) for action in batch.actions)
                         outcome = self.service.execute(
                             batch_context,
                             typed,

@@ -36,6 +36,7 @@
 | Orca / Codex | journal 引用与已证明 homes 的原生清单；限定 Windows 原生删除 | 静态能力关闭，精确 v3 operation 逐目标资格见下文；未知来源保持 incomplete |
 | Orca / Claude、其他引擎 | 只读引用与来源错误 | 本机 Claude account root 仅用于精确保护，不提供 Orca native catalog/writer |
 | Herdr / Codex、Claude、Pi、未知 backend | 持久化 current/restore；显式 live metadata | rootless；全部 writer 归属未知，全部写入及自身 verify 关闭 |
+| WorkBuddy / WorkBuddy | 独立 SQLite、精确会话 artifacts 和 UI 引用 | 仅支持已识别 5.6.2 本地终态范围，Windows writer 覆盖及完整冻结证据；未知副本只读 |
 | 未识别 backend | 清单 | 原始名称保留，不继承已知引擎 writer |
 
 兼容回归使用[固定 v1 样本](../tests/fixtures/operation_v1.json)及
@@ -184,6 +185,63 @@ manual、GUI 和直接服务入口使用相同 gate，阻止绕过已有 journal
 不完整清单、未知 backend/别名、原生独立会话、并发漂移及 unknown 不重发。
 同时验证完整副本范围、关系语义、运行方检查、精确选择、schema 变化和跨进程恢复。
 没有 writer/运行归属/验证证据的组合保持 inventory-only；已知引擎名不能跳过验收。
+
+## WorkBuddy：独立本地会话
+
+WorkBuddy 不继承 Claude/Codex 身份或存储规则。其 `ClientAdapter` 使用独立
+`workbuddy` client、engine 和 `(profile root, session UUID)` 身份；不同 profile 的
+同一个 UUID 是两个目标。只有所选客户端或显式 `--workbuddy-root` 才发现该存储，
+默认 root 为 `WORKBUDDY_CONFIG_DIR` 或 `~/.workbuddy`，显式 roots 替换默认值。
+重复 roots 按规范化物理定位去重，不作为其他客户端的全局保护来源。
+
+支持 schema 固定为 WorkBuddy 5.6.2 的 `workbuddy.db`，完整表、列、索引和 trigger
+集合必须匹配[随包 schema 资源](../src/local_agent_record_janitor/workbuddy_schema_562.json)。
+未知 schema、损坏或缺失数据库、链接路径、超出有界发现范围，以及无法解释的
+会话来源都产生结构化错误。SQLite 用 URI `mode=ro` 盘点；只查询白名单 ID、cwd、
+归属、状态和时间字段。共享库内容以临时 SQLite snapshot 的规范化文件指纹守护，
+不把 title、prompt、配置内容或消息 cell 转为计划证据。
+
+`delete_workbuddy_session` 可删除 terminal、`transport='local'` 且 origin 为 local
+或空的已证明记录。项目/all-projects 默认只选 `deleted_at > 0` 的软删除行；完整
+`--record-id` 可明确选择仍保留的终态会话，ID 前缀不匹配。全部批准 ID 在同一个
+物理 root 中组成一个 batch，精确删除 `sessions` 和可选 `session_usage` 行，
+清理下列已识别的记录专属文件与结构化 ID 引用：
+
+- `projects/<cwd-slug>/<sid>.jsonl`、`<sid>.meta.json` 和验证为空的 `<sid>.quickask`；
+- `artifact-index/<sid>.json`、`file-tree-manifests/<sid>.json`、`media-index/<sid>.json`；
+- `<user_id>/sidebar-list-snapshot.json` 的 `items[].id`，以及当前/旧版
+  `storage/user-<uid>[-<environment>]/[global/]conversations.json` 的 `pinned[].id`。
+
+独占文件只流式 hash，不解析聊天内容；共享 JSON 只输出 ID、状态等 scalar 元数据，
+重复 keys、未知结构或嵌套 metadata 会阻止重写。其他会话、配置、账户、插件、skills、
+memory、workspace/session 工作产物、自动化定义和共享 content-addressed blobs 保留。
+这些索引的删除不保证其可能引用的共享附件被清除。
+
+`.file-rollback.ndjson` 虽出现在 platform file policy 中，但未证明完整写入构造和
+独占归属，返回 `workbuddy_unproven_rollback_sidecar`。session 子目录和 flat subagent
+副本的完整闭包也未证明；相关目标只读。非空 `media-index-workspace` 和未理解的
+根 `session-artifacts.json` 阻止该 root 的删除。关联的 edge-sync SQLite 会话映射、
+cloud/未知 transport/origin 和自动化依赖阻止受影响目标。UI-only/孤立文件 ID 保留
+为 `unverified`；all-projects 报覆盖缺口，独立本地 exact-ID 不因无关 UI-only ID 被
+扩为全 root 删除。`remote_delete=false`，不发送云端请求或声称云端已空。
+
+执行需真实 `--clients-closed` 声明，并在 Windows 上用 bounded CIM metadata 核验
+WorkBuddy、已知 vendor/supervisor/CLI、按安装路径或配置参数归属的 runtime、其
+后代进程及 runtime registry PID。命令文本只提及 WorkBuddy 不证明 shell 是 writer；
+缺字段、超时或无法归属保持 unknown。registry endpoint 不输出、不连接。
+
+冻结证据包含整共享 DB/UI 的 before 与批准 batch 的确定 after 指纹、精确 rows、
+文件集合、身份/hash 和受影响数量。获得 SQLite writer lock 后再次核验完整库指纹；
+任何已选/未选内容漂移、链接或新增副本都会阻止写入。同库共享路径进入 mutation
+footprint，unknown 会阻止另一个 SID 在该库上写入，但不扩大已批准 ID，也不阻止
+独立 root。只为共享 DB/JSON 建短期 rollback，不保留 transcript 备份。
+
+部分 unlink 或 DB commit 后 JSON/file 失败保持 unknown。恢复只读，不重发删除或
+盲目恢复库；只有证明完整 before/after 才清理临时副本。缺失 backup 不能以“IDs 已
+不存在”代替完整冻结 after 指纹。已经可信终验并清除 rollback 的 child 才可用精确
+SID 残留复核，后续另一个合法会话删除不改变原有完成结论。相关契约与临时 fixture
+见 [operation CLI](operation-cli.md#workbuddy-local-sessions)和
+[WorkBuddy 回归](../tests/test_workbuddy.py)。
 
 ## Orca 与 Herdr 的接入边界
 

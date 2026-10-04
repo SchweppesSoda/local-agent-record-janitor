@@ -78,6 +78,7 @@ class ClientTarget:
     frontend_binding_keys: tuple[str, ...] = ()
     references: tuple[ClientReference, ...] = ()
     relations: tuple[RelationEvidence, ...] = ()
+    record_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def record_id(self) -> str | None:
@@ -133,6 +134,7 @@ class ClientTarget:
             ],
             "references": [reference.to_dict() for reference in self.references],
             "relations": [relation.to_dict() for relation in self.relations],
+            **({"record_metadata": dict(self.record_metadata)} if self.record_metadata else {}),
         }
 
 
@@ -438,6 +440,11 @@ def build_client_engine_contexts(
             adapter_list, client=selected_client, engines=engines
         )
     requested = _normalize_engines(engines)
+    if selected_client == "workbuddy":
+        return tuple(ClientEngineContext(inventory=inventory, engine=engine,
+            targets=tuple(target for target in inventory.targets if target.engine == engine),
+            frontend_sessions=(), native_catalog=None, capability=inventory.capabilities[engine])
+            for engine in inventory.engines)
     engine_names = requested or tuple(dict.fromkeys((
         *inventory.engines,
         *(engine for descriptor in inventory.descriptors for engine in descriptor.inventory_engines),
@@ -1176,6 +1183,9 @@ def build_client_inventory(
     if not selected_client:
         raise ClientInventoryError("client selector must not be blank")
     requested_engines = _normalize_engines(engines)
+    if selected_client == "workbuddy":
+        from .workbuddy_store import build_inventory
+        return build_inventory(tuple(adapters), engines=requested_engines)
     selected_adapters = [
         adapter for adapter in adapters
         if _adapter_client(adapter) == selected_client
@@ -1852,6 +1862,7 @@ def _retarget_target(
         "record:v1:",
         "pi-session:v1:",
         "claude-session:v1:",
+        "delete_workbuddy_session:",
     )
     project_action_ids = [
         action_id
