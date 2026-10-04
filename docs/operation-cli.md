@@ -189,9 +189,21 @@ The dedicated `delete_workbuddy_session` family supports the fixed WorkBuddy
 5.6.2 schema and proven local terminal record closure. Project/all-projects scopes
 select only soft-deleted rows (`deleted_at > 0`). Retained terminal rows require
 explicit full session UUIDs through `--record-id`; prefixes do not select records.
-One root has one batch containing only approved IDs. Plan freezes exact SQLite
+One root has one batch per selected mutation family containing only approved IDs. Plan freezes exact SQLite
 rows, exclusive artifact paths, supported sidebar/pinned references, complete shared
 store fingerprints, and reproducible batch after fingerprints.
+
+The independent `remove_workbuddy_ui_reference` family removes exact local
+pinned-only IDs, without dispatching native SQLite DELETE. Eligibility requires
+no native/usage row, session artifact, sidebar reference, sync association or
+automation dependency, and one user/environment's current global store plus only
+its known legacy migration sources. Select these IDs explicitly in a separate
+fresh plan from local-session deletion; mixed selection is blocked. Results report
+`removed_ui_only_ids` separately from `deleted_session_ids`.
+
+Local-session closure includes a same-stem `.file-rollback.ndjson` only beside its
+top-level UUID transcript and only for the supported `{v:1,requestId,commitSeq}`
+metadata format. The plan records format/count/fingerprint, not request IDs.
 
 Apply restores frozen WorkBuddy roots when they are omitted and rejects conflicting
 explicit roots. It requires `--clients-closed`, complete related-writer closure and
@@ -202,7 +214,7 @@ after complete proof. User work products and configuration/automation definition
 remain. Shared attachment cleanup and cloud deletion are outside this guarantee;
 `remote_delete=false` and no cloud API is called.
 
-Unknown schema, orphan files/UI-only IDs, unproven rollback sidecars or subagent
+Unknown schema, orphan files/unknown UI-only IDs, unproven rollback formats or subagent
 copies, shared media indexes and related remote mappings remain visible as blockers.
 An empty database does not prove full cleanup. Unrelated UI-only IDs are retained
 without blocking an independently proven exact local ID; all-projects reports their
@@ -215,6 +227,10 @@ the immutable complete before/after proof, even if backup files are missing; mix
 state preserves recovery evidence. Only a trusted completed child checkpoint or
 receipt with no remaining rollback permits later exact-ID verification without
 requiring the historical whole-store hash after other legitimate operations.
+WorkBuddy evidence preserves explicit null row/usage/sidecar fields across plan
+persistence so a fresh process can verify the exact frozen snapshot. A started
+unknown operation is marked modified only after strict after-state verification;
+an unchanged before-state retains its residuals and does not claim modification.
 
 ## Output
 

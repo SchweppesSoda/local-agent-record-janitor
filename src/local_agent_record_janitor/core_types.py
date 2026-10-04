@@ -38,6 +38,7 @@ class RecordKind(str, Enum):
     NATIVE_PROJECT = "native_project"
     SCHEDULE_RUN = "schedule_run"
     WORKBUDDY_SESSION = "workbuddy_session"
+    WORKBUDDY_UI_REFERENCE = "workbuddy_ui_reference"
 
 
 class MutationKind(str, Enum):
@@ -55,6 +56,7 @@ class MutationKind(str, Enum):
     DELETE_NATIVE_PROJECT = "delete_native_project"
     DELETE_SCHEDULE_RUN = "delete_schedule_run"
     DELETE_WORKBUDDY_SESSION = "delete_workbuddy_session"
+    REMOVE_WORKBUDDY_UI_REFERENCE = "remove_workbuddy_ui_reference"
     KEEP = "keep"
 
     # These values remain parseable only while the public 0.1 JSON contract is

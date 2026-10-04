@@ -171,10 +171,10 @@ def plan_counts(
 
 
 def _physical_artifact_count(action: Any) -> int:
-    if enum_value(action.kind) == "delete_workbuddy_session":
+    if enum_value(action.kind) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}:
         impact = action.impact
         evidence = impact.external_action_payload["workbuddy_session_evidence"]
-        return 1 + int(evidence["usage"] is not None) + len(evidence["artifacts"]) + len(evidence["references"])
+        return int(evidence["row"] is not None) + int(evidence["usage"] is not None) + len(evidence["artifacts"]) + len(evidence["references"])
     impact = action.impact
     if enum_value(action.kind) == "delete_schedule_run":
         return 1

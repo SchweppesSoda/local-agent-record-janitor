@@ -521,8 +521,8 @@ def capability_for(
     normalized_client = normalize_client(client)
     normalized_engine = normalize_engine(engine)
     if normalized_client == "workbuddy" and normalized_engine == "workbuddy":
-        return EngineCapability("workbuddy", "workbuddy", native_delete=True, verify=True,
-            reason="Exact supported local WorkBuddy sessions only; remote and unproven copies remain inventory-only")
+        return EngineCapability("workbuddy", "workbuddy", native_delete=True, frontend_reference_delete=True, verify=True,
+            reason="Exact supported local sessions or proven local-only pinned references; no remote deletion")
     if normalized_client in {"cindy", "aionui"} and normalized_engine in {
         "codex", "pi", "claude",
     }:

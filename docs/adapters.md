@@ -208,22 +208,40 @@ WorkBuddy 不继承 Claude/Codex 身份或存储规则。其 `ClientAdapter` 使
 清理下列已识别的记录专属文件与结构化 ID 引用：
 
 - `projects/<cwd-slug>/<sid>.jsonl`、`<sid>.meta.json` 和验证为空的 `<sid>.quickask`；
+- 同一目录已有 `<sid>.jsonl` 对应的 `<sid>.file-rollback.ndjson`，仅接受下面的 v1 元数据格式；
 - `artifact-index/<sid>.json`、`file-tree-manifests/<sid>.json`、`media-index/<sid>.json`；
 - `<user_id>/sidebar-list-snapshot.json` 的 `items[].id`，以及当前/旧版
   `storage/user-<uid>[-<environment>]/[global/]conversations.json` 的 `pinned[].id`。
 
-独占文件只流式 hash，不解析聊天内容；共享 JSON 只输出 ID、状态等 scalar 元数据，
+独占 transcript 只流式 hash，不解析聊天内容；共享 JSON 只输出 ID、状态等 scalar 元数据，
 重复 keys、未知结构或嵌套 metadata 会阻止重写。其他会话、配置、账户、插件、skills、
 memory、workspace/session 工作产物、自动化定义和共享 content-addressed blobs 保留。
 这些索引的删除不保证其可能引用的共享附件被清除。
 
-`.file-rollback.ndjson` 虽出现在 platform file policy 中，但未证明完整写入构造和
-独占归属，返回 `workbuddy_unproven_rollback_sidecar`。session 子目录和 flat subagent
-副本的完整闭包也未证明；相关目标只读。非空 `media-index-workspace` 和未理解的
+已安装 5.6.2 的 `resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs` 中，
+`getFileBackupRecordPath` 将 transcript 文件名主干映射为 `.file-rollback.ndjson`；
+`FileBackupRecordStore` 追加 `{v:1, requestId:string, commitSeq:integer}` 元数据。
+writer 只在顶层 UUID transcript 与相邻 sidecar 配对、每行恰好包含上述键且通过
+有界格式验证时删除该 sidecar。计划只保留格式、条数和文件指纹，不输出 requestId；
+未知版本、重复键、额外键或缺失 transcript 均阻止删除。session 子目录和 flat
+subagent 副本的完整闭包未证明；`agent-*`/parent 会话范围保持只读。
+非空 `media-index-workspace` 和未理解的
 根 `session-artifacts.json` 阻止该 root 的删除。关联的 edge-sync SQLite 会话映射、
-cloud/未知 transport/origin 和自动化依赖阻止受影响目标。UI-only/孤立文件 ID 保留
-为 `unverified`；all-projects 报覆盖缺口，独立本地 exact-ID 不因无关 UI-only ID 被
-扩为全 root 删除。`remote_delete=false`，不发送云端请求或声称云端已空。
+cloud/未知 transport/origin 和自动化依赖阻止受影响目标。
+
+`remove_workbuddy_ui_reference` 独立清理完整 ID 的本地置顶引用。它要求该 ID 没有
+session/usage 行、会话 artifact、sidebar 引用、同步关联或自动化依赖，且引用只属于
+一个用户和环境的当前 `global/conversations.json` 及其已知迁移来源。此规则来自
+5.6.2 `app.asar` 的 `main/conversations.js`：`PinnedConversationsStore.setTop`/`reorder`
+仅修改本地存储，当前 global 来源与旧环境/用户来源存在迁移关系。所有已发现的
+匹配引用都冻结并精确移除，保留其他 ID 的 `groupKey` 和顺序；跨用户/环境引用
+保持阻断。此动作不会 dispatch 原生 SQL DELETE，结果区分 `removed_ui_only_ids`
+与 `deleted_session_ids`。仅置顶引用必须显式按完整 ID 选择，并与会话删除分别建立
+新计划；混合选择返回 `workbuddy_mixed_mutation_families`。
+
+其他 UI-only/孤立文件 ID 保留为 `unverified`；all-projects 报覆盖缺口，独立本地
+exact-ID 不因无关 UI-only ID 被扩为全 root 删除。`remote_delete=false`，不发送
+云端请求或声称云端已空。
 
 执行需真实 `--clients-closed` 声明，并在 Windows 上用 bounded CIM metadata 核验
 WorkBuddy、已知 vendor/supervisor/CLI、按安装路径或配置参数归属的 runtime、其

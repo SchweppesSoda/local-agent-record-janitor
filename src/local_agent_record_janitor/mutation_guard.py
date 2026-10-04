@@ -81,7 +81,7 @@ def action_target_ids(action: Any) -> frozenset[str] | None:
         "delete_conversation", "delete_pi_session", "delete_claude_session",
         "remove_desktop_state", "remove_frontend_reference", "delete_frontend_session",
         "delete_project_item", "delete_native_project", "remove_broken_relation",
-        "delete_workbuddy_session",
+        "delete_workbuddy_session", "remove_workbuddy_ui_reference",
     }:
         return None
     target = _value(action, "target", {})
@@ -129,7 +129,7 @@ def action_target_ids(action: Any) -> frozenset[str] | None:
     collect(impact.to_dict() if callable(getattr(impact, "to_dict", None)) else impact)
     paths = [*(_value(impact, "external_artifact_paths", ()) or ()),
              *(_value(impact, "rollout_paths", ()) or ())]
-    if kind == "delete_workbuddy_session":
+    if kind in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}:
         evidence = _value(payload, "workbuddy_session_evidence", {}) or {}
         # SQLite and JSON rollback affect shared files. Different session IDs
         # cannot pass an unresolved sibling that owns those same files.

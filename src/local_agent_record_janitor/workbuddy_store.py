@@ -24,9 +24,12 @@ from .record_identity import EngineCapability, ProjectKey, RecordClassification,
 from .sqlite_utils import connect_readonly
 
 KIND = "delete_workbuddy_session"
+UI_KIND = "remove_workbuddy_ui_reference"
 SCHEMA = "larj.workbuddy-session-evidence.v1"
 MAX_ENTRIES = 20000
 MAX_JSON_BYTES = 16 * 1024 * 1024
+MAX_ROLLBACK_LINE_BYTES = 8192
+ROLLBACK_FORMAT = "workbuddy.file-rollback.v1"
 META_COLUMNS = ("id", "cwd", "user_id", "status", "created_at", "updated_at", "last_activity_at", "deleted_at",
                 "is_playground", "source_mode", "is_background_automation", "mode", "project_id", "transport",
                 "conversation_origin", "visibility", "group_id", "agent_dirty", "agent_dirty_at", "agent_last_synced",
@@ -328,8 +331,32 @@ def _read_ui(path, root, role):
     return {"path": str(path), "role": role, "file": info, "references": references}
 
 
+def _rollback_format(path):
+    """Validate only the SDK's bounded request-to-commit metadata journal."""
+    if path.stat().st_size > MAX_JSON_BYTES:
+        raise WorkBuddyStoreError("workbuddy_rollback_metadata_unknown")
+    count = 0
+    with path.open("rb") as handle:
+        while line := handle.readline(MAX_ROLLBACK_LINE_BYTES + 1):
+            if len(line) > MAX_ROLLBACK_LINE_BYTES:
+                raise WorkBuddyStoreError("workbuddy_rollback_metadata_unknown")
+            if not line.strip():
+                continue
+            value = _strict_json(line)
+            if (not isinstance(value, dict) or set(value) != {"v", "requestId", "commitSeq"}
+                    or type(value["v"]) is not int or value["v"] != 1
+                    or not isinstance(value["requestId"], str) or not 0 < len(value["requestId"]) <= 4096
+                    or any(char in value["requestId"] for char in ("\x00", "\r", "\n"))
+                    or type(value["commitSeq"]) is not int or not 0 <= value["commitSeq"] <= 2**53 - 1):
+                raise WorkBuddyStoreError("workbuddy_rollback_metadata_unknown")
+            count += 1
+            if count > MAX_ENTRIES:
+                raise WorkBuddyStoreError("workbuddy_rollback_metadata_unknown")
+    return {"format": ROLLBACK_FORMAT, "record_count": count}
+
+
 def _artifact_inventory(root):
-    result, blockers, directories = {}, {}, {}
+    result, blockers, directories, rollback_formats = {}, {}, {}, {}
     total = 0
 
     def add(session_id, path, code=None):
@@ -358,7 +385,21 @@ def _artifact_inventory(root):
             if path.name in {session_id + suffix for suffix in ARTIFACT_SUFFIXES}:
                 add(session_id, path)
             elif path.name == session_id + ".file-rollback.ndjson":
-                add(session_id, path, "workbuddy_unproven_rollback_sidecar")
+                add(session_id, path)
+                before = result[session_id][-1]
+                transcript = path.with_name(session_id + ".jsonl")
+                if not transcript.is_file():
+                    blockers.setdefault(session_id, []).append("workbuddy_rollback_transcript_identity_unproven")
+                    continue
+                try:
+                    plain_path(transcript, root, regular=True)
+                    shape = _rollback_format(path)
+                    if fingerprint(path, root) != before:
+                        raise WorkBuddyStoreError("workbuddy_file_changed_during_read")
+                except (ValueError, UnicodeError, WorkBuddyStoreError):
+                    blockers.setdefault(session_id, []).append("workbuddy_rollback_metadata_unknown")
+                else:
+                    rollback_formats.setdefault(session_id, {})[str(path)] = shape
             elif path.name == session_id + ".quickask":
                 add(session_id, path, "workbuddy_quickask_contents_unproven" if path.lstat().st_size else None)
             else:
@@ -374,7 +415,7 @@ def _artifact_inventory(root):
     if (root / "session-artifacts.json").exists():
         fingerprint(root / "session-artifacts.json", root)
         raise WorkBuddyStoreError("workbuddy_session_artifacts_source_unproven")
-    return result, blockers, directories
+    return result, blockers, directories, rollback_formats
 
 
 def _sync_snapshot(root):
@@ -412,12 +453,43 @@ def _sync_snapshot(root):
     return results, linked
 
 
+def _pinned_scope(root, references):
+    """One current user/environment and only its known migration sources."""
+    scopes = []
+    current = set()
+    for reference in references:
+        if reference.get("role") != "pinned":
+            return None
+        try:
+            parts = Path(reference["source"]).relative_to(root).parts
+        except (ValueError, KeyError):
+            return None
+        if len(parts) not in (3, 4) or parts[0] != "storage" or parts[-1] != "conversations.json":
+            return None
+        match = re.fullmatch(r"user-([0-9a-f-]{36})(?:-([A-Za-z0-9_-]+))?", parts[1])
+        if not match or not valid_id(match[1]):
+            return None
+        scopes.append((match[1], match[2]))
+        if len(parts) == 4:
+            if parts[2] != "global" or match[2] is None:
+                return None
+            current.add((match[1], match[2]))
+    users = {uid for uid, _ in scopes}
+    environments = {environment for _, environment in scopes if environment is not None}
+    if len(users) != 1 or len(environments) != 1 or len(current) != 1:
+        return None
+    uid, environment = next(iter(current))
+    if users != {uid} or environments != {environment}:
+        return None
+    return {"user_id": uid, "environment_id": environment}
+
+
 def snapshot(root):
     root = local_root(root)
     plain_path(root, root)
     db = _database_snapshot(root)
     ui = [_read_ui(path, root, role) for path, role in _ui_paths(root, {r["user_id"] for r in db["rows"].values()})]
-    artifacts, artifact_blockers, artifact_directories = _artifact_inventory(root)
+    artifacts, artifact_blockers, artifact_directories, rollback_formats = _artifact_inventory(root)
     sync, sync_ids = _sync_snapshot(root)
     references = {}
     for source in ui:
@@ -442,14 +514,30 @@ def snapshot(root):
         record_files = sorted(artifacts.get(session_id, []), key=lambda value: value["path"])
         records[session_id] = {"session_id": session_id, "row": row, "usage": db["usage"].get(session_id),
             "artifacts": record_files, "artifact_directories": artifact_directories.get(session_id, []),
-            "references": record_refs, "blocker_codes": sorted(set(codes)), "source_kind": "database"}
+            "references": record_refs, "blocker_codes": sorted(set(codes)), "source_kind": "database",
+            "mutation_kind": KIND, "rollback_sidecars": rollback_formats.get(session_id, {})}
     for session_id in sorted((set(artifacts) | set(artifact_blockers) | set(references) | set(db["usage"])) - set(records)):
+        record_refs = references.get(session_id, [])
+        ui_scope = _pinned_scope(root, record_refs) if record_refs else None
+        pinned_only = bool(record_refs) and all(item["role"] == "pinned" for item in record_refs)
+        ui_only = (pinned_only and ui_scope is not None
+            and session_id not in db["usage"] and not artifacts.get(session_id) and not artifact_directories.get(session_id)
+            and session_id not in artifact_blockers and session_id not in sync_ids
+            and not any(session_id in values for values in db["dependencies"].values()))
+        codes = ([] if ui_only else ["workbuddy_record_identity_unproven", *artifact_blockers.get(session_id, ())])
+        if session_id in sync_ids:
+            codes.append("workbuddy_remote_sync_reference_unproven")
+        if any(session_id in values for values in db["dependencies"].values()):
+            codes.append("workbuddy_session_dependency_unproven")
+        if pinned_only and ui_scope is None:
+            codes.append("workbuddy_ui_reference_scope_unproven")
         records[session_id] = {"session_id": session_id, "row": None, "usage": db["usage"].get(session_id),
             "artifacts": sorted(artifacts.get(session_id, []), key=lambda value: value["path"]),
             "artifact_directories": artifact_directories.get(session_id, []),
             "references": references.get(session_id, []),
-            "blocker_codes": ["workbuddy_record_identity_unproven", *artifact_blockers.get(session_id, ())],
-            "source_kind": "orphan_artifact_or_ui_reference"}
+            "blocker_codes": sorted(set(codes)), "source_kind": "local_pinned_reference_only" if ui_only else "orphan_artifact_or_ui_reference",
+            "mutation_kind": UI_KIND if ui_only else KIND, "rollback_sidecars": rollback_formats.get(session_id, {}),
+            "ui_scope": ui_scope}
     return {"root": str(root), "database": str(root / "workbuddy.db"), "database_snapshot": db,
             "ui_sources": ui, "sync_stores": sync, "records": records,
             "coverage": {"supported_schema": "WorkBuddy 5.6.2", "remote_delete": False,
@@ -459,7 +547,7 @@ def snapshot(root):
 
 def evidence_for(observation, record):
     db = observation["database_snapshot"]
-    return {"schema_version": SCHEMA, "root": observation["root"], "database": observation["database"],
+    evidence = {"schema_version": SCHEMA, "root": observation["root"], "database": observation["database"],
             "session_id": record["session_id"], "row": record["row"], "usage": record["usage"],
             "schema_sha256": db["schema_sha256"], "database_sha256": db["database_sha256"],
             "database_file": db["database_file"], "database_sidecars": db["database_sidecars"],
@@ -467,6 +555,12 @@ def evidence_for(observation, record):
             "ui_sources": observation["ui_sources"], "sync_stores": observation["sync_stores"],
             "shared_paths": [observation["database"], *(source["path"] for source in observation["ui_sources"]
                               if any(item["id"] == record["session_id"] for item in source["references"]))]}
+    if record["mutation_kind"] == UI_KIND:
+        evidence["mutation_kind"] = UI_KIND
+        evidence["ui_scope"] = record["ui_scope"]
+    if record["rollback_sidecars"]:
+        evidence["rollback_sidecars"] = record["rollback_sidecars"]
+    return evidence
 
 
 def bind_batch(evidence):
@@ -561,6 +655,9 @@ def select_candidates(context, scope, blocker):
         if not action.available:
             for code in (action.unavailable_reason or "workbuddy_record_boundary_unproven").split(", "):
                 errors.append(blocker(code, code, scope="action:" + action.action_id, action_id=action.action_id))
+    if len({action.kind for action in selected}) > 1:
+        errors.append(blocker("workbuddy_mixed_mutation_families", "Select local sessions and pinned-only references in separate fresh plans", scope="selection"))
+        return (), errors
     executable = tuple(action for action in selected if action.available)
     if executable and not errors:
         executable = freeze_actions(executable)
@@ -569,8 +666,8 @@ def select_candidates(context, scope, blocker):
     return executable, errors
 
 
-def action_id(root, session_id):
-    return KIND + ":" + digest([canonical_path(root), session_id])[:32]
+def action_id(root, session_id, kind=KIND):
+    return kind + ":" + digest([canonical_path(root), session_id])[:32]
 
 
 def build_inventory(adapters, *, engines=()):
@@ -594,7 +691,9 @@ def build_inventory(adapters, *, engines=()):
         for record in observation["records"].values():
             row, sid = record["row"], record["session_id"]
             codes = tuple(record["blocker_codes"])
-            capability = EngineCapability("workbuddy", "workbuddy", native_delete=not codes, verify=True,
+            is_ui = record["mutation_kind"] == UI_KIND
+            capability = EngineCapability("workbuddy", "workbuddy", native_delete=not codes and not is_ui,
+                frontend_reference_delete=not codes and is_ui, verify=True,
                 blockers=tuple({"blocker_code": code, "scope": "workbuddy_session"} for code in codes),
                 reason="Exact verified local WorkBuddy record closure" if not codes else "WorkBuddy record is inventory-only")
             project = ProjectKey.from_path("workbuddy", row["cwd"]) if row and row["cwd"] else None
@@ -604,18 +703,20 @@ def build_inventory(adapters, *, engines=()):
             targets.append(ClientTarget("workbuddy", "workbuddy", RecordKey(store, sid, kind="workbuddy_session"),
                 project, sid, tuple(r.binding_key for r in refs),
                 RecordClassification.PARTIAL_REMOTE if "workbuddy_remote_or_unknown_transport" in codes else
-                RecordClassification.HEALTHY if row else RecordClassification.UNVERIFIED,
-                capability, action_ids=(action_id(adapter.profile_root, sid),) if not codes else (),
+                RecordClassification.HEALTHY if row else RecordClassification.ORPHAN_FRONTEND if is_ui else RecordClassification.UNVERIFIED,
+                capability, action_ids=(action_id(adapter.profile_root, sid, record["mutation_kind"]),) if not codes else (),
                 blocker_codes=codes, blockers=capability.blockers, references=refs,
                 frontend_binding_keys=tuple(r.binding_key for r in refs),
                 record_metadata={"session": row, "usage": record["usage"], "source_kind": record["source_kind"],
                     "artifact_count": len(record["artifacts"]), "artifacts": record["artifacts"],
                     "artifact_directory_count": len(record["artifact_directories"]), "artifact_directories": record["artifact_directories"],
-                    "ui_reference_count": len(record["references"]), "coverage": observation["coverage"]}))
+                    "ui_reference_count": len(record["references"]), "rollback_sidecars": record["rollback_sidecars"],
+                    "mutation_kind": record["mutation_kind"], "ui_scope": record.get("ui_scope"), "coverage": observation["coverage"]}))
     engine_names = tuple(engines) or ("workbuddy",)
     return ClientInventory(client="workbuddy", engines=engine_names, projects=tuple(projects.values()), records=(),
         frontend_sessions=(), unmapped_frontend_sessions=(), targets=tuple(targets),
-        capabilities={engine: EngineCapability("workbuddy", engine, native_delete=engine == "workbuddy") for engine in engine_names},
+        capabilities={engine: EngineCapability("workbuddy", engine, native_delete=engine == "workbuddy",
+                                              frontend_reference_delete=engine == "workbuddy") for engine in engine_names},
         errors=tuple(errors), descriptors=tuple(descriptors), references=tuple(references), scanned_databases=tuple(scanned),
         scanned_resources=tuple((canonical_path(path), "workbuddy_sessions") for path in scanned))
 
@@ -657,7 +758,7 @@ class WorkBuddyAdapter:
                 profile_root=self.profile_root, database=sources[0], store=store, error_type="WorkBuddyInventoryIncomplete"))
         descriptor = ClientDescriptor("workbuddy", profile_root=self.profile_root, sources=tuple(sources), native_stores=(store,),
             owner_process_root=self.profile_root, inventory_engines=("workbuddy",),
-            capability_limits=(EngineCapability("workbuddy", "workbuddy", native_delete=True, verify=True),))
+            capability_limits=(EngineCapability("workbuddy", "workbuddy", native_delete=True, frontend_reference_delete=True, verify=True),))
         self._snapshot = ReferenceSnapshot(descriptor, tuple(refs), tuple(failures))
         return self._snapshot
 
@@ -669,7 +770,8 @@ class WorkBuddyAdapter:
         return None  # This store has its own records, never a native CLI alias.
 
     def registered_capability(self, engine):
-        return EngineCapability("workbuddy", engine, native_delete=engine == "workbuddy", verify=True)
+        return EngineCapability("workbuddy", engine, native_delete=engine == "workbuddy",
+                                frontend_reference_delete=engine == "workbuddy", verify=True)
 
     def inspect_runtime(self):
         from .workbuddy_runtime import probe
@@ -699,8 +801,10 @@ def build_context(adapters, service, *, engines=(), refresh=False):
             continue
         for record in observation["records"].values():
             row, sid, codes = record["row"], record["session_id"], record["blocker_codes"]
+            is_ui = record["mutation_kind"] == UI_KIND
             evidence = evidence_for(observation, record)
-            actions.append(CandidateAction(action_id(adapter.profile_root, sid), ActionKind.DELETE_WORKBUDDY_SESSION,
+            actions.append(CandidateAction(action_id(adapter.profile_root, sid, record["mutation_kind"]),
+                ActionKind.REMOVE_WORKBUDDY_UI_REFERENCE if is_ui else ActionKind.DELETE_WORKBUDDY_SESSION,
                 TargetRef(storage_id_for_path(adapter.profile_root), sid), RiskLevel.HIGH if not codes else RiskLevel.BLOCKED,
                 available=not codes, unavailable_reason=", ".join(codes) if codes else None,
                 impact=ActionImpact(index_record_count=int(row is not None), affected_thread_ids=(sid,),
@@ -709,8 +813,8 @@ def build_context(adapters, service, *, engines=(), refresh=False):
                     external_engine="workbuddy", external_artifact_paths=tuple(item["path"] for item in record["artifacts"]),
                     frontend_reference_count=len(record["references"]), frontend_references_preserved=False,
                     external_action_payload={"cwd": row["cwd"] if row else None, "workbuddy_session_evidence": evidence}),
-                snapshot_fingerprint=digest(evidence), resource_kind="workbuddy_session",
-                requires_explicit_selection=bool(row and not (row["deleted_at"] is not None and row["deleted_at"] > 0))))
+                snapshot_fingerprint=digest(evidence), resource_kind="workbuddy_ui_reference" if is_ui else "workbuddy_session",
+                requires_explicit_selection=is_ui or bool(row and not (row["deleted_at"] is not None and row["deleted_at"] > 0))))
     plan = replace(context.plan, storages=tuple(storages), actions=tuple(actions), errors=tuple(error.message for error in inventory.errors),
                    plan_fingerprint="workbuddy:v1:" + digest([action.to_dict() for action in actions]))
     return replace(context, plan=plan, actions=service.typed_actions(plan), frontend_scan_coverage=inventory.scanned_resources)
@@ -726,6 +830,10 @@ def _validated_evidence(evidence):
     root = local_root(next(iter(roots)))
     common = ("database", "schema_sha256", "database_sha256", "database_file", "database_sidecars", "ui_sources", "sync_stores")
     first = evidence[0]
+    kinds = {item.get("mutation_kind", KIND) for item in evidence}
+    if len(kinds) != 1 or not kinds <= {KIND, UI_KIND}:
+        raise WorkBuddyStoreError("workbuddy_mixed_mutation_families")
+    is_ui = kinds == {UI_KIND}
     if first["database"] != str(root / "workbuddy.db") or any(
             any(item[key] != first[key] for key in common) for item in evidence):
         raise WorkBuddyStoreError("workbuddy_frozen_scope_invalid")
@@ -734,7 +842,13 @@ def _validated_evidence(evidence):
                or item.get("after_ui_sha256") != first.get("after_ui_sha256") for item in evidence):
             raise WorkBuddyStoreError("workbuddy_frozen_batch_changed")
     for item in evidence:
-        if (not isinstance(item.get("row"), dict) or item["row"].get("id") != item["session_id"]
+        if is_ui:
+            if (item.get("row") is not None or item.get("usage") is not None or item["artifacts"]
+                    or not item["references"] or any(ref.get("id") != item["session_id"] for ref in item["references"])
+                    or item.get("ui_scope") is None or _pinned_scope(root, item["references"]) != item["ui_scope"]
+                    or item.get("rollback_sidecars")):
+                raise WorkBuddyStoreError("workbuddy_frozen_ui_identity_invalid")
+        elif (not isinstance(item.get("row"), dict) or item["row"].get("id") != item["session_id"]
                 or item["row"].get("transport") != "local"):
             raise WorkBuddyStoreError("workbuddy_frozen_identity_invalid")
         for artifact in item["artifacts"]:
@@ -745,6 +859,13 @@ def _validated_evidence(evidence):
                 raise WorkBuddyStoreError("workbuddy_path_escape") from exc
             project_artifact = (len(parts) == 3 and parts[0] == "projects"
                 and parts[-1] in {item["session_id"] + suffix for suffix in (*ARTIFACT_SUFFIXES, ".quickask")})
+            if len(parts) == 3 and parts[0] == "projects" and parts[-1] == item["session_id"] + ".file-rollback.ndjson":
+                metadata = item.get("rollback_sidecars", {}).get(artifact["path"])
+                peer = str(path.with_name(item["session_id"] + ".jsonl"))
+                project_artifact = (isinstance(metadata, dict) and set(metadata) == {"format", "record_count"}
+                    and metadata["format"] == ROLLBACK_FORMAT and type(metadata["record_count"]) is int
+                    and 0 <= metadata["record_count"] <= MAX_ENTRIES
+                    and any(candidate["path"] == peer for candidate in item["artifacts"]))
             index_artifact = (len(parts) == 2 and parts[0] in ("artifact-index", "file-tree-manifests", "media-index")
                 and parts[-1] == item["session_id"] + ".json")
             if not (project_artifact or index_artifact):
@@ -786,6 +907,8 @@ def _clean_json_bytes(original, role, ids):
 
 
 def _delete_rows(db, evidence):
+    if evidence[0].get("mutation_kind") == UI_KIND:
+        return 0, 0  # Local unpin never dispatches native SQL DELETE.
     session_count = usage_count = 0
     for item in sorted(evidence, key=lambda item: item["session_id"]):
         sid = item["session_id"]
@@ -801,6 +924,8 @@ def _delete_rows(db, evidence):
 
 
 def _expected_after(backup, evidence):
+    if evidence[0].get("mutation_kind") == UI_KIND:
+        return _sqlite_digest_file(backup)
     with tempfile.TemporaryDirectory(prefix="larj-workbuddy-verify-") as temporary:
         expected = Path(temporary) / "expected.sqlite"
         with closing(connect_readonly(backup)) as source:
@@ -954,6 +1079,10 @@ def remaining(evidence, *, terminal_verified=False):
     for sid in ids:
         known = {item["path"]: item for item in frozen_artifacts[sid]}
         record = current["records"].get(sid)
+        if first.get("mutation_kind") == UI_KIND and record and (
+                record["mutation_kind"] != UI_KIND or record.get("ui_scope") != next(
+                    item["ui_scope"] for item in evidence if item["session_id"] == sid)):
+            raise WorkBuddyStoreError("workbuddy_recovery_ui_boundary_unproven")
         actual = {item["path"]: item for item in record["artifacts"]} if record else {}
         if set(actual) - set(known) or any(item != known[path] for path, item in actual.items()):
             raise WorkBuddyStoreError("workbuddy_recovery_artifacts_changed")
@@ -1050,15 +1179,22 @@ def remaining(evidence, *, terminal_verified=False):
 
 @dataclass(frozen=True)
 class WorkBuddyCleanupResult:
-    deleted_ids: tuple[str, ...]
+    deleted_session_ids: tuple[str, ...]
+    removed_ui_only_ids: tuple[str, ...]
     deleted_session_count: int
     deleted_usage_count: int
     deleted_artifact_count: int
     removed_ui_reference_count: int
     status: str = "deleted"
 
+    @property
+    def deleted_ids(self):
+        return self.deleted_session_ids
+
     def to_dict(self):
         return {"status": self.status, "deleted_ids": list(self.deleted_ids), "verified": True,
+                "deleted_session_ids": list(self.deleted_session_ids), "removed_ui_only_ids": list(self.removed_ui_only_ids),
+                "removed_ui_only_count": len(self.removed_ui_only_ids),
                 "deleted_session_count": self.deleted_session_count, "deleted_usage_count": self.deleted_usage_count,
                 "deleted_artifact_count": self.deleted_artifact_count, "removed_ui_reference_count": self.removed_ui_reference_count,
                 "remote_delete": False, "temporary_rollback_retained": False}
@@ -1121,7 +1257,9 @@ def execute(evidence, *, client_inspector=None, phase_callback=None):
             raise WorkBuddyStoreError("workbuddy_deleted_records_remain")
         if phase_callback:
             phase_callback("verified")
-        return WorkBuddyCleanupResult(tuple(sorted(ids)), session_count, usage_count, artifact_count, removed_count)
+        is_ui = evidence[0].get("mutation_kind") == UI_KIND
+        return WorkBuddyCleanupResult(() if is_ui else tuple(sorted(ids)), tuple(sorted(ids)) if is_ui else (),
+            session_count, usage_count, artifact_count, removed_count, status="cleaned" if is_ui else "deleted")
     except Exception as exc:
         if db is not None:
             try:

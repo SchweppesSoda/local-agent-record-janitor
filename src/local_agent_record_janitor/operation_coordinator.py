@@ -1218,22 +1218,22 @@ class OperationCoordinator:
         from .workbuddy_store import remaining as remaining_workbuddy
         workbuddy_groups, workbuddy_actions = {}, {}
         for action in document.get("actions", ()):
-            if action.get("kind") == "delete_workbuddy_session":
+            if action.get("kind") in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}:
                 evidence = action["impact"]["external_action_payload"]["workbuddy_session_evidence"]
-                workbuddy_groups.setdefault(evidence["root"], []).append(evidence)
+                workbuddy_groups.setdefault((evidence["root"], action["kind"]), []).append(evidence)
                 workbuddy_actions[(evidence["root"], evidence["session_id"])] = action["action_id"]
-        for root, evidence in workbuddy_groups.items():
-            terminal_verified = cls._workbuddy_terminal_verified(document, root)
+        for (root, family), evidence in workbuddy_groups.items():
+            terminal_verified = cls._workbuddy_terminal_verified(document, root, family)
             for session_id in remaining_workbuddy(evidence, terminal_verified=terminal_verified):
                 residuals.append(workbuddy_actions[(root, session_id)])
         return list(dict.fromkeys(residuals))
 
     @classmethod
-    def _workbuddy_terminal_verified(cls, document: Mapping[str, Any], root: str) -> bool:
+    def _workbuddy_terminal_verified(cls, document: Mapping[str, Any], root: str, family: str = "delete_workbuddy_session") -> bool:
         """Trust only a completed child bound to this exact authorization."""
         storages = {str(item["storage_id"]): str(item["path"]) for item in document.get("storages", ())}
         batches = [batch for batch in document.get("child_batches", ())
-                   if batch.get("mutation_family") == "delete_workbuddy_session"
+                   if batch.get("mutation_family") == family
                    and storages.get(str(batch.get("storage_id"))) == root]
         if len(batches) != 1:
             return False
@@ -1384,6 +1384,17 @@ class OperationCoordinator:
                     or bool(state.get("modified"))
                 ):
                     continue
+                # WorkBuddy's residual check has proved the complete frozen
+                # after-state before reaching this journal update. A started
+                # mutation with every approved record removed is modified,
+                # even when an interruption prevented an execution result.
+                verified_modified = bool(state.get("modified")) or bool(
+                    raw_batch.get("mutation_family") in {
+                        "delete_workbuddy_session", "remove_workbuddy_ui_reference"
+                    }
+                    and state.get("mutation_started")
+                    and action_ids and not child_residuals
+                )
                 store.append_event(
                     {
                         "event": "verification_finished",
@@ -1394,6 +1405,7 @@ class OperationCoordinator:
                     state_updates={
                         "phase": "finished",
                         "mutation_started": bool(state.get("mutation_started")),
+                        "modified": verified_modified,
                         **({"runtime_instance": state["runtime_instance"]} if "runtime_instance" in state else {}),
                         "goal_status": goal,
                         "goal_satisfied": goal == "complete",
@@ -1421,7 +1433,7 @@ class OperationCoordinator:
                     "plan_sha256": str(plan.get("plan_sha256") or ""),
                     "goal_status": goal,
                     "goal_satisfied": goal == "complete",
-                    "modified": bool(state.get("modified")),
+                    "modified": verified_modified,
                     "mutation_started": bool(state.get("mutation_started")),
                     "blockers": blockers,
                     "counts": dict(plan.get("counts") or {
@@ -4851,7 +4863,7 @@ class OperationCoordinator:
                                 (),
                             )
                         }
-                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) == "delete_workbuddy_session"
+                        typed = tuple(action if str(getattr(action.kind, "value", action.kind)) in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}
                                       else typed_by_id.get(str(action.action_id), action) for action in batch.actions)
                         outcome = self.service.execute(
                             batch_context,
@@ -5934,9 +5946,13 @@ class OperationCoordinator:
         return value
 
     @staticmethod
-    def _metadata(value: Any, *, key: str | None = None) -> Any:
+    def _metadata(value: Any, *, key: str | None = None, _workbuddy_nulls: bool = False) -> Any:
         if key is not None and key.casefold() in _BODY_KEYS:
             return None
+        # Exact WorkBuddy evidence distinguishes a missing row/usage/sidecar
+        # from a value. Preserve its explicit nulls through plan persistence;
+        # continue applying the ordinary body-key filter throughout the tree.
+        _workbuddy_nulls = _workbuddy_nulls or key == "workbuddy_session_evidence"
         if key in {"title", "display_name", "thread_name", "name"}:
             from .display_metadata import display_title
             return display_title(value)
@@ -5945,19 +5961,19 @@ class OperationCoordinator:
         if isinstance(value, Mapping):
             result: dict[str, Any] = {}
             for name, raw in value.items():
-                cleaned = OperationCoordinator._metadata(raw, key=str(name))
-                if cleaned is not None:
+                cleaned = OperationCoordinator._metadata(raw, key=str(name), _workbuddy_nulls=_workbuddy_nulls)
+                if cleaned is not None or (_workbuddy_nulls and raw is None and str(name).casefold() not in _BODY_KEYS):
                     result[str(name)] = cleaned
             return result
         if isinstance(value, (list, tuple, set, frozenset)):
-            return [OperationCoordinator._metadata(item) for item in value]
+            return [OperationCoordinator._metadata(item, _workbuddy_nulls=_workbuddy_nulls) for item in value]
         if isinstance(value, Path):
             return str(value)
         if isinstance(value, (str, int, float, bool)) or value is None:
             return value
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
-            return OperationCoordinator._metadata(to_dict())
+            return OperationCoordinator._metadata(to_dict(), _workbuddy_nulls=_workbuddy_nulls)
         return str(value)
 
     @staticmethod

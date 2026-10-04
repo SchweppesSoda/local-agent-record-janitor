@@ -82,8 +82,10 @@ local-agent-record-janitor operation verify --operation-id '<operation-id>' --pl
 
 当前 writer 限定为已识别的 WorkBuddy 5.6.2 本地 schema 和已证明的记录副本、UI 引用。
 项目范围和 `--all-projects` 默认只选软删除会话；保留的终态会话必须以完整 ID 明确选择。
-`.file-rollback.ndjson`、未证明的 subagent 副本、云同步关联和未知 schema 会给出 blocker；
-数据库为空也不掩盖孤立文件或 UI-only ID。`complete` 只证明批准的本地记录范围，
+同名 transcript 旁的 `.file-rollback.ndjson` 只支持已验证 v1 元数据格式。仅含本地置顶
+引用的完整 ID 可用 `remove_workbuddy_ui_reference` 清除；它与会话删除分别创建新计划。
+未证明的 subagent 副本、回滚格式、云同步关联和未知 schema 会给出 blocker；
+数据库为空也不掩盖孤立文件或未知 UI-only ID。`complete` 只证明批准的本地记录范围，
 `remote_delete=false`，共享附件、用户工作产物和云端历史均不在清除保证中。账户、
 设置、插件、skills、memory、workspace 和自动化定义保留。详见
 [WorkBuddy 适配边界](docs/adapters.md#workbuddy独立本地会话)和
@@ -141,7 +143,7 @@ OpenAI 稳定 API。
 | Cindy | 软删除会话，或通过完整 Cindy 会话 ID 明确选择的保留会话；已失效的当前 `sdk_session_id` 或历史 `agent_switch` 引用 | 同一数据库内批量物理删除已批准的会话、消息、索引和支持的依赖；项目范围默认只选软删除行；引用清理仍使用精确字段/JSON 写入 |
 | Pi Agent | standalone 及每个 Cindy `<profile>/pi-agent-home/sessions` 的有界 JSONL 盘点 | 逐个精确删除可选 JSONL；live Cindy current/historical 引用阻止删除 |
 | Claude Code | effective config root 及可确定归属的 Cindy `claude-home`/默认 root | 逐 session 删除精确 manifest；共享配置、memory/history/index 保留 |
-| WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session`；仅可证明完整范围的本地终态会话，未知副本/归属及云同步关联阻止删除 |
+| WorkBuddy | 独立 profile 的 5.6.2 SQLite 元数据、精确会话文件及 sidebar/pinned 引用 | `delete_workbuddy_session` 与独立 `remove_workbuddy_ui_reference`；已证明的本地终态会话或仅置顶引用，未知归属及云同步关联阻止删除 |
 | Codex：index-only | thread 列表记录存在，但 rollout 内容文件不存在 | 删除整个 thread，通常为 `low` |
 | Codex：rollout-only | rollout 内容文件存在，但 thread 列表记录不存在 | 删除整个 thread，属于 `high`，必须明确选择 |
 | Codex：重复内容文件 | 同一 thread ID 有多份可验证 rollout 内容文件 | 保留，或把全部已确认副本作为整条 thread 的 `high` 风险删除范围；不提供隔离动作 |

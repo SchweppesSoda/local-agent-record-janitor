@@ -20,6 +20,7 @@ from local_agent_record_janitor import workbuddy_runtime as runtime
 SID = "00000000-0000-4000-8000-000000000001"
 OTHER = "00000000-0000-4000-8000-000000000002"
 ORPHAN = "00000000-0000-4000-8000-000000000003"
+ORPHAN_TWO = "00000000-0000-4000-8000-000000000004"
 USER = "00000000-0000-4000-8000-000000000010"
 SECRET = "PRIVATE transcript prompt and title should never appear in evidence"
 FIXTURE = Path(__file__).parent / "fixtures/workbuddy_562.sql"
@@ -90,6 +91,20 @@ class WorkBuddyTests(unittest.TestCase):
     def plan(self, *, coordinator=None, adapters=None, path=None, **scope):
         return (coordinator or self.coordinator()).plan_operation(client="workbuddy",
             adapters=adapters or (self.adapter(),), plan_path=path or self.base / "plan.json", **(scope or {"record_ids": (SID,)}))
+
+    def add_pinned_only(self, ids=(ORPHAN,), *, user=USER, environment="personal", legacy=True):
+        roots = [self.root / "storage" / f"user-{user}-{environment}" / "global"]
+        if legacy:
+            roots.extend((roots[0].parent, self.root / "storage" / f"user-{user}"))
+        before = {}
+        for directory in roots:
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / "conversations.json"
+            value = json.loads(path.read_text()) if path.exists() else {"pinned": []}
+            before[str(path)] = list(value["pinned"])
+            value["pinned"][1:1] = [{"id": sid, "groupKey": "private-group-to-preserve"} for sid in ids]
+            path.write_text(json.dumps(value))
+        return before
 
     def test_metadata_inventory_has_independent_identity_and_no_body(self):
         inventory = build_client_inventory((self.adapter(),), client="workbuddy")
@@ -176,7 +191,7 @@ class WorkBuddyTests(unittest.TestCase):
         self.assertEqual(result.deleted_ids, (SID,))
         self.assertEqual(store.remaining(evidence), [])
 
-    def test_cloud_unknown_transport_and_rollback_sidecar_inventory_only(self):
+    def test_cloud_unknown_transport_and_invalid_rollback_sidecar_inventory_only(self):
         for index, transport in enumerate(("cloud", "mystery")):
             with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
                 db.execute("UPDATE sessions SET transport=? WHERE id=?", (transport, SID)); db.commit()
@@ -186,11 +201,186 @@ class WorkBuddyTests(unittest.TestCase):
         with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
             db.execute("UPDATE sessions SET transport='local' WHERE id=?", (SID,)); db.commit()
         path = self.root / "projects/d-Users-fangjun-Documents-project" / (SID + ".file-rollback.ndjson")
-        path.write_text('{"v":1,"requestId":"x","commitSeq":1}\n')
+        path.write_text('{"v":2,"requestId":"x","commitSeq":1}\n')
         plan = self.plan(path=self.base / "blocked-sidecar.json", record_ids=(SID,))
         self.assertEqual(plan["goal_status"], "blocked", plan)
-        self.assertIn("workbuddy_unproven_rollback_sidecar", [item["blocker_code"] for item in plan["blockers"]])
+        self.assertIn("workbuddy_rollback_metadata_unknown", [item["blocker_code"] for item in plan["blockers"]])
         self.assertTrue(path.exists())
+
+    def test_proven_v1_rollback_sidecar_has_body_free_evidence_and_is_deleted(self):
+        path = self.root / "projects/d-Users-fangjun-Documents-project" / (SID + ".file-rollback.ndjson")
+        private_request = "private-request-id-not-in-evidence"
+        path.write_text(json.dumps({"v": 1, "requestId": private_request, "commitSeq": 1}) + "\n")
+        evidence = self.evidence()
+        self.assertNotIn(private_request, json.dumps(evidence))
+        self.assertEqual(evidence[0]["rollback_sidecars"][str(path)], {"format": store.ROLLBACK_FORMAT, "record_count": 1})
+        result = store.execute(evidence, client_inspector=lambda _: ())
+        self.assertEqual(result.deleted_artifact_count, 7)
+        self.assertFalse(path.exists())
+        self.assertEqual(result.deleted_session_ids, (SID,))
+        self.assertEqual(result.removed_ui_only_ids, ())
+
+    def test_rollback_malformed_duplicate_extra_nested_and_orphan_formats_block(self):
+        path = self.root / "projects/d-Users-fangjun-Documents-project" / (SID + ".file-rollback.ndjson")
+        cases = ('not-json', '{"v":1,"v":1,"requestId":"x","commitSeq":1}',
+            '{"v":true,"requestId":"x","commitSeq":1}', '{"v":1,"requestId":"x","commitSeq":-1}',
+            '{"v":1,"requestId":{"body":"private"},"commitSeq":1}', '{"v":1,"requestId":"x","commitSeq":1,"parentSessionId":"x"}')
+        for value in cases:
+            with self.subTest(value=value):
+                path.write_text(value + "\n")
+                target = next(target for target in build_client_inventory((self.adapter(),), client="workbuddy").targets if target.record_id == SID)
+                self.assertIn("workbuddy_rollback_metadata_unknown", target.blocker_codes)
+                self.assertFalse(target.capability.native_delete)
+        path.write_text('{"v":1,"requestId":"x","commitSeq":1}\n')
+        path.with_name(SID + ".jsonl").unlink()
+        self.assertIn("workbuddy_rollback_transcript_identity_unproven", store.snapshot(self.root)["records"][SID]["blocker_codes"])
+        self.assertTrue(path.exists())
+
+    def test_exact_pinned_only_cleanup_preserves_sessions_and_all_migration_sources(self):
+        before = self.add_pinned_only((ORPHAN, ORPHAN_TWO))
+        plan = self.plan(record_ids=(ORPHAN, ORPHAN_TWO))
+        self.assertEqual(plan["goal_status"], "ready", plan)
+        self.assertEqual(len(plan["child_batches"]), 1)
+        self.assertEqual(plan["child_batches"][0]["mutation_family"], store.UI_KIND)
+        self.assertEqual({action["resource"]["kind"] for action in plan["actions"]}, {"workbuddy_ui_reference"})
+        self.assertFalse(plan["capabilities"]["workbuddy"]["remote_delete"])
+        evidence = [action["impact"]["external_action_payload"]["workbuddy_session_evidence"] for action in plan["actions"]]
+        original_sha = evidence[0]["database_sha256"]
+        self.assertEqual(original_sha, evidence[0]["after_database_sha256"])
+        statements = []
+        original_connect = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            db = original_connect(*args, **kwargs)
+            db.set_trace_callback(statements.append)
+            return db
+
+        with patch.object(store.sqlite3, "connect", side_effect=connect):
+            result = store.execute(evidence, client_inspector=lambda _: ())
+        self.assertEqual(result.deleted_session_ids, ())
+        self.assertFalse(any(statement.lstrip().upper().startswith("DELETE") for statement in statements))
+        self.assertEqual(result.removed_ui_only_ids, (ORPHAN, ORPHAN_TWO))
+        self.assertEqual(result.deleted_session_count, 0)
+        self.assertEqual(result.deleted_usage_count, 0)
+        self.assertEqual(result.deleted_artifact_count, 0)
+        self.assertEqual(result.removed_ui_reference_count, 6)
+        self.assertEqual(store.snapshot(self.root)["database_snapshot"]["database_sha256"], original_sha)
+        self.assertEqual(self.ids(), [SID, OTHER])
+        for source, expected in before.items():
+            self.assertEqual(json.loads(Path(source).read_text())["pinned"], expected)
+        self.assertEqual(store.remaining(evidence), [])
+        self.assertFalse(list(self.root.glob(".larj-workbuddy-sessions-*")))
+
+    def test_mixed_session_and_ui_selection_is_blocked(self):
+        self.add_pinned_only()
+        plan = self.plan(record_ids=(SID, ORPHAN))
+        self.assertEqual(plan["goal_status"], "blocked", plan)
+        self.assertEqual(plan["actions"], [])
+        self.assertIn("workbuddy_mixed_mutation_families", [blocker["blocker_code"] for blocker in plan["blockers"]])
+
+    def test_pinned_only_cross_user_environment_and_sidebar_are_blocked(self):
+        self.add_pinned_only()
+        self.add_pinned_only(user=ORPHAN_TWO, legacy=False)
+        target = store.snapshot(self.root)["records"][ORPHAN]
+        self.assertIn("workbuddy_ui_reference_scope_unproven", target["blocker_codes"])
+        for path in (self.root / "storage" / f"user-{ORPHAN_TWO}-personal/global").iterdir():
+            path.unlink()
+        self.add_pinned_only(environment="another-environment", legacy=False)
+        self.assertIn("workbuddy_ui_reference_scope_unproven", store.snapshot(self.root)["records"][ORPHAN]["blocker_codes"])
+        path = self.root / "storage" / f"user-{USER}-another-environment/global/conversations.json"
+        path.unlink()
+        sidebar = self.root / USER / "sidebar-list-snapshot.json"
+        value = json.loads(sidebar.read_text()); value["items"].append({"id": ORPHAN, "transport": "cloud"})
+        sidebar.write_text(json.dumps(value))
+        plan = self.plan(record_ids=(ORPHAN,))
+        self.assertEqual(plan["goal_status"], "blocked", plan)
+
+    def test_new_native_row_or_artifact_blocks_frozen_ui_plan(self):
+        self.add_pinned_only()
+        path = self.base / "ui-old.json"
+        self.plan(path=path, record_ids=(ORPHAN,))
+        artifact = self.root / "projects/d-Users-fangjun-Documents-project" / (ORPHAN + ".jsonl")
+        artifact.write_text(SECRET)
+        result = self.coordinator().apply_operation(plan_path=path, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "blocked", result)
+        artifact.unlink()
+        with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
+            db.execute("INSERT INTO sessions(id,cwd,user_id,status,created_at,updated_at,transport) VALUES (?,'D:/work/project',?,'completed',1,2,'local')", (ORPHAN, USER)); db.commit()
+        result = self.coordinator().apply_operation(plan_path=path, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "blocked", result)
+        self.assertIn(ORPHAN, self.ids())
+
+    def test_ui_unknown_blocks_other_session_and_recovers_readonly(self):
+        self.add_pinned_only()
+        path = self.base / "ui-unknown.json"
+        self.plan(path=path, record_ids=(ORPHAN,))
+        with patch.object(store, "remaining", side_effect=RuntimeError("verification interrupted")):
+            result = self.coordinator().apply_operation(plan_path=path, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "unknown", result)
+        sibling = self.base / "native-sibling.json"
+        self.plan(path=sibling, record_ids=(SID,))
+        result = self.coordinator().apply_operation(plan_path=sibling, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "blocked", result)
+        with patch.object(store, "execute", side_effect=AssertionError("must not resend")):
+            recovered = self.coordinator().verify_operation(plan_path=path, adapters=(self.adapter(),))
+        self.assertEqual(recovered["goal_status"], "complete", recovered)
+        self.assertTrue(recovered["modified"])
+        self.assertEqual(self.ids(), [SID, OTHER])
+        result = self.coordinator().apply_operation(plan_path=sibling, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "complete", result)
+        verified = self.coordinator().verify_operation(plan_path=path, adapters=(self.adapter(),))
+        self.assertEqual(verified["goal_status"], "complete", verified)
+
+    def test_ui_unknown_before_first_write_does_not_claim_modified(self):
+        self.add_pinned_only()
+        path = self.base / "ui-before.json"
+        self.plan(path=path, record_ids=(ORPHAN,))
+        with patch.object(store, "_atomic_bytes", side_effect=OSError("first cache write denied")):
+            result = self.coordinator().apply_operation(plan_path=path, clients_closed=True, adapters=(self.adapter(),))
+        self.assertEqual(result["goal_status"], "unknown", result)
+        self.assertFalse(result["modified"])
+        with patch.object(store, "execute", side_effect=AssertionError("must not resend")):
+            recovered = self.coordinator().verify_operation(plan_path=path, adapters=(self.adapter(),))
+        self.assertEqual(recovered["goal_status"], "completed_with_residuals", recovered)
+        self.assertFalse(recovered["modified"])
+        self.assertIn(ORPHAN, store.snapshot(self.root)["records"])
+        self.assertEqual(self.ids(), [SID, OTHER])
+
+    def test_ui_partial_shared_json_write_remains_unknown(self):
+        self.add_pinned_only()
+        evidence = store.freeze(self.root, (ORPHAN,))
+        original = store._atomic_bytes
+        calls = 0
+
+        def write(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("second cache write failed")
+            return original(path, data)
+
+        with patch.object(store, "_atomic_bytes", side_effect=write):
+            with self.assertRaises(WorkBuddyStoreError) as caught:
+                store.execute(evidence, client_inspector=lambda _: ())
+        self.assertTrue(caught.exception.outcome_unknown)
+        with self.assertRaises(WorkBuddyStoreError):
+            store.remaining(evidence)
+        self.assertEqual(self.ids(), [SID, OTHER])
+        self.assertTrue(store.recovery_directory(evidence).exists())
+
+    def test_ui_new_dependency_sync_and_frozen_path_tamper_fail_closed(self):
+        self.add_pinned_only()
+        evidence = store.freeze(self.root, (ORPHAN,))
+        with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
+            db.execute("INSERT INTO automation_runtime_state(automation_id,running_conversation_id) VALUES ('keep-automation',?)", (ORPHAN,)); db.commit()
+        with self.assertRaisesRegex(WorkBuddyStoreError, "frozen_state_changed"):
+            store.execute(evidence, client_inspector=lambda _: ())
+        with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
+            db.execute("DELETE FROM automation_runtime_state"); db.commit()
+        evidence = store.freeze(self.root, (ORPHAN,))
+        evidence[0]["ui_scope"]["user_id"] = ORPHAN_TWO
+        with self.assertRaisesRegex(WorkBuddyStoreError, "frozen_ui_identity_invalid"):
+            store.execute(evidence, client_inspector=lambda _: ())
 
     def test_missing_store_unknown_schema_and_trigger_fail_closed(self):
         missing = self.adapter(self.base / "missing")
@@ -594,6 +784,62 @@ class WorkBuddyTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["count"], 2)
         self.assertNotIn(SECRET, stdout.getvalue())
+
+    def test_cli_native_plan_without_usage_survives_fresh_apply_and_verify(self):
+        from local_agent_record_janitor.cli import main
+        with closing(sqlite3.connect(self.root / "workbuddy.db")) as db:
+            db.execute("DELETE FROM session_usage WHERE session_id=?", (SID,)); db.commit()
+        path = self.base / "cli-native-no-usage.json"
+        output = io.StringIO()
+        code = main(["delete", "plan", "--client", "workbuddy", "--workbuddy-root", str(self.root),
+            "--record-id", SID, "--out", str(path), "--json"], stdout=output, stderr=io.StringIO(),
+            client_inspector=lambda _: ())
+        self.assertEqual(code, 0, output.getvalue())
+        document = json.loads(path.read_text(encoding="utf-8"))
+        evidence = document["actions"][0]["impact"]["external_action_payload"]["workbuddy_session_evidence"]
+        self.assertIn("usage", evidence)
+        self.assertIsNone(evidence["usage"])
+        self.assertIsNone(evidence["row"]["conversation_origin"])
+        self.assertTrue(all(value is None for value in evidence["database_sidecars"].values()))
+        result = self.coordinator().apply_operation(plan_path=path, clients_closed=True)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertTrue(result["modified"])
+        verified = self.coordinator().verify_operation(plan_path=path)
+        self.assertEqual(verified["goal_status"], "complete", verified)
+        self.assertEqual(self.ids(), [OTHER])
+
+    def test_cli_ui_only_plan_survives_fresh_apply_and_verify(self):
+        from local_agent_record_janitor.cli import main
+        self.add_pinned_only((ORPHAN, ORPHAN_TWO))
+        path = self.base / "cli-ui-only.json"
+        output = io.StringIO()
+        code = main(["delete", "plan", "--client", "workbuddy", "--workbuddy-root", str(self.root),
+            "--record-id", ORPHAN, "--record-id", ORPHAN_TWO, "--out", str(path), "--json"],
+            stdout=output, stderr=io.StringIO(), client_inspector=lambda _: ())
+        self.assertEqual(code, 0, output.getvalue())
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for action in document["actions"]:
+            evidence = action["impact"]["external_action_payload"]["workbuddy_session_evidence"]
+            self.assertIn("row", evidence)
+            self.assertIsNone(evidence["row"])
+            self.assertIsNone(evidence["usage"])
+        result = self.coordinator().apply_operation(plan_path=path, clients_closed=True)
+        self.assertEqual(result["goal_status"], "complete", result)
+        self.assertTrue(result["modified"])
+        verified = self.coordinator().verify_operation(plan_path=path)
+        self.assertEqual(verified["goal_status"], "complete", verified)
+        self.assertEqual(self.ids(), [SID, OTHER])
+        self.assertNotIn(ORPHAN, store.snapshot(self.root)["records"])
+        self.assertNotIn(ORPHAN_TWO, store.snapshot(self.root)["records"])
+
+    def test_only_workbuddy_evidence_preserves_nulls_and_still_filters_body_keys(self):
+        payload = {"ordinary": {"nullable": None}, "workbuddy_session_evidence": {
+            "row": None, "usage": None, "nested": [{"nullable": None, "prompt": SECRET, "body": None}]}}
+        cleaned = OperationCoordinator._metadata(payload)
+        self.assertEqual(cleaned["ordinary"], {})
+        self.assertEqual(cleaned["workbuddy_session_evidence"], {
+            "row": None, "usage": None, "nested": [{"nullable": None}]})
+        self.assertNotIn(SECRET, json.dumps(cleaned))
 
 
 class WorkBuddyRuntimeTests(unittest.TestCase):

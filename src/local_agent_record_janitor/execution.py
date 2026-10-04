@@ -123,7 +123,7 @@ class ExecutionOutcome:
     @property
     def modified(self) -> bool:
         if self.workbuddy_cleanup is not None:
-            return bool(self.workbuddy_cleanup.deleted_ids)
+            return bool(self.workbuddy_cleanup.deleted_session_ids or self.workbuddy_cleanup.removed_ui_only_ids)
         if self.schedule_cleanup is not None:
             return bool(self.schedule_cleanup.deleted_ids)
         if self.native_project_cleanup is not None:
@@ -156,7 +156,7 @@ class ExecutionOutcome:
         """Return mutation evidence without observations or chat bodies."""
 
         if self.workbuddy_cleanup is not None:
-            return {"command": "delete", "mutation_kind": "delete_workbuddy_session",
+            return {"command": "delete", "mutation_kind": self.mutation_kind,
                     "selected_action_ids": [str(a.action_id) for a in self.selected_actions],
                     "result": self.workbuddy_cleanup.to_dict(), "plan_fingerprint": str(self.plan.plan_fingerprint)}
 
@@ -734,7 +734,7 @@ def _execute_prevalidated_actions_locked(
             frontend_session_cleanup=result,
         )
 
-    if mutation_kind == "delete_workbuddy_session":
+    if mutation_kind in {"delete_workbuddy_session", "remove_workbuddy_ui_reference"}:
         from .workbuddy_store import execute as execute_workbuddy_cleanup
         evidence = tuple(action.impact.external_action_payload["workbuddy_session_evidence"] for action in actions)
 

@@ -23,6 +23,11 @@ class ActionCapability:
 
 
 ACTION_REGISTRY: Mapping[str, ActionCapability] = {
+    "remove_workbuddy_ui_reference": ActionCapability(
+        kind="remove_workbuddy_ui_reference", implemented=True,
+        mutation_family="remove_workbuddy_ui_reference", requires_clients_closed=True,
+        verifies_by="frozen_local_pinned_ids_absent_without_native_record_mutation",
+    ),
     "delete_workbuddy_session": ActionCapability(
         kind="delete_workbuddy_session", implemented=True,
         mutation_family="delete_workbuddy_session", requires_clients_closed=True,
@@ -149,7 +154,7 @@ def capability_field_for_action(kind: object) -> str | None:
                   "repair_legacy_index", "remove_desktop_state", "remove_broken_relation",
                   "delete_workbuddy_session"}:
         return "native_delete"
-    if family == "remove_frontend_reference":
+    if family in {"remove_frontend_reference", "remove_workbuddy_ui_reference"}:
         return "frontend_reference_delete"
     if family in {"delete_frontend_session", "delete_schedule_run"}:
         return "frontend_session_delete"
