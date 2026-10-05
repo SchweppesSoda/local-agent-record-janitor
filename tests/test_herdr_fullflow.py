@@ -88,6 +88,32 @@ class HerdrFullflowTests(unittest.TestCase):
         with self.assertRaisesRegex(herdr_cleanup.codec.HerdrCleanupError, "native_action_owner_unproven"):
             herdr_cleanup.validate(evidence)
 
+    def test_deleted_pi_path_retains_approved_short_alias(self):
+        import ctypes
+        from local_agent_record_janitor.pi_sessions import _normalized_path
+        from local_agent_record_janitor.record_identity import canonical_path
+        directory = self.base / "Long Pi Directory With An Approved Alias"
+        directory.mkdir()
+        transcript = directory / "selected.jsonl"
+        transcript.write_text("synthetic alias identity", encoding="utf-8")
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = ctypes.windll.kernel32.GetShortPathNameW(str(directory.resolve(strict=True)), buffer, len(buffer))
+        if not size or size >= len(buffer):
+            self.skipTest("Temporary volume does not expose a Windows short-path alias")
+        alias = Path(buffer.value) / transcript.name
+        canonical = canonical_path(transcript)
+        writer_path = _normalized_path(alias)
+        if writer_path == _normalized_path(Path(canonical)):
+            self.skipTest("Temporary volume does not expose a distinct Windows short-path alias")
+        self.assertTrue(os.path.samefile(alias, transcript))
+        reference = {"native_record": {"path": str(alias).upper(), "canonical_path": canonical}}
+        self.assertTrue(herdr_cleanup.pi_reference_matches_action(reference, writer_path))
+        transcript.unlink()
+        self.assertTrue(herdr_cleanup.pi_reference_matches_action(reference, writer_path))
+        self.assertTrue(herdr_cleanup.pi_reference_matches_action(reference, _normalized_path(Path(canonical))))
+        self.assertFalse(herdr_cleanup.pi_reference_matches_action(reference, _normalized_path(directory / "other.jsonl")))
+        self.assertFalse(herdr_cleanup.pi_reference_matches_action(reference, _normalized_path(self.base / transcript.name)))
+
     def test_same_process_retains_other_clients_shared_native_guards(self):
         import sqlite3
         from contextlib import closing

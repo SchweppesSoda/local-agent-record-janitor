@@ -43,10 +43,11 @@ def pi_reference_matches_action(reference, path):
         Path(native["path"]).lstat()
     except FileNotFoundError:
         # Pi freezes its writer path with normcase. Once removed, Windows
-        # cannot recover physical casing from either alias; use the frozen
-        # physical identity in precisely that writer encoding.
+        # cannot recover casing or 8.3 aliases. Both the raw reference and
+        # its proven physical identity were frozen while present; accept
+        # only those exact spellings in the writer's encoding.
         from .pi_sessions import _normalized_path
-        return _normalized_path(Path(native["canonical_path"])) == path
+        return path in {_normalized_path(Path(native[key])) for key in ("path", "canonical_path")}
     return canonical_path(native["path"]) == canonical_path(path)
 
 
