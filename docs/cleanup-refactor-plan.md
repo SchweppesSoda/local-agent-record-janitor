@@ -230,13 +230,14 @@ profile 发现与公共 CLI 接线，见 [Herdr 接入边界](adapters.md#herdr�
 查询 protocol22 ping/session.snapshot，保留独立 live 引用与 session 级观察值差异；
 deadline、响应预算、父链/endpoint 身份变化、版本变化和 partial coverage 均保守处理。
 普通盘点不连接，运行投影消费同次缓存，不按公共 pane ID 推断持久化 pane。
-全部写入及自身 verify 关闭。Pong 保留服务自报的 detached daemon 启动状态，ping
+该默认未绑定入口的全部写入及自身 verify 关闭。Pong 保留服务自报的 detached daemon 启动状态，ping
 成功而 snapshot 失败时保留 server_active；附着客户端数量、全部 agent/后台 writer
 归属及原子实例一致仍未知。请求范围内的 metadata 清单与 writer 证明分别报告，
 完整读取支持的持久化/显式 live 来源可完成 records，写入限制仍保留且无法生成动作。
 只读实现已覆盖原 P4 的负例，并通过 P6 的实际平台 CI：Windows 使用合成临时
 named pipe，macOS/Linux 使用合成临时 Unix socket。产品实机与全部 writer 归属
-验收仍未完成，这些测试不开放 Herdr 删除能力。
+验收不属于该只读切片，这些测试本身不开放 Herdr 删除能力。后续已交付的
+[Windows 显式绑定完整清理](adapters.md#herdrwindows-显式绑定的完整清理)使用独立的写入资格与验收。
 
 **依赖：**P1、P2；研究可与 P3 并行，代码按单写者顺序提交。
 **改动范围：**新增 Herdr adapter/引用提取器、运行归属探测和临时样本测试。
@@ -257,9 +258,10 @@ live/persisted 冲突和远端 host。错误保留在清单，native/frontend �
 
 ### P5：逐组合开放精确删除
 
-**当前状态：**首个 Orca/Codex/Windows 精确 native-only 组合已通过固定真实 binary 的
-公共 v3 plan/cold apply/cold verify TEMP 验收。品牌静态 capability 仍关闭，逐目标票据
-只开放该组合；Herdr、其他引擎/home/runtime/OS 和 frontend/remote 写入继续关闭。
+**首个切片的历史状态：**Orca/Codex/Windows 精确 native-only 组合通过固定真实 binary 的
+公共 v3 plan/cold apply/cold verify TEMP 验收。当时品牌静态 capability 关闭，逐目标票据
+只开放该组合；Herdr、其他引擎/home/runtime/OS 和 frontend/remote 写入尚未开放。
+后续完整清理的当前范围见本文开头及 [Adapter 贡献指南](adapters.md)。
 
 **配置兼容切片：**target evidence/runtime policy v2 使用重新固定 SHA 的官方
 Windows binary，以完整隔离环境、ephemeral auth 和配置白名单运行。合成配置、
@@ -325,10 +327,11 @@ backfill、未知 schema、bridge、runtime home 及其他组合继续阻挡，�
 [close predicate](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/runtime/structured-agent-session-close.ts)、
 [bridge/storage](https://github.com/stablyai/orca/blob/efbf651c7bb2eec778daf1844f8228e70809ec9f/src/main/codex/codex-account-session-bridge.ts)。
 
-Herdr 的 Codex/Claude ID 缺 native root；Pi path 也缺配置/sessionRoot 关联、独立后台
+默认未绑定的 Herdr reader 中，Codex/Claude ID 缺 native root；Pi path 也缺配置/sessionRoot 关联、独立后台
 writer 停止与恢复 argv 的完整覆盖。在线 metadata 只能补充观察，不能由 cwd、dirname、
-同 ID 默认 root、pane close 或 detach 开放删除。后续逐项补齐真实消费者需要的契约
-与隔离验收，在对应门槛通过前全部新 writer 继续关闭。
+同 ID 默认 root、pane close 或 detach 开放删除。已交付的
+[Windows 显式绑定完整清理](adapters.md#herdrwindows-显式绑定的完整清理)另行冻结原生根、
+运行文件与恢复副本；其他新组合仍须逐项补齐契约与隔离验收后才能开放。
 
 **依赖：**相应 adapter 的 P3 或 P4 完成。Orca、Herdr 分别推进，一个组合未达标不
 阻止另一组合保持只读或交付。不得按产品名一次打开所有引擎和所有 schema。
@@ -357,11 +360,11 @@ writer 已停时，对应 native 删除继续阻止。删除前端引用与删�
 
 ### P6：发布收口
 
-**当前状态：**限定交付范围已完成。Windows/macOS/Linux × Python 3.10/3.12 的
+**原阶段的验收状态：**当时限定的交付范围已完成。Windows/macOS/Linux × Python 3.10/3.12 的
 [实际六组 CI](https://github.com/SchweppesSoda/local-agent-record-janitor/actions/runs/37208590014)
 全部通过；已修正 macOS 大小写目录别名重复发现及临时目录物理路径差异。
 构建的 wheel 已在 Windows 独立 Python 3.10/3.12 环境安装，命令入口与运行期 JSON
-资源可用。当前功能、只读限制与 CLI 文档已同步；这些结果来自合成临时存储，
+资源可用。当时的功能、只读限制与 CLI 文档已同步；这些结果来自合成临时存储，
 不代替新增客户端的产品实机验收或未开放组合的写入证明。
 
 沿用 Windows/macOS/Linux × Python 3.10/3.12 的既有 CI 矩阵。链接、文件身份和
