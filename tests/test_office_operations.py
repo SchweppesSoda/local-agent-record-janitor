@@ -28,7 +28,8 @@ class OfficeOperationTests(unittest.TestCase):
         self.client = "qwenwork"
         (self.profile / "data").mkdir(parents=True)
         with closing(sqlite3.connect(self.profile / "data/agents.db")) as db:
-            db.executescript((Path(__file__).parent / "fixtures/qwenwork_cn_schema.sql").read_text(encoding="utf-8"))
+            schema = (Path(__file__).parent / "fixtures/qwenwork_cn_schema.sql").read_text(encoding="utf-8")
+            db.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
             db.execute("INSERT INTO projects(id,name,path) VALUES ('project',?,?)", (SECRET, str(self.base / "documents")))
             for name, sdk in (("selected", SID), ("other", OTHER)):
                 db.execute("INSERT INTO chats(id,project_id,name) VALUES (?,'project',?)", (name, SECRET))
@@ -117,7 +118,8 @@ class OfficeOperationTests(unittest.TestCase):
         profile = self.base / "custom-peer"
         (profile / "data").mkdir(parents=True)
         with closing(sqlite3.connect(profile / "data/agents.db")) as db:
-            db.executescript((Path(__file__).parent / "fixtures/qwenwork_cn_schema.sql").read_text(encoding="utf-8"))
+            schema = (Path(__file__).parent / "fixtures/qwenwork_cn_schema.sql").read_text(encoding="utf-8")
+            db.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
             db.execute("INSERT INTO projects(id,name,path) VALUES ('project','project',?)", (str(self.base / "documents"),))
             db.execute("INSERT INTO chats(id,project_id,name) VALUES ('peer','project',?)", (SECRET,))
             db.execute("INSERT INTO sub_chats(id,chat_id,session_id) VALUES (?,'peer',?)", (child_id, sdk_id))

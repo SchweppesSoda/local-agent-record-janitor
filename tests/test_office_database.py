@@ -24,7 +24,8 @@ class OfficeDatabaseTests(unittest.TestCase):
         path = root / office.RELATIVE
         path.parent.mkdir(parents=True)
         with closing(sqlite3.connect(path)) as db:
-            db.executescript((Path(__file__).parent / "fixtures" / (client + "_cn_schema.sql")).read_text(encoding="utf-8"))
+            schema = (Path(__file__).parent / "fixtures" / (client + "_cn_schema.sql")).read_text(encoding="utf-8")
+            db.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
             db.execute("PRAGMA foreign_keys=ON")
             db.execute("INSERT INTO projects(id,name,path) VALUES ('project',?,?)", (PRIVATE, str(self.root / "documents")))
             for suffix, sdk in (("selected", SELECTED), ("other", OTHER)):

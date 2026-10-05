@@ -38,7 +38,8 @@ class OfficeStoreTests(unittest.TestCase):
         database.parent.mkdir(parents=True)
         schema = (Path(__file__).parent / "fixtures" / (client + "_cn_schema.sql")).read_text(encoding="utf-8")
         with closing(sqlite3.connect(database)) as connection:
-            connection.executescript(schema)
+            # Publish the synthetic schema in one durable transaction.
+            connection.executescript("BEGIN;\n" + schema + "\nCOMMIT;")
             if not empty:
                 connection.execute("INSERT INTO projects(id,name,path) VALUES (?,?,?)", ("project-1", PRIVATE, str(self.root / "documents")))
                 connection.execute("INSERT INTO chats(id,name,project_id,deleted_at) VALUES (?,?,?,?)", ("chat-1", PRIVATE, "project-1", 123))

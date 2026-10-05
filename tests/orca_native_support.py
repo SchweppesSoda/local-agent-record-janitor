@@ -10,6 +10,9 @@ def create_native_schema(home):
     fixture = json.loads((Path(__file__).parent / "fixtures" / "orca_codex_0160_schema.json").read_text())
     for name, value in fixture.items():
         with closing(sqlite3.connect(home / name)) as connection:
+            # Fixture initialization has no observers. Batch its DDL while
+            # retaining SQLite's normal durable commit for the finished store.
+            connection.execute("BEGIN")
             rows = value["sqlite_master"]
             for kind in ("table", "index", "view", "trigger"):
                 for row in rows:
