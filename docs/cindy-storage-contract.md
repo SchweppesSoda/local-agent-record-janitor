@@ -50,6 +50,22 @@ is also matched by its complete definition. It only runs on `UPDATE OF rewind_at
 which neither content-reference cleanup nor session deletion performs. Its
 presence does not require activating vector cleanup during reference updates.
 
+Whole-session deletion also supports migration `0122_auto_review_projections`
+as shipped in Cindy 0.1.99. Its installed SQL and script excerpts, with source
+hashes, are pinned in `tests/fixtures/cindy/auto_review_0122.sql`. All four
+auto-review triggers and the complete projection-table definition must match;
+additional triggers on that table remain blocked. Message deletion invalidates
+only projections whose session or lead is selected, and both foreign keys cascade
+when those sessions are deleted. The plan fingerprints the affected cache rows,
+checks them again before writing, and verifies both reference columns are empty
+after deletion. Unrelated projections remain unchanged. Reference-only cleanup
+does not yet enable this trigger generation.
+
+On Windows, session cleanup discovers Cindy's bundled SQLite vector extension
+under the per-user installation or the standard Program Files installation roots.
+An explicit extension path takes precedence; missing or non-file candidates do
+not bypass the schema checks.
+
 Trigger names alone are insufficient: complete normalized SQL fingerprints must
 match one supported generation. Unknown triggers, altered index layouts, or
 triggers on the index dependencies block deletion. Reference plans run a set

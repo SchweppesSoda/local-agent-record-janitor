@@ -69,7 +69,33 @@ FTS_TRIGGER_VERSIONS: dict[str, dict[str, str]] = {
 # UPDATE OF rewind_at never runs for our content-only updates or row deletions.
 REWIND_TRIGGER_SHA256 = 'f2617cdd0ca50f439fad777b1ad7153ddb25fb943bb52e4811b65a86121892e9'
 
-def guard_cindy_triggers(db: sqlite3.Connection, table: str) -> str | None:
+# Installed Cindy 0.1.99 migration 0122; complete SQL is pinned in the fixture.
+AUTO_REVIEW_TRIGGER_SHA256 = {
+    "auto_review_message_insert": "28e33736275dca1f31bfa9e4a3c167979b2070e54b33d6c9586d86fa8f6ae98c",
+    "auto_review_message_delete": "57dd41b4d0f44f2fd68382fba1457303a82ecd956e946ac2dd5ec2499701aa50",
+    "auto_review_message_update": "cd436aec73a1d08d51ca3cd9b4e108d5700095a06efa7732aaf73cc3588cc13b",
+    "auto_review_session_clear": "24fb4c5d51ab1374511d31c99b542a0c233aeab364a3c29360de58cfaba9c70b",
+}
+AUTO_REVIEW_TABLE_SHA256 = "57fc8a833910207f67628a01451642d670ab191c8d35b5a3a3c18d0eb047da02"
+
+
+def _guard_auto_review(db: sqlite3.Connection) -> None:
+    row = db.execute("SELECT sql FROM sqlite_schema WHERE type='table' AND name='auto_review_projections'").fetchone()
+    if row is None or sql_fingerprint(str(row[0])) != AUTO_REVIEW_TABLE_SHA256:
+        raise CindySchemaError("Unsupported Cindy auto-review projection layout")
+    observed = {
+        str(row[0]): sql_fingerprint(str(row[1] or ""))
+        for row in db.execute("SELECT name, sql FROM sqlite_schema WHERE type='trigger'")
+        if str(row[0]) in AUTO_REVIEW_TRIGGER_SHA256
+    }
+    if observed != AUTO_REVIEW_TRIGGER_SHA256:
+        raise CindySchemaError("Unsupported Cindy auto-review trigger definitions")
+    guard_cindy_triggers(db, "auto_review_projections")
+
+
+def guard_cindy_triggers(
+    db: sqlite3.Connection, table: str, *, session_delete: bool = False,
+) -> str | None:
     rows = db.execute(
         "SELECT name, sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?",
         (table,),
@@ -77,6 +103,11 @@ def guard_cindy_triggers(db: sqlite3.Connection, table: str) -> str | None:
     if not rows:
         return None
     observed = {str(row[0]): sql_fingerprint(str(row[1] or "")) for row in rows}
+    if session_delete and observed.keys() & AUTO_REVIEW_TRIGGER_SHA256.keys():
+        _guard_auto_review(db)
+        observed = {name: value for name, value in observed.items() if name not in AUTO_REVIEW_TRIGGER_SHA256}
+        if not observed:
+            return "0122"
     if table == "messages" and "trg_chat_rewind_clean_vec" in observed:
         if observed.pop("trg_chat_rewind_clean_vec") != REWIND_TRIGGER_SHA256:
             raise CindySchemaError("Unsupported Cindy rewind trigger definition")
@@ -116,7 +147,9 @@ def guard_cindy_triggers(db: sqlite3.Connection, table: str) -> str | None:
 
 def guard_cindy_session_schema(db: sqlite3.Connection) -> None:
     """Check every explicitly modified table before a hard-delete plan is ready."""
+    if db.execute("SELECT 1 FROM sqlite_schema WHERE name='auto_review_projections'").fetchone():
+        _guard_auto_review(db)
     for table in ("sessions", "messages", "messages_fts", "messages_fts_rows",
                   "embedding_jobs", "chat_messages_vec_v1", "media_refs",
                   "skill_usage_sources", "skill_usage_exposures", "ghost_cards"):
-        guard_cindy_triggers(db, table)
+        guard_cindy_triggers(db, table, session_delete=True)

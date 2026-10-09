@@ -64,6 +64,7 @@ class CindySessionDeleteEvidence:
     expected_skill_source_count: int = 0
     expected_skill_exposure_count: int = 0
     expected_ghost_card_count: int = 0
+    auto_review_row_fingerprint: str = ""
     table: str = "sessions"
     explicit_unbound_active: bool = False
     explicitly_selected: bool = False
@@ -132,6 +133,7 @@ class CindySessionDeleteEvidence:
             "expected_skill_source_count": self.expected_skill_source_count,
             "expected_skill_exposure_count": self.expected_skill_exposure_count,
             "expected_ghost_card_count": self.expected_ghost_card_count,
+            "auto_review_row_fingerprint": self.auto_review_row_fingerprint,
             "exact": True,
         }
 
@@ -565,6 +567,18 @@ def _snapshot(
         required_tables=("chat_messages_vec_v1", "embedding_jobs"),
     )
     result: list[CindySessionDeleteEvidence] = []
+    projection_hashes: dict[str, str] = {}
+    if _has(db, "auto_review_projections"):
+        projection_columns = tuple(str(item["name"]) for item in table_schema(db, "auto_review_projections"))
+        projection_rows = tuple(db.execute(
+            f"SELECT * FROM auto_review_projections WHERE session_id IN ({marks}) OR lead_id IN ({marks}) ORDER BY session_id, lead_id",
+            (*ids, *ids),
+        ))
+        for session_id in ids:
+            projection_hashes[session_id] = _ids_hash(tuple(
+                row_fingerprint(row, projection_columns) for row in projection_rows
+                if row["session_id"] == session_id or row["lead_id"] == session_id
+            ))
     stable_columns = tuple(
         column for column in columns if column != "sdk_session_id"
     )
@@ -609,6 +623,7 @@ def _snapshot(
                     session_id, 0
                 ),
                 expected_ghost_card_count=ghost_counts.get(session_id, 0),
+                auto_review_row_fingerprint=projection_hashes.get(session_id, ""),
             )
         )
     return tuple(sorted(result, key=lambda item: item.session_id))
@@ -703,6 +718,8 @@ def _verify_absent(
         ("messages_fts_rows", "message_id", messages, None),
         ("embedding_jobs", "source_id", messages, "message"),
         ("chat_messages_vec_v1", "rowid", vector_rows, None),
+        ("auto_review_projections", "session_id", ids, None),
+        ("auto_review_projections", "lead_id", ids, None),
     )
     for table, column, values, qualifier in checks:
         if not values or not _has(db, table):
@@ -787,6 +804,7 @@ def _normalize_evidence(
                 expected_skill_source_count=int(raw.get("expected_skill_source_count") or 0),
                 expected_skill_exposure_count=int(raw.get("expected_skill_exposure_count") or 0),
                 expected_ghost_card_count=int(raw.get("expected_ghost_card_count") or 0),
+                auto_review_row_fingerprint=str(raw.get("auto_review_row_fingerprint") or ""),
             )
         else:
             raise FrontendSessionGuardError("Invalid Cindy session evidence")

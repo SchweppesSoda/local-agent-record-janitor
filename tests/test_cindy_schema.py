@@ -16,6 +16,8 @@ from local_agent_record_janitor.frontend_session_cleanup import (
     FrontendSessionGuardError, build_cindy_session_delete_evidence,
     execute_cindy_session_cleanup,
 )
+from local_agent_record_janitor.cleanup_service import CleanupService
+from local_agent_record_janitor.operation_coordinator import OperationCoordinator
 from tests.support import create_cindy_database
 
 
@@ -23,6 +25,72 @@ FIXTURES = Path(__file__).parent / "fixtures" / "cindy"
 
 
 class CindySchemaTests(unittest.TestCase):
+    def auto_review_database(self, root):
+        database = self.database(root, "0100")
+        with closing(sqlite3.connect(database)) as db:
+            db.executescript("ALTER TABLE sessions ADD COLUMN cleared_at INTEGER; ALTER TABLE messages ADD COLUMN agent_meta TEXT; ALTER TABLE messages ADD COLUMN client_id TEXT;")
+            db.executescript((FIXTURES / "auto_review_0122.sql").read_text(encoding="utf-8"))
+            db.executemany("INSERT INTO auto_review_projections(session_id,lead_id,payload) VALUES (?,?,?)", [
+                ("target", "keep", '{"appendEvent":"PRIVATE_CACHE"}'),
+                ("keep", "target", '{"appendEvent":"PRIVATE_CACHE"}'),
+                ("keep", "keep", '{"appendEvent":"PRIVATE_KEEP_CACHE"}'),
+            ])
+            db.commit()
+        return database
+
+    def test_auto_review_session_operation_preserves_unrelated_projection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            database = self.auto_review_database(root)
+            adapter = CindyAdapter(database=database, codex_home=root / "codex-home", cindy_root=root)
+            coordinator = OperationCoordinator(CleanupService(client_inspector=lambda *_: ()))
+            plan = coordinator.plan_operation(client="cindy", record_ids=("target",), adapters=(adapter,), plan_path=root / "plan.json")
+            self.assertEqual(plan["goal_status"], "ready", plan)
+            self.assertNotIn("PRIVATE_CACHE", json.dumps(plan))
+            result = OperationCoordinator(CleanupService(client_inspector=lambda *_: ())).apply_operation(
+                operation_id=plan["operation_id"], plan_path=root / "plan.json", clients_closed=True, adapters=(adapter,))
+            self.assertEqual(result["goal_status"], "complete", result)
+            with closing(sqlite3.connect(database)) as db:
+                self.assertEqual(db.execute("SELECT session_id,lead_id,revision,payload FROM auto_review_projections").fetchall(),
+                                 [("keep", "keep", 0, '{"appendEvent":"PRIVATE_KEEP_CACHE"}')])
+                self.assertEqual(db.execute("SELECT id FROM sessions").fetchall(), [("keep",)])
+                self.assertEqual(db.execute("SELECT message_id FROM messages_fts").fetchall(), [("m-keep",)])
+            self.assertFalse(list(root.glob(".larj-*")))
+
+    def test_auto_review_projection_drift_invalidates_serialized_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            database = self.auto_review_database(root)
+            evidence = build_cindy_session_delete_evidence([{"database": str(database), "session_id": "target", "expected_status": "deleted"}])
+            serialized = json.loads(json.dumps([item.to_dict() for item in evidence]))
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("UPDATE auto_review_projections SET revision=revision+1 WHERE lead_id='target'")
+                db.commit()
+            before = database.read_bytes()
+            with self.assertRaises(FrontendSessionGuardError):
+                execute_cindy_session_cleanup(serialized)
+            self.assertEqual(before, database.read_bytes())
+
+    def test_auto_review_changed_triggers_and_projection_layout_fail_closed(self):
+        alterations = [
+            "DROP TRIGGER auto_review_message_delete; CREATE TRIGGER auto_review_message_delete AFTER DELETE ON messages BEGIN DELETE FROM sessions; END;",
+            "DROP TRIGGER auto_review_message_insert;",
+            "DROP TRIGGER auto_review_message_update;",
+            "DROP TRIGGER auto_review_session_clear;",
+            "ALTER TABLE auto_review_projections ADD COLUMN unexpected TEXT;",
+            "CREATE TRIGGER projection_side_effect AFTER DELETE ON auto_review_projections BEGIN DELETE FROM sessions; END;",
+        ]
+        for sql in alterations:
+            with self.subTest(sql=sql), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve(strict=True)
+                database = self.auto_review_database(root)
+                with closing(sqlite3.connect(database)) as db:
+                    db.executescript(sql)
+                before = database.read_bytes()
+                with self.assertRaises(FrontendSessionGuardError):
+                    build_cindy_session_delete_evidence([{"database": str(database), "session_id": "target", "expected_status": "deleted"}])
+                self.assertEqual(before, database.read_bytes())
+
     def database(self, root, version):
         database = root / "cindy.db"
         create_cindy_database(database, [
