@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from local_agent_record_janitor.frontend_session_cleanup import (
     FrontendSessionGuardError,
     build_cindy_session_delete_evidence,
     execute_cindy_session_cleanup,
+    _vector_extension,
 )
 from local_agent_record_janitor.adapters.cindy import CindyAdapter
 from local_agent_record_janitor.cleanup_service import CleanupService
@@ -17,6 +19,26 @@ from local_agent_record_janitor.operation_coordinator import OperationCoordinato
 
 
 class FrontendSessionCleanupTests(unittest.TestCase):
+    def test_vector_extension_machine_install_and_explicit_precedence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            dll = root / "Cindy/resources/app.asar.unpacked/native/sqlite-vec/win32-x64/vec0.dll"
+            dll.parent.mkdir(parents=True)
+            dll.write_bytes(b"test extension path")
+            explicit = root / "explicit.dll"
+            explicit.write_bytes(b"explicit extension path")
+            for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+                with self.subTest(variable=variable), patch.dict(
+                    "os.environ", {variable: str(root), "LOCALAPPDATA": str(root / "missing")}, clear=True
+                ):
+                    self.assertEqual(_vector_extension(None), dll)
+                    self.assertEqual(_vector_extension(explicit), explicit)
+            dll.unlink()
+            dll.mkdir()
+            with patch.dict("os.environ", {"ProgramFiles": str(root)}, clear=True):
+                with self.assertRaises(FrontendSessionGuardError):
+                    _vector_extension(None)
+
     def test_explicit_unbound_active_session_plan_apply_and_dependency_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve(strict=True)

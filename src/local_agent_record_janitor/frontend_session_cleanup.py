@@ -1003,6 +1003,12 @@ def _vector_extension(explicit: Path | None) -> Path:
             Path(os.environ["LOCALAPPDATA"])
             / "Programs/Cindy/resources/app.asar.unpacked/native/sqlite-vec/win32-x64/vec0.dll"
         )
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        if os.environ.get(variable):
+            candidates.append(
+                Path(os.environ[variable])
+                / "Cindy/resources/app.asar.unpacked/native/sqlite-vec/win32-x64/vec0.dll"
+            )
     for candidate in candidates:
         try:
             state = candidate.lstat()
